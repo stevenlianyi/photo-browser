@@ -1,0 +1,63 @@
+# ============================================================
+# photo-browser 版本库忽略规则
+# 目的：仅纳入源码与正式文档，排除本地环境覆盖、编译缓存与运行时生成物
+# ============================================================
+
+# ---- 本地环境覆盖（Vite 约定：.local 不纳入版本库）----
+.env*.local
+
+# ---- 本机路径配置（含 photoRoot，绝不入库）----
+code/src/config/local_settings.py
+code/src/config/local_settings.*.py
+
+# ---- Python 编译缓存 / 虚拟环境 ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 前端 / Node ----
+node_modules/
+dist/
+dist-ssr/
+coverage/
+*.local
+
+# ---- 日志与运行时生成物 ----
+# 应用日志落在 code/log/（见 common/miscCommon._DEF_LOG_DIR），不入库
+code/log/
+*.log
+logs/
+
+# ---- 数据目录 ----
+# 说明：照片库根目录由 code/src/config/local_settings.py 的 PHOTO_ROOT 配置
+#      （默认 d:\PhotoLib），库文件（*.sqlite / *.db）与缩略图都在库目录内，
+#      不在仓库中，因此无需按扩展名忽略；此处仅兜底防止误提交。
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+
+# ---- 缩略图生成过程残留（正常流程会自动清理，此处兜底）----
+*.tmp
+
+# ---- Excel / 导入导出临时文件 ----
+~$*
+*.xlsx.tmp
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

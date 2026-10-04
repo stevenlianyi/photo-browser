@@ -1,0 +1,75 @@
+# ============================================================
+# photo-browser 后端依赖
+#
+# 安装（venv 建在仓库内，不放照片库）：
+#   C:\Users\NINGMEI\.workbuddy\binaries\python\versions\3.13.12\python.exe -m venv code\.venv
+#   code\.venv\Scripts\pip install -i https://pypi.org/simple -r requirements.txt
+#
+# ⚠️ pip 必须用官方源 https://pypi.org/simple
+#    （清华镜像在本机失效，返回 no versions）
+# ============================================================
+
+# ---- Web 框架 ----
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-multipart
+
+# ---- 图像处理 ----
+# Pillow：EXIF 方向纠正 + WebP 缩略图生成 + 人脸裁剪图
+pillow
+# opencv-python-headless：insightface 依赖（-headless 避免 GUI 依赖）
+opencv-python-headless
+numpy
+
+# ---- 人脸检测 / 识别 ----
+# 模型：buffalo_l（首次运行自动下载约 300MB 到 ~/.insightface/models/）
+insightface>=0.7.3
+# ⚠️ 必须 CPU 版，禁止 onnxruntime-gpu
+onnxruntime>=1.17.0
+
+# ---- 联系人导入 ----
+# vCard 3.0 / 4.0 解析（KIND:group → 家庭组）
+vobject
+
+# ---- 可选依赖（缺失时自动降级，不影响启动）----
+# 离线逆地理：GPS → 地点名。缺失时 placeName 留空并记录 warning
+reverse_geocoder
+
+# ---- 测试 ----
+pytest
+pytest-cov
+
+# ============================================================
+# ⚠️ 安装后必做：清掉 opencv-python，只留 headless
+#   原因：insightface 的依赖里写死了 opencv-python（带 GUI 的完整版），
+#         装它会把 opencv-python 一起拉进来，与上面显式声明的
+#         opencv-python-headless 共用同一个 cv2/ 目录 —— 两者同装是
+#         opencv 官方明确不推荐的组合，会出现 DLL 冲突 / 随机关闭 GUI 依赖。
+#         本项目只绑 127.0.0.1 的本地服务、不开窗口，完整版没有任何用处。
+#
+#   验证（应只剩 headless，且 import cv2 正常）：
+#     code\.venv\Scripts\pip list | findstr opencv
+#     code\.venv\Scripts\python -c "import cv2, insightface; print(cv2.__version__)"
+#
+#   注意顺序：两个 opencv 包先一起卸掉再重装 headless。
+#   直接只卸 opencv-python 会连带删掉 headless 也要用的 cv2/*.dll，导致 import cv2 失败。
+#     code\.venv\Scripts\pip uninstall -y opencv-python opencv-python-headless
+#     code\.venv\Scripts\pip install -i https://pypi.org/simple opencv-python-headless
+#
+#   本机已于 2026-10-04 执行完毕并验证通过（仅 opencv-python-headless 5.0.0.93，
+#   onnxruntime 可用 provider = ['AzureExecutionProvider', 'CPUExecutionProvider']，确认无 GPU）。
+# ============================================================
+
+# ============================================================
+# ⚠️ Python 版本降级预案
+#   insightface 依赖 Cython 编译，在 Python 3.13 上可能安装失败。
+#   若出现安装失败 / 编译报错：
+#     1) 删除 code\.venv 重建；
+#     2) 改用托管的 Python 3.12 解释器重建 venv：
+#          C:\Users\NINGMEI\.workbuddy\binaries\python\versions\3.12\python.exe -m venv code\.venv
+#     3) 重新执行：code\.venv\Scripts\pip install -i https://pypi.org/simple -r requirements.txt
+#        并重做上面的「安装后必做：清掉 opencv-python」。
+#   再不行 → 放弃 insightface，改用裸 onnxruntime 加载 SCRFD + ArcFace（零编译，
+#   见 plan/开发计划.md §6.5 风险表）。
+# ============================================================

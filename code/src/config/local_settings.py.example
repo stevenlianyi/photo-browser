@@ -1,0 +1,31 @@
+#! /usr/bin/env python3
+#encoding: utf-8
+
+#Filename: local_settings.py.example
+#Description: photo-browser 本机环境配置模板（**入库**，作为 local_settings.py 的样板）
+#
+# 使用方法（新机器 / 新环境）：
+#     copy code\src\config\local_settings.py.example code\src\config\local_settings.py
+#     然后按本机实际情况修改下面三项。
+#
+# ⚠️ local_settings.py 已被 .gitignore 忽略，只提交本 .example 模板。
+# ⚠️ 这里只放「跟这台机器有关」的路径；阈值、批大小、扩展名白名单等
+#    业务参数一律放 basicSettings.py（禁止散落在业务模块里硬编码）。
+
+# 照片库根目录。默认 d:\PhotoLib
+# 典型布局：<PHOTO_ROOT>\photo（原图，只读） / <PHOTO_ROOT>\thumb（生成物） / <PHOTO_ROOT>\db（应用状态）
+PHOTO_ROOT: str = r"d:\PhotoLib"      # 默认值，可改
+
+# 缩略图/ 人脸裁剪图根目录。留空 = 派生 <PHOTO_ROOT>\thumb
+# 留空最省事（整库一起搬）；只有想把生成物放到另一块盘时才显式填写。
+THUMB_ROOT: str = ""                   # 空 = 派生 <PHOTO_ROOT>\thumb
+
+# SQLite 主库文件。留空 = 派生 <PHOTO_ROOT>\db\photolib.db
+# 留空最省事（备份 = 拷贝 db\ + thumb\）；只有想把库文件放到另一块盘时才显式填写。
+DB_FILE: str = ""                      # 空 = 派生 <PHOTO_ROOT>\db\photolib.db
+
+
+if __name__ == "__main__":
+    print("PHOTO_ROOT:", PHOTO_ROOT)
+    print("THUMB_ROOT:", THUMB_ROOT or "(派生 <PHOTO_ROOT>\\thumb)")
+    print("DB_FILE   :", DB_FILE or "(派生 <PHOTO_ROOT>\\db\\photolib.db)")
