@@ -1153,25 +1153,49 @@ def findMeanShape() -> str:
     查找顺序（都不存在时返回 ""，此时 pose 不可用）
     ------------------------------------------------
       1. 环境变量 PHOTO_BROWSER_MEAN_SHAPE 显式指定
-      2. 仓库内 code/data/meanshape_68.npz（若用户决定把它作为数据文件入库）
+      2. 仓库内 **code/data/meanshape_68.npz**（已随仓库分发，见下方说明）
       3. insightface 包内自带的那份（insightface 恰好装了但 import 失败时仍可用）
 
-    ⚠️ 第 3 条依赖 insightface 的安装残留，**不保证存在**。若降级到裸 ONNX 且
-      拿不到该文件，yaw 过滤在本轮不生效（会在日志里明说），这是一个需要决策的点：
-      是否把均值形状作为数据文件随仓库分发。
+    为什么把均值形状**作为数据文件随仓库分发**（已决策）
+    --------------------------------------------------
+      姿态估计的输入就是这张 68×3 的平均脸。少了它，降级到裸 onnxruntime 时
+      yaw 过滤会**静默失效**（pose 取不到 -> 不拦侧脸），
+      而侧脸过滤是本步的质量门槛之一。
+      原先只能靠 insightface 包内自带的那份，那是"安装残留"：
+      换机器、换虚拟环境、insightface 升级换路径都可能没有了。
+      现在 code/data/meanshape_68.npz 是第一优先来源（1.4KB，纯数据），
+      仓库自带 -> 不再依赖任何环境的安装残留。
+
+      该文件由 insightface 的 data/objects/meanshape_68.pkl 转存而来
+      （insightface 为 MIT 许可），数值逐位一致，转换方式：
+          pickle.load -> np.float64[68,3] -> np.savez_compressed(data=..., source=...)
+      loadMeanShape() 两种格式都支持，转成 npz 只是为了不依赖 pickle 与安装路径。
+
+    ⚠️ 路径：**必须是 code/data**，不是 code/src/data。
+      本文件在 code/src/engine/face/，往上两级是 code/src，再往上才是 code。
+      （先前写成往上两级，结果永远找不到仓库里那份、悄悄退回第 3 条 ——
+        这类"路径多一级/少一级"的错不会报错，只会让人以为分发没生效。）
     """
     env = os.environ.get("PHOTO_BROWSER_MEAN_SHAPE", "")
     if env:
         return env
-    hereData = os.path.abspath(os.path.join(_HERE_DIR, "..", "..", "data"))
-    local = os.path.join(hereData, "meanshape_68.npz")
-    if os.path.isfile(local):
-        return local
+    here = os.path.abspath(_HERE_DIR)                 # code/src/engine/face
+    for relative in (("..", "..", "..", "data"),      # code/data   <- 仓库自带
+                     ("..", "..", "data")):           # code/src/data（历史布局，兼容）
+        # ⚠️ 必须 normpath：直接 join 会留下 "..\..\..\data\meanshape_68.npz" 这种
+        #    带 .. 的路径 —— 文件能打开，但日志里看着像"从奇怪的地方加载"，
+        #    将来按路径比对/写文档时也对不上。
+        local = os.path.normpath(os.path.join(here, *relative))
+        candidate = os.path.join(local, "meanshape_68.npz")
+        if os.path.isfile(candidate):
+            return candidate
     try:
         import insightface
         packaged = os.path.join(os.path.dirname(os.path.abspath(insightface.__file__)),
                                 "data", "objects", "meanshape_68.pkl")
         if os.path.isfile(packaged):
+            _LOG.warning("仓库内未找到 meanshape_68.npz，退到 insightface 包内副本"
+                         "（换环境可能消失，建议把 code/data/meanshape_68.npz 一起带上）")
             return packaged
     except Exception:
         pass

@@ -69,7 +69,10 @@ _QUEUE_STALL_SEC: float = 300.0
 #: 单个子进程按多少 MB 内存估（实测 RSS 约 470MB，留到 600 是给解码缓冲的余量）。
 #: 缺省进程数按「物理内存的 60% 能养几个」再夹一道 ——
 #: 只看核数，16 核就是 15 个进程、约 7GB；8GB 机器上会一路换页直到被系统杀进程。
-FACE_WORKER_MEMORY_MB: int = 600
+#: 数值与硬上限都在 basicSettings（改配置不必改这个文件）：
+FACE_WORKER_MEMORY_MB: int = basicSettings.FACE_WORKER_MEMORY_MB
+FACE_MAX_WORKERS: int = basicSettings.FACE_MAX_WORKERS
+FACE_MAX_MEMORY_MB: int = basicSettings.FACE_MAX_MEMORY_MB
 
 #: **禁止出现在 engine.py / pool.py 里的数据库相关模块**（assertNoDatabaseImport 用）
 FORBIDDEN_MODULES: tuple = ("sqlite3", "sqliteHandle", "sqliteCommon", "sqliteSettings",
@@ -89,6 +92,12 @@ DEFAULT_ENGINE_KWARGS: dict = {
     "cropSize": None,
     "cropSquare": None,
     "cropQuality": None,
+    # 回传"被丢弃的人脸"的明细（detScore / 短边 / yaw / 丢弃原因，**无 embedding**）。
+    # 缺省 True：这是事后能回答"这张照片为什么少一张脸"的唯一数据来源，
+    # 而这类问题在真实照片库上一定会被问到（"我记得这张里明明有三个人"）。
+    # 代价很小：每张脸几十字节、只随结果队列回主进程一次，不进库。
+    # ⚠️ 它只是"让人能查"，不是"让人能用"：被丢弃的脸**绝不**进 pb_face。
+    "reportRejected": True,
 }
 
 
@@ -318,11 +327,42 @@ def _tally(summary: dict, result: dict) -> None:
     for code, count in (result.get("rejected") or {}).items():
         if count:
             summary["dropped"][code] = summary["dropped"].get(code, 0) + int(count)
+    # 被丢弃人脸的**聚合明细**（不是原始列表）：
+    #   回答"为什么这张照片少了一张脸"要的是"最接近阈值的那几个样本"，
+    #   而不是把几万条明细攒在内存里。这里只留每档的极值 + 少量样本，
+    #   所以跑 10 万张也不会涨内存。
+    for face in (result.get("droppedFaces") or ()):
+        _tallyDroppedFace(summary, str(result.get("absPath") or ""), face)
+
+
+def _tallyDroppedFace(summary: dict, absPath: str, face: dict) -> None:
+    """把一张被丢弃的人脸并进 droppedDetail（极值 + 最多 3 条样本）"""
+    reason = str(face.get("reason") or "")
+    if not reason:
+        return
+    one = summary["droppedDetail"].setdefault(
+        reason, {"count": 0, "samples": [], "detScore": [], "shortEdge": [],
+                 "poseYaw": []})
+    one["count"] += 1
+    for key, column in (("detScore", "detScore"), ("shortEdge", "shortEdge"),
+                        ("poseYaw", "poseYaw")):
+        value = face.get(column)
+        if value is not None:
+            one[key].append(float(value))
+    if len(one["samples"]) < 3:
+        one["samples"].append({
+            "file": os.path.basename(absPath),
+            "detScore": round(float(face.get("detScore") or 0.0), 4),
+            "shortEdge": round(float(face.get("shortEdge") or 0.0), 1),
+            "poseYaw": (None if face.get("poseYaw") is None
+                        else round(float(face["poseYaw"]), 2)),
+        })
 
 
 def _newSummary(workers: int) -> dict:
     return {"images": 0, "kept": 0, "rawFaces": 0, "noFace": 0, "failed": 0,
             "elapsedTotal": 0.0, "elapsedList": [], "dropped": {}, "failures": [],
+            "droppedDetail": {},
             "workers": workers, "mode": "queue", "wallTime": 0.0,
             "engineInfo": {}}
 
@@ -347,7 +387,8 @@ def attachEngineInfo(summary: dict, kwargsResolved: dict) -> dict:
 
 def _runInline(tasks, kwargsResolved, absorb) -> None:
     """主进程内联串行跑（workers=1 或进程池不可用时的退路）"""
-    initChildProcess()
+    # threads=0 = 不钉线程：内联时全机器就这一个进程，钉 1 线程会白扔一半算力
+    initChildProcess(threads=0)
     engine = faceEngine.getEngine(**kwargsResolved)
     for index, (absPath, photoCode) in enumerate(tasks):
         try:
@@ -358,6 +399,55 @@ def _runInline(tasks, kwargsResolved, absorb) -> None:
             result = dict(result)
             result["engineInfo"] = engine.describe()
         absorb(index, absPath, photoCode, result)
+
+
+def _resolveWorkers(workers, autoCount: int, cpu: int, totalMb: int, availMb: int,
+                    byCpu: int, byMem: int) -> int:
+    """定最终进程数，并把"为什么是这个数"说清楚（缺省靠猜的时候一定要有日志）。
+
+    优先级
+    ------
+      1. 显式 workers 参数（CLI 的 --workers）—— **不受任何上限约束**。
+         上限只管"没指定时别乱猜"，用户明确要 12 个就给 12 个。
+      2. 环境变量 PHOTO_BROWSER_FACE_WORKERS —— 同样显式、同样不设上限。
+         用途：临时调高某个工具/服务的缺省值，不用改代码。
+      3. 缺省 = min(核数-1, 内存预算/600MB, FACE_MAX_WORKERS)
+
+    为什么"显式值不设上限"也要打警告
+    -------------------------------
+      有人会在 4GB 机器上顺手 --workers 16，然后抱怨机器卡死。
+      这时至少让他知道"你要的 16 个进程按 600MB 估要 9.6GB"，
+      比默默跑到一半被系统杀掉、最后不知道死在哪强。
+    """
+    explicit = workers
+    if not explicit:
+        env = os.environ.get(basicSettings.FACE_WORKERS_ENV, "").strip()
+        if env:
+            try:
+                explicit = int(env)
+            except ValueError:
+                _LOG.warning("%s=%r 不是整数，忽略", basicSettings.FACE_WORKERS_ENV, env)
+    if explicit:
+        count = max(1, int(explicit))
+        needMb = count * FACE_WORKER_MEMORY_MB
+        if totalMb > 0 and needMb > totalMb * 0.8:
+            _LOG.warning("按要求开 %d 个进程，每个约 %dMB，合计约 %dMB，"
+                         "已超物理内存 %dMB 的 80%%（当前可用 %dMB）"
+                         "—— 可能一路换页，甚至被系统杀进程。机器小就把 --workers 调小。",
+                         count, FACE_WORKER_MEMORY_MB, needMb, totalMb, availMb)
+        return count
+    reasons = []
+    if byCpu > autoCount:
+        reasons.append("核数只允许 %d（%d 核留 1 个给主进程与 I/O）" % (byCpu, cpu))
+    if byMem > autoCount:
+        reasons.append("内存只够 %d 个（预算 %dMB ÷ 每个 %dMB）"
+                       % (byMem, min(totalMb, FACE_MAX_MEMORY_MB), FACE_WORKER_MEMORY_MB))
+    if FACE_MAX_WORKERS <= min(byCpu, byMem):
+        reasons.append("保守上限 %d（要更快请显式 --workers）" % FACE_MAX_WORKERS)
+    _LOG.info("进程数取 %d：%s（物理内存 %dMB，可用 %dMB）",
+              autoCount, "；".join(reasons) if reasons else "核数与内存都宽裕",
+              totalMb, availMb)
+    return max(1, int(autoCount))
 
 
 def extractFaces(tasks: list, workers: int = None, engineKwargs: dict = None,
@@ -400,13 +490,12 @@ def extractFaces(tasks: list, workers: int = None, engineKwargs: dict = None,
     # （在换页），严重时 OS 直接杀进程、批次断在半路。
     # ⚠️ 用**总量**而不是"可用量"：可用量随别的程序起伏，
     # 同一批照片两次运行会得到不同的并行度，吞吐忽高忽低且无法复现。
-    byMem = (max(1, int(totalMb * 0.6) // int(FACE_WORKER_MEMORY_MB))
-             if totalMb > 0 else byCpu)
-    if byMem < byCpu:
-        _LOG.info("进程数按内存收敛: 核数允许 %d，物理内存 %dMB 只够 %d 个引擎"
-                  "（每个按 %dMB 估，当前可用 %dMB）",
-                  byCpu, totalMb, byMem, FACE_WORKER_MEMORY_MB, availMb)
-    workerCount = max(1, int(workers if workers else min(byCpu, byMem)))
+    budgetMb = totalMb if totalMb > 0 else FACE_MAX_MEMORY_MB
+    budgetMb = min(budgetMb, FACE_MAX_MEMORY_MB)      # 硬上限：最多吃 4GB
+    byMem = max(1, int(budgetMb * 0.6) // int(FACE_WORKER_MEMORY_MB))
+    autoCount = max(1, min(byCpu, byMem, FACE_MAX_WORKERS))
+    workerCount = _resolveWorkers(workers, autoCount, cpu, totalMb, availMb,
+                                  byCpu, byMem)
     summary = _newSummary(workerCount)
     if total == 0:
         return summary

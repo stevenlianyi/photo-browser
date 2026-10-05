@@ -184,7 +184,10 @@ def _run(args) -> int:
         engineKwargs={"minDetScore": args.min_det, "minFaceEdge": args.min_edge,
                       "maxYaw": args.max_yaw, "modelPack": args.model,
                       "detSize": (args.det_size, args.det_size),
-                      "wantCrop": not args.no_crop},
+                      "wantCrop": not args.no_crop,
+                      # 被丢弃的人脸明细默认回传（pool.DEFAULT_ENGINE_KWARGS 已为 True），
+                      # 这里不覆盖：收集是常开的，开关只控制"要不要打印"
+                      "reportRejected": True},
         replaceFaces=args.replace, onProgress=_progress)
 
     pool = out["pool"]
@@ -198,6 +201,26 @@ def _run(args) -> int:
                                           for k, v in sorted(pool["dropped"].items())))
     else:
         print("质量过滤丢弃: 无")
+    if args.audit and pool.get("droppedDetail"):
+        print("\n---- 被丢弃人脸明细（--audit）----")
+        for reason in sorted(pool["droppedDetail"]):
+            one = pool["droppedDetail"][reason]
+            print("  %s  %d 张" % (reason, one["count"]))
+            # yaw 这一列存的是**带符号**的原值（正=脸朝右），
+            # 判据用的是 |yaw| > 45，所以这里标 "yaw" 而不是 "|yaw|"
+            for label, key, unit in (("detScore", "detScore", ""),
+                                     ("短边", "shortEdge", "px"),
+                                     ("yaw", "poseYaw", "度")):
+                values = one.get(key) or []
+                if values:
+                    spread = "极差 %.3f" % (max(values) - min(values))
+                    print("      %-9s [%.3f, %.3f]%s  %s  (n=%d)"
+                          % (label, min(values), max(values), unit, spread, len(values)))
+            for sample in one.get("samples") or ():
+                print("      例: %-34s det=%.4f 短边=%.1f yaw=%s"
+                      % (sample["file"], sample["detScore"], sample["shortEdge"],
+                         sample["poseYaw"]))
+        print()
     print("落库: %d 次事务 / pb_face %d 行 / pb_photo %d 行 / 删除旧行 %d"
           % (store["flushes"], store["faceRows"], store["photoRows"], store["deleted"]))
     print("人脸图: 新建 %d  命中 %d  失败 %d  -> %s\\faces\\"
@@ -253,6 +276,8 @@ def buildParser() -> argparse.ArgumentParser:
     parser.add_argument("--max-yaw", type=float, default=basicSettings.MAX_YAW,
                         help="侧脸 |yaw| 上限(度)")
     parser.add_argument("--no-crop", action="store_true", help="不裁人脸图（只入库特征）")
+    parser.add_argument("--audit", action="store_true",
+                        help="打印被丢弃人脸的明细（每档的极值 + 3 条样本）")
     parser.add_argument("--status", action="store_true", help="只打印现状，不提取")
     parser.add_argument("--quiet", action="store_true", help="少打字")
     return parser

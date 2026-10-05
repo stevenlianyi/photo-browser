@@ -31,12 +31,13 @@
 
 | 步骤 | 主题 | 状态 |
 |---|---|---|
-| 1 | 工程基线与配置骨架 | ⬜ 未开始 |
-| 2 | SQLite 运行层 + 代码生成器 + 建库 | ⬜ 未开始 |
-| 3 | 扫描器 | ⬜ 未开始 |
-| 4 | 缩略图与原图文件服务 | ⬜ 未开始 |
-| 5 | 人脸引擎 | ⬜ 未开始 |
-| 6 | 分桶 + 质心 + 匹配决策 | ⬜ 未开始 |
+| **R** | **返工修正 1–6（纠错闭环 DR-16）** | ⬜ **待做，先于步骤 7** |
+| 1 | 工程基线与配置骨架 | ✅ 已完成 |
+| 2 | SQLite 运行层 + 代码生成器 + 建库 | ✅ 已完成 |
+| 3 | 扫描器 | ✅ 已完成 |
+| 4 | 缩略图与原图文件服务 | ✅ 已完成 |
+| 5 | 人脸引擎 | ✅ 已完成 |
+| 6 | 分桶 + 质心 + 匹配决策 | ✅ 已完成（**待 R 返工**） |
 | 7 | 聚类与待确认数据 | ⬜ 未开始 |
 | 8 | 联系人导入 | ⬜ 未开始 |
 | 9 | 后端 API 全量 | ⬜ 未开始 |
@@ -58,7 +59,7 @@ photo-browser/
 ├── plan/                        设计与计划文档（唯一权威）
 │   ├── 开发计划.md               ★ 执行总纲：架构 / 数据流 / 12 步路线图 / 决策记录 DR-1~DR-9
 │   ├── step-prompts.md          ★ 分步提示语（12 条，可直接复制）
-│   ├── 数据库设计.md             ★ 8 张表定义（pb_*.txt 的说明）+ 三层结构 + 索引清单
+│   ├── 数据库设计.md             ★ 9 张表定义（pb_*.txt 的说明）+ 三层结构 + 索引清单
 │   ├── 照片管理方案_开源调研与自研设计.md   上游主方案（v3）
 │   ├── MVP_plan.md              S0–S7 阶段划分（做什么）
 │   └── UI/photo-browser UI 设计.md         信息架构 + 8 页面 + 双主题 Token
@@ -109,12 +110,20 @@ d:\PhotoLib\
 
 ## 五、数据库要点
 
-- **8 张表**：`pb_family` / `pb_person` / `pb_person_category` / `pb_photo` / `pb_face` / `pb_person_centroid` / `pb_photo_person` / `pb_scan_job`。
+- **9 张表**：`pb_family` / `pb_person` / `pb_person_category` / `pb_photo` / `pb_face` / `pb_person_centroid` / `pb_photo_person` / `pb_scan_job` / **`pb_review_log`**（纠错审计与撤销依据）。
 - **唯一数据源**：`code/src/database/pb_*.txt`（单字段一行）→ `sqliteCodeGenerator.py` → `common/sqliteCommon.py`。**业务层禁止裸 SQL**。
 - **不用 ORM**：原生 `sqlite3` 读写双连接 + PRAGMA（`journal_mode=WAL` / `foreign_keys=ON` / `busy_timeout=5000` …）。
 - **主键**：`recID INT AUTO_INCREMENT`（SQLite 侧 `INTEGER PRIMARY KEY AUTOINCREMENT`），不用 BIGINT。
 - **规范**：业务幂等键 `xxxCode UNIQUE`；关联用业务编码（**不建物理外键**）；软删 `delFlag`；尾部固定 7 字段（label/memo/regID/regYMDHMS/modifyID/modifyYMDHMS/delFlag）。
 - **单写入者**：SQLite 硬约束，子进程只做 CPU 计算，主进程单线程批量写库。
+- **人脸四态**（由 `personCode` / `isConfirmed` / `isStranger` 推导，无冗余字段）：
+
+  | 状态 | 条件 | 进「待确认」 | 进「我不同意」 |
+  |---|---|---|---|
+  | 未归属 | `personCode IS NULL AND isStranger=0` | ✅ | — |
+  | 自动归属（未人工确认） | `personCode NOT NULL AND isConfirmed=0 AND isStranger=0` | — | ✅ |
+  | 人工确认 | `isConfirmed=1` | — | — |
+  | 陌生人 | `isStranger=1` | — | — |
 
 详见 `plan/数据库设计.md`。
 
@@ -137,10 +146,12 @@ d:\PhotoLib\
 ## 七、关键业务流程
 
 1. **扫描限流**：一次扫描处理到 `batchSize`（**默认 100**）张即 `PAUSED` 停止，等待指示后**断点续扫**（`lastCursor`）。
-2. **人工确认队列**：相似度落在灰区（`T_low`–`T_high`）的人脸进「待确认队列」，由人工确认归属，**不静默归类**。
-3. **年龄分桶**：**分桶是刚需**（S0 实测 FR 32.75% → ~19%，降幅 42%）。策略：自适应分桶（0–18 岁 3 年 / 18 岁以上 10 年），相邻三桶取 **max**，每桶 ≥3 样本才启用质心。
-4. **年份识别**：`EXIF` → `文件名`（含 `mmexport*` 毫秒时间戳）→ `mtime`；`mtime` 不可靠；截图归 `UNK`。
-5. **原图只读**：所有操作只动数据库与 `thumb\`，不改写/删除原图。
+2. **待确认队列**：相似度落在灰区（`T_low`–`T_high`）的人脸进「待确认队列」，由人工确认归属，**不静默归类**。口径 = `personCode IS NULL AND isStranger=0`。
+3. **纠错闭环（浏览时发现认错了）**：人脸框悬停「✗ 不是他」→ 改判到别人 / 置为未知 / 新建人物 / 标记陌生人，**一次点击可达**。自动归属但未经确认的脸进「我不同意」列表，支持整张照片一键否决。合并/拆分写 `pb_review_log`，**可撤销**。
+4. **年龄分桶**：**分桶是刚需**（S0 实测 FR 32.75% → ~19%，降幅 42%）。策略：自适应分桶（0–18 岁 3 年 / 18 岁以上 10 年），相邻三桶取 **max**。
+5. **质心防污染**：质心**只用人工确认样本**计算；某桶确认样本 <3 时退到 `ALL` 兜底桶（不分桶）；总确认样本 <3 则不参与自动匹配。否则误认样本会拉偏质心 → **越错越错**。
+6. **年份识别**：`EXIF` → `文件名`（含 `mmexport*` 毫秒时间戳）→ `mtime`；`mtime` 不可靠；截图归 `UNK`。
+7. **原图只读**：所有操作只动数据库与 `thumb\`，不改写/删除原图。
 
 ---
 

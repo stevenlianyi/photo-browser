@@ -44,7 +44,7 @@ _SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-_VERSION = "20261004"
+_VERSION = "20261005"
 
 _HERE_DIR = os.path.dirname(os.path.abspath(__file__))          # .../src/database
 DEFAULT_OUTPUT = os.path.join(_HERE_DIR, "auto_generated", "sqliteCommon.py")
@@ -122,6 +122,7 @@ TABLE_ORDER = (
     "pb_person_centroid",
     "pb_photo_person",
     "pb_scan_job",
+    "pb_review_log",
 )
 
 TABLE_CN = {
@@ -133,6 +134,7 @@ TABLE_CN = {
     "pb_person_centroid": "人员年代桶质心",
     "pb_photo_person": "照片-人员关联",
     "pb_scan_job": "扫描任务",
+    "pb_review_log": "纠错操作日志",
 }
 
 # §1.4 尾部标准七字段（每表必带、顺序固定）—— 生成时校验
@@ -149,12 +151,19 @@ INDEX_SPEC = {
         ("idx_pb_photo_fileHash", ("fileHash",), False, None),
         ("idx_pb_photo_shotYear", ("shotYear",), False, None),
         ("idx_pb_photo_scanState", ("scanState",), False, None),
+        # 「疑似移动」待确认队列（DR-13遗留到步骤 9 的部分索引，此处按 §五 建）
+        # 为什么值得建：生成层的 query 只支持 nullFields（IS NULL），
+        # 取「非空」本来要全表扫；10 万行规模下有索引只扫匹配行。
+        ("idx_pb_photo_movedToPhotoCode", ("movedToPhotoCode",), False, None),
     ),
     "pb_face": (
         ("idx_pb_face_photoCode", ("photoCode",), False, None),
         ("idx_pb_face_personCode", ("personCode",), False, None),
         # 待确认队列专用部分索引（D-4：personCode 为空即待确认）
         ("idx_pb_face_personCode_isnull", ("personCode",), False, "personCode IS NULL"),
+        # 「我不同意」列表（DR-16）：自动归属但未经人工确认 = 纠错入口
+        ("idx_pb_face_personCode_isConfirmed", ("personCode", "isConfirmed"), False,
+         "isConfirmed=0 AND isStranger=0"),
     ),
     "pb_person": (
         # displayName 在 .txt 里没写 UNIQUE（只写了 NOT NULL + 注释「唯一」），
@@ -169,14 +178,23 @@ INDEX_SPEC = {
         ("idx_pb_photo_person_personCode", ("personCode",), False, None),
         ("idx_pb_photo_person_photoCode", ("photoCode",), False, None),
     ),
+    "pb_review_log": (
+        ("idx_pb_review_log_faceCode", ("faceCode",), False, None),
+        ("idx_pb_review_log_opType", ("opType",), False, None),
+        # 「可撤销且未撤销」列表 = 撤销按钮的候选集（DR-16④）
+        ("idx_pb_review_log_isRevertible", ("isRevertible",), False,
+         "isRevertible=1 AND revertedByLogCode IS NULL"),
+    ),
 }
 
 # §五 的**期望索引名全集**（自检用：索引清单与文档漂移了就报错）
 EXPECTED_INDEX_NAMES = {
     "pb_photo": ("idx_pb_photo_photoCode", "idx_pb_photo_relPathHash",
-                 "idx_pb_photo_fileHash", "idx_pb_photo_shotYear", "idx_pb_photo_scanState"),
+                 "idx_pb_photo_fileHash", "idx_pb_photo_shotYear",
+                 "idx_pb_photo_scanState", "idx_pb_photo_movedToPhotoCode"),
     "pb_face": ("idx_pb_face_faceCode", "idx_pb_face_photoCode",
-                "idx_pb_face_personCode", "idx_pb_face_personCode_isnull"),
+                "idx_pb_face_personCode", "idx_pb_face_personCode_isnull",
+                "idx_pb_face_personCode_isConfirmed"),
     "pb_person": ("idx_pb_person_personCode", "idx_pb_person_displayName"),
     "pb_person_category": (),
     "pb_family": ("idx_pb_family_familyCode",),
@@ -185,6 +203,8 @@ EXPECTED_INDEX_NAMES = {
     "pb_photo_person": ("idx_pb_photo_person_linkKey",
                         "idx_pb_photo_person_personCode",
                         "idx_pb_photo_person_photoCode"),
+    "pb_review_log": ("idx_pb_review_log_logCode", "idx_pb_review_log_faceCode",
+                      "idx_pb_review_log_opType", "idx_pb_review_log_isRevertible"),
 }
 
 # 各表默认的 upsert 冲突键（业务幂等键；调用方可覆盖）
@@ -197,6 +217,7 @@ CONFLICT_COLUMNS = {
     "pb_person_centroid": ("personCode", "bucketKey"),
     "pb_photo_person": ("linkKey",),
     "pb_scan_job": ("jobCode",),
+    "pb_review_log": ("logCode",),
 }
 
 # 各表 query 的等值过滤字段（都带索引，或表极小）
@@ -209,6 +230,12 @@ QUERY_FILTER_FIELDS = {
     "pb_person_centroid": ("personCode", "bucketKey"),
     "pb_photo_person": ("linkKey", "photoCode", "personCode"),
     "pb_scan_job": ("jobCode", "jobStatus"),
+    # ⚠️ fromPersonCode/toPersonCode 不带索引，但**必须有查询参数**：
+    #   undo() 要按「同一对(from,to) + opType」把一次合并/拆分的成员行捞出来
+    #   （再在 Python 里按 detail 里的 op 标记精确筛）。
+    #   这张表是「每次人工操作一行」的量级（远小于 pb_face），全表扫可接受。
+    "pb_review_log": ("logCode", "opType", "faceCode", "photoCode",
+                      "fromPersonCode", "toPersonCode"),
 }
 
 # 各表允许的 ORDER BY 字段（生成器写死白名单，杜绝 ORDER BY 注入）
@@ -221,6 +248,7 @@ ORDER_FIELDS = {
     "pb_person_centroid": ("recID", "personCode", "bucketKey", "sampleCount"),
     "pb_photo_person": ("recID", "photoCode", "personCode", "confidence"),
     "pb_scan_job": ("recID", "jobStatus", "jobCode"),
+    "pb_review_log": ("recID", "opType", "opYMDHMS", "faceCode"),
 }
 
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -644,7 +672,7 @@ def genCommonBegin(tables, commonBody=None):
         lines.append("%s%s: %s," % (TS, _py(table["name"]), _tupleLiteral(table["orderFields"])))
     lines.append("}")
     lines.append("")
-    lines.append("# 表名 -> 主键名（当前 8 张表统一是 recID，见 数据库设计.md §1.3）")
+    lines.append("# 表名 -> 主键名（当前 9 张表统一是 recID，见 数据库设计.md §1.3）")
     lines.append("PRIMARY_KEYS = {")
     for table in tables:
         lines.append("%s%s: %s," % (TS, _py(table["name"]), _py(table["primaryKey"])))
@@ -1363,6 +1391,37 @@ def countTableGeneral(tableName, delFlag = comGD.DEL_FLAG_NO):
     return int(db.fetchValue(0) or 0)
 
 
+def countWhereGeneral(tableName, whereSqlstr, keyValues = ()):
+    """带条件计数：SELECT COUNT(*) FROM t WHERE <whereSqlstr>。出错返回 -1。
+
+    为什么需要它（步骤 7 加的，四态口径的硬需求）
+    ------------------------------------------------
+      生成层的 query_* 只能按「主键 + 业务码 + nullFields(IS NULL)」过滤，
+      **表达不了** `isStranger = 0` / `isConfirmed = 0` 这类「等于 0」的语义。
+      而四态（未归属 / 自动归属 / 人工确认 / 陌生人）恰恰全靠这两个 0 值推导
+      —— 于是「待确认队列条数」这种验收口径只剩两条路：
+        ① 把整表捞出来在Python 里数（10 万行白跑一趟，违背DR-12 的分页纪律）；
+        ② 在业务层写裸 SQL（违背「业务层禁止裸 SQL」）。
+      本函数是这两者之间的正解：**SQL 在这一层拼一次，业务层只传条件串**。
+
+    ⚠️⚠️ whereSqlstr 的每一个值都必须写成 %s 占位符，值走 keyValues ——
+       绝不要把值直接拼进字符串。带用户输入的查询（如按名字筛人）
+       一旦用 f-string拼 where，注入与「引号没转义」两类错会同时出现，
+       而且它们都不会报错，只会让「我不同意」列表悄悄少几条。
+    ⚠️ 条件里若要限定列，只能用本表白名单里的列名（TABLE_COLUMNS），
+       否则会拼出 `no such column`。
+    """
+    if tableName not in TABLE_COLUMNS:
+        return -1
+    sqlStr = "SELECT COUNT(*) AS rowNum FROM " + tableName
+    if whereSqlstr:
+        sqlStr += " WHERE " + str(whereSqlstr)
+    db = dbHandle()
+    if db.executeRead(sqlStr, tuple(keyValues or ())) == sqliteHandle.RET_ERROR:
+        return -1
+    return int(db.fetchValue(0) or 0)
+
+
 # ------------------------------------------------------------
 # 6. 建库 / 自检
 # ------------------------------------------------------------
@@ -1458,6 +1517,43 @@ def readCommonSection(fileName):
     if beginPos < 0 or endPos < 0 or endPos < beginPos:
         return None
     return content[beginPos:endPos + len(endMark)]
+
+
+def commonSectionUpToDate(commonBody, tables):
+    """已有的 #common 区段里的**表元数据**是否与当前 .txt 一致。
+
+    ⚠️⚠️ 为什么必须有这条检查（本轮踩到并修掉的坑）
+    ------------------------------------------------
+      表元数据（TABLE_ORDER / TABLE_COLUMNS / TABLE_INDEXES / ...）**就在
+      #common 区段里面**，而「沿用已有产物的 #common 区段」是默认行为。
+      于是「改了 .txt 再重跑生成器」会产出这么一份东西：
+        * 逐表段是新的 -> create_pb_review_log() / query_pb_review_log() 都在
+        * #common 区段是旧的 -> TABLE_ORDER 里**没有** pb_review_log
+      后果是**静默**的：build_db 按 TABLE_ORDER 逐表建表，新表根本没被访问，
+      不报错、不缺函数，只是那张表**没有被建出来**；等到运行时第一次写
+      pb_review_log 才会炸 `no such table`，而那时栈里早就没有生成器了。
+      「改表 = 改 .txt + 重跑生成器」这条纪律被这样悄悄破掉。
+
+      所以这里做一次**元数据指纹比对**：逐表逐列逐索引确认产物里都有。
+      已知边界：**删列 / 删索引**这条检查发现不了（只会看到"还在"），
+      那种情况请显式加 --reset-common。这是有意的取舍：宁可漏判一种
+      少见的操作，也不能对每次生成都做全量重解析。
+
+    返回 (是否最新, 缺失清单)
+    """
+    if not commonBody:
+        return False, ["（没有 #common 区段）"]
+    missing = []
+    for table in tables:
+        if ("%s: [" % _py(table["name"])) not in commonBody:
+            missing.append("表 %s 的元数据" % table["name"])
+        for field in table["fields"]:
+            if ('"name": %s,' % _py(field["name"])) not in commonBody:
+                missing.append("%s.%s" % (table["name"], field["name"]))
+        for index in table["indexes"]:
+            if ('"name": %s,' % _py(index["name"])) not in commonBody:
+                missing.append("索引 %s" % index["name"])
+    return (not missing), missing
 
 
 def genFileContent(tables, inputNames, commonBody=None):
@@ -1705,11 +1801,23 @@ def main(argv):
         return 0
 
     # 保留已有产物的 #common 区段（除非 --reset-common）
+    # ⚠️ 但必须先核对里面的**表元数据**是否还与 .txt 一致 ——
+    #    元数据在这个区段里，沿用一份过期的区段会让新表「有函数、没建表」。
     commonBody = None
     if not resetCommon:
         commonBody = readCommonSection(output)
         if commonBody is not None:
-            print("[Common] 沿用已有产物的 #common 区段（%d 字符）" % len(commonBody))
+            upToDate, missing = commonSectionUpToDate(commonBody, tables)
+            if upToDate:
+                print("[Common] 沿用已有产物的 #common 区段（%d 字符，元数据与 .txt 一致）"
+                      % len(commonBody))
+            else:
+                print("[Common] ⚠️  #common 区段里的表元数据已过期 -> 用内置模板重新生成")
+                print("         缺：%s%s" % ("、".join(missing[:6]),
+                                          " ..." if len(missing) > 6 else ""))
+                print("         （表元数据在 #common 区段内；不重生成的话新表会有 CRUD 函数")
+                print("           却没有进 TABLE_ORDER，建库时被静默跳过）")
+                commonBody = None
         else:
             print("[Common] 未找到可沿用的 #common 区段，用内置模板")
 

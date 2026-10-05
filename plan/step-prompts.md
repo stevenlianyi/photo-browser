@@ -5,6 +5,9 @@
 > **使用方法**：每一步**单独开一个新对话**，把下面对应的提示语整段复制粘贴进去。
 > 前一步验收未通过，不要开始下一步。
 > 每步结束统一输出：**改动文件清单 + 验收结果 + 遗留问题**。
+>
+> ⚠️ **步骤 1–6 已执行完毕**。新增「纠错闭环」（DR-16）后这 6 步需要返工，
+> **必须先做「修正步骤 R」，再做步骤 7**。
 
 ---
 
@@ -21,6 +24,239 @@
 | 业务层 | **禁止裸 SQL**，一律走 `sqliteCommon` |
 | 表定义 | `code/src/database/pb_*.txt` 是唯一数据源，**禁止手工改 `auto_generated/`** |
 | 网络 | 服务只绑 `127.0.0.1` |
+
+---
+---
+
+# 修正步骤 R · 返工修正步骤 1–6（纠错闭环 DR-16）
+
+> **什么时候做**：现在。步骤 7 之前必须完成。
+> **为什么要返工**：新增了「用户浏览时改判认错的人脸」这条闭环（DR-16），核对现有代码发现 6 处冲突，
+> 其中 1 处是**根因**，不改则后续全部白做。
+
+```text
+【photo-browser · 修正步骤 R · 返工修正步骤 1–6】
+
+## 目标
+把已完成的步骤 1–6 对齐到最新的「纠错闭环」口径（plan/开发计划.md DR-16）：
+① 质心只用人工确认样本（防污染）；② 新增 ALL 兜底桶；③ 新增 isStranger 与 pb_review_log；
+④ 把「自动归属」与「人工确认」真正区分开（这是根因）；⑤ 存量数据修正与质心重建。
+
+## 前置
+步骤 1–6 已完成，并且**已有真实数据**（d:\PhotoLib\photo 有真实照片、正式库有真实记录，
+据开发计划 DR-12/DR-15 实测约 10 万行 pb_photo）。
+本步不新增业务功能，只做口径修正 + 数据迁移。
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 DR-16（本次要落地的全部口径）、第五节步骤 6/7 行
+- plan/数据库设计.md §4.5 pb_face（**四态语义表**）、§4.6 pb_person_centroid（质心三级启用）、
+  §4.9 pb_review_log（8 种 opType 与副作用表）、§五 索引清单、§六 D-4/D-9/D-10/D-11
+- plan/UI/photo-browser UI 设计.md 第 4.4 / 4.5 / 4.6 节（人脸框三态描边、P-06 双 Tab、P-05 样本分两段）
+
+## 一、先读现有代码，确认真实差距（不要凭我的描述改）
+重点读这 5 个文件，**逐条核对下面的「现状 → 应为」**：
+- code/src/processor/review/assigner.py
+- code/src/processor/review/merger.py
+- code/src/engine/match/centroid.py
+- code/src/engine/match/matcher.py
+- code/src/config/basicSettings.py
+
+已知差距（我已核对过源码，但你必须自己再确认一遍再动手）：
+
+| # | 文件 | 现状 | 应改为 |
+|---|---|---|---|
+| 1 | `assigner.py` 的 `assign()` | 无论人工还是自动，**都写 `isConfirmed=1`**（约 234 行硬编码） | `isConfirmed=1` **只表示经人工确认**；自动归属必须写 0 |
+| 2 | `assigner.py` 文件头 + `__main__` | 写着「待确认 = personCode IS NULL **OR isConfirmed=0**」 | 改为 `personCode IS NULL AND isStranger=0` |
+| 3 | `centroid.py` 的 `loadFaceVectors()` | 查回这个人的全部脸后只按 shotBucket 过滤，**无 isConfirmed 过滤** | 只取 `isConfirmed=1` 的样本（可开关，见 3.5） |
+| 4 | `centroid.py` | 无 `ALL` 兜底桶；桶样本不足直接不启用（约 215 行） | 桶确认样本 <3 时退到 `ALL`；总确认样本 <3 才是真不启用 |
+| 5 | `matcher.py` | 候选桶 = `bucket.neighborBucketKeys(...)`（约 407 行） | 候选集合 **∪ {ALL}**；`shotBucket` 为空的脸候选桶就是 `{ALL}` |
+| 6 | 全库 | 无 `pb_review_log` 表、`pb_face` 无 `isStranger` 列 | 建表 + 加列 + 补索引 |
+
+**第 1 条是根因**：自动归属也写 `isConfirmed=1`，导致
+(a) 无法区分「机器认的」与「人工确认的」，「我不同意」列表无从表达；
+(b) 质心全部由自动样本构成 → 防污染无从下手。
+
+## 二、表结构与数据迁移
+
+### 2.1 表定义（我已改好，你只需核对）
+- `code/src/database/pb_review_log.txt` —— **新建的第 9 张表**，22 字段，按该文件写
+- `code/src/database/pb_face.txt` —— 已加 `isStranger TINYINT NOT NULL DEFAULT 0`
+- `code/src/database/pb_person_centroid.txt` —— 注释已写明 `ALL` 兜底桶与「只统计确认样本」
+- `code/src/database/pb_photo_person.txt` —— `source` 注释已写明 0 自动 / 1 人工确认或改判
+
+**重跑生成器**（`python code/src/database/sqliteCodeGenerator.py`）→ 产物落
+`code/src/database/auto_generated/sqliteCommon.py`，**禁止手工改产物**。
+
+### 2.2 迁移（**用 `--migrate`，不要 `--drop`**）
+```
+python code/src/tools/build_db.py --migrate
+```
+- 只 `ALTER TABLE ADD COLUMN` 补缺的（加 `pb_face.isStranger`）+ 建 `pb_review_log` + 补 4 个新索引
+- **不删列、不改列类型、不动任何一行**（DR-13）
+- ⚠️ **动手前先备份**：`copy d:\PhotoLib\db\photolib.db d:\PhotoLib\db\photolib.db.bak-before-R`
+- 迁移后核对：`PRAGMA table_info(pb_face)` 有 `isStranger`；`sqlite_master` 有 `pb_review_log`
+  与 4 个新索引（`pb_face(personCode IS NULL)`、`pb_face(personCode, isConfirmed)` 部分索引、
+  `pb_review_log(isRevertible)` 部分索引、`pb_photo(movedToPhotoCode)`）
+- 迁移前后各记录一次逐表行数（`SELECT COUNT(*)`），**必须完全一致**
+
+### 2.3 存量数据修正（**必做，否则「我不同意」列表是空的**）
+现有自动归属的脸被写成了 `isConfirmed=1`，要按真实语义回改：
+
+写一次性脚本 `code/src/tools/fix_confirmed_flag.py`：
+- 依据 `pb_photo_person.source`：`source=0`（自动）→ 对应 `pb_face.isConfirmed` 回改为 **0**；
+  `source=1`（人工）→ 保持 1
+- ⚠️ 一张照片可能有多个 `pb_photo_person` 行、一个人脸只对应一个 `faceCode`。
+  **以 `pb_photo_person.faceCode` 为准**（那是判定来源那张脸）；`faceCode` 为空的行跳过并计数报告
+- 先 `--dry-run` 打印将要改的行数与样例，确认后再实跑
+- 跑完打印：回改行数、跳过行数、以及改后
+  `SELECT COUNT(*) FROM pb_face WHERE personCode IS NOT NULL AND isConfirmed=0` 的结果
+
+**重算全部质心**：旧质心是污染样本算出来的，必须作废。
+走 `centroid.recomputePerson()` 对库里每个有脸的 personCode 重算（**不删库**，只重算）。
+
+## 三、代码修正
+
+### 3.1 `assigner.py` —— 拆开「人工确认」与「自动归属」
+- `assign(faceCode, personCode, source, ...)` 的 `isConfirmed` 必须由 `source` 决定：
+  - `source == comGD.LINK_SOURCE_MANUAL` → `isConfirmed=1`
+  - `source == comGD.LINK_SOURCE_AUTO` → `isConfirmed=0`（**当前硬编码 1，要改**）
+- 建议同时提供两个语义明确的入口（内部共用 `_setBelong()`），避免调用方继续传错 `source`：
+  - `confirm(faceCode, personCode, confidence=None)` —— 人工确认，`isConfirmed=1`、link `source=1`
+  - `autoAssign(faceCode, personCode, confidence)` —— 自动归属，`isConfirmed=0`、link `source=0`
+- **`fix(faceCode, action, personCode=None)` 统一改判入口**：
+
+  | action | 效果 | 落 pb_face | 关联 | 重算质心 |
+  |---|---|---|---|---|
+  | `assign` | 改判到某人 | `personCode=新, isConfirmed=1` | 删旧 linkKey + 写新 `source=1` | **原人 + 新人**全部桶 |
+  | `unknown` | 置为未知 | `personCode=NULL, isConfirmed=0` | 删旧 linkKey | 原人全部桶 |
+  | `stranger` | 标记陌生人 | `personCode=NULL, isStranger=1` | 删旧 linkKey | 原人全部桶 |
+
+  - 现有 `unassign()` 保留，但**明确它 == `fix('unknown')`**，别留两套语义
+- `batchFix(faceCodes, action, personCode)`：同一 `clusterCode` 批量，一个事务 + 一次重算
+- 每次写操作**必须落一条 `pb_review_log`**（`logCode` 幂等键、`opType`、`faceCode`、`photoCode`、
+  `fromPersonCode`、`toPersonCode`、`similarity`、`faceCount`、`opYMDHMS`）
+- ⚠️ 写 `pb_review_log` 时**注意 upsert 写 NULL 的坑**（assigner 文件头已记录：`update_*` 写不进 NULL，
+  `fromPersonCode` 为空时必须走 upsert + `forceColumns`）
+- ⚠️ 纪律 ③（`pb_photo_person` 只在「这张照片里确实有人属于 P」时存在）**继续生效**，
+  改判/陌生人/置未知都要走 `_facesInPhotoFor()` 判断后再决定删不删关联
+
+### 3.2 `merger.py`
+- `merge()` 迁移脸时写 `isConfirmed=1` —— **保持不变**（用户主动合并就是人工确认）
+- `merge()` / `split()` 各自落一条 `pb_review_log`，**`isRevertible=1`**
+- 新增 `undo(logCode)`：
+  - 只允许撤销 `isRevertible=1 AND revertedByLogCode IS NULL` 的记录，否则抛错
+  - 反向恢复 `pb_face.personCode` 与 `pb_photo_person` 关联
+  - **重算涉及双方的质心**
+  - 回填原记录的 `revertedByLogCode`，并写一条 `opType=UNDO` 的新日志
+  - `merge` 撤销要恢复 `fromPerson`（软删的 `pb_person.delFlag` 也要恢复）
+
+### 3.3 `centroid.py` —— 防污染 + 兜底桶
+- `loadFaceVectors(personCode, bucketKey, confirmedOnly=True)`：加 `isConfirmed=1` 过滤
+  - ⚠️ 生成层 `query_pb_face` **没有 `isConfirmed` 查询参数**（只有 recID/faceCode/photoCode/
+    personCode + nullFields）。**不要为此改生成器加参数**（要重生成 + 全库迁移，代价与收益
+    不成比例）；按现有文件头的做法：查回这个人的脸，在 Python 里过滤
+- 新增 `ALL` 桶：`bucketKey = "ALL"` = 该人**全部确认样本**（不分桶）
+- `computeCentroid()` / `recompute()` 支持 `ALL`
+- **质心三级启用**（写进文件头）：
+
+  | 优先级 | 桶 | 启用条件 |
+  |---|---|---|
+  | 1 | 相邻年代桶 | 该桶**确认样本** ≥ 3 |
+  | 2 | `ALL` 兜底桶 | 总确认样本 ≥ 3 |
+  | 3 | 无 | 总确认样本 < 3 → **该人不参与自动匹配** |
+
+- `recomputePerson()` 重算时**也要算 `ALL` 桶**，并把已不存在的桶清掉（现有清僵尸桶逻辑保留）
+- ⚠️ **`listBucketsOf()` 要排除 `ALL`**（它是虚拟桶，不来自任何 `pb_face.shotBucket`），
+  否则 `recomputePerson` 会去算一个不存在的桶
+- `dropPerson()` / `dropBucket()` / `centroidOf()` 保持可用，`ALL` 走同一套
+
+### 3.4 `matcher.py` —— 候选桶并入 `ALL`
+- 候选桶 = `bucket.neighborBucketKeys(bucketKey, neighbor)` **∪ `["ALL"]`**
+- `shotBucket` 为空（截图、EXIF 缺失）的脸：`neighborBucketKeys("")` 返回 `[]`，
+  候选桶就是 `["ALL"]` —— **这类脸现在也能匹配了**，别让它直接掉进聚类
+- `candidateBuckets` 报告要如实反映实际参与的桶
+- 三段式判定、原因码、Top-5 降序、两次跑完全一致 —— 这些既有行为**不要动**
+
+### 3.5 `basicSettings.py` —— 冷启动开关
+新增：
+```
+CENTROID_CONFIRMED_ONLY: bool = True   # True=只用 isConfirmed=1 样本（防污染，默认）
+                                       # False=退回旧口径（全样本），仅用于回归对比与冷启动
+```
+⚠️ **为什么需要这个开关**：改成「只用确认样本」后，**在用户还没人工确认过任何脸之前，
+所有质心都不可用 → 自动归属数为 0 → 所有人脸进待确认队列**。
+这是**正确行为**（没有干净样本可用），但会让 S0 回归验证跑不出结果。
+所以留一个逃生口：验收第 21 条与 S0 回归对比用 `False`，日常跑 `True`。
+
+## 四、验收清单（逐条实际运行，不要只写代码就宣称通过）
+
+### A. 迁移
+1. 迁移前已备份 `photolib.db.bak-before-R`
+2. `build_db.py --migrate` 成功；**逐表行数迁移前后完全一致**（贴出前后对照）
+3. `PRAGMA table_info(pb_face)` 含 `isStranger`（默认 0）；`sqlite_master` 含 `pb_review_log`
+   与 4 个新索引
+4. `PRAGMA integrity_check` 返回 ok
+
+### B. 语义修正
+5. `fix_confirmed_flag.py --dry-run` 输出合理 → 实跑后：
+   `SELECT COUNT(*) FROM pb_face WHERE personCode IS NOT NULL AND isConfirmed=0` **> 0**
+   （这就是「我不同意」列表的条数，必须不为 0，否则说明回改没生效）
+6. 四态互斥性检查（写 SQL 验证）：
+   - 待确认 = `personCode IS NULL AND isStranger=0`
+   - 我不同意 = `personCode IS NOT NULL AND isConfirmed=0 AND isStranger=0`
+   - 人工确认 = `isConfirmed=1`
+   - 陌生人 = `isStranger=1`
+   - **四者之和 == `pb_face` 总行数**（不重不漏）
+
+### C. 质心防污染（**本步最核心的三条**）
+7. 造测试数据：某 person 某桶放 2 张 `isConfirmed=1` + 1 张 `isConfirmed=0`（属于别人的脸），
+   `recomputePerson` 后该桶 **`sampleCount == 2` 且 `centroid` 与只有那 2 张时逐字节相同**
+   —— 证明自动样本没进质心
+8. `ALL` 兜底：某 person 桶确认样本只有 1 张，但总确认样本 4 张 → 该桶不启用、
+   **`ALL` 桶启用且 sampleCount=4**，且该人能被匹配到
+9. 总确认样本 2 张的人 → **不启用任何质心**，`loadAllCentroids` 的索引里没有他
+10. `shotBucket` 为空的脸 → 候选桶 == `["ALL"]`，能拿到分数（不再直接掉聚类）
+11. 旧质心已全部重算（贴出重算前后 `pb_person_centroid` 行数与 `sampleCount` 变化）
+
+### D. 纠错链路
+12. `fix(action='assign')`：**原人与新人的质心都重算**（查两人 `modifyYMDHMS` 或质心内容，
+    只重算一边算不合格）；旧 `linkKey` 已删；新行 `source=1`
+13. `fix(action='unknown')` → 该脸进待确认队列；关联行按纪律 ③ 正确存废
+14. `fix(action='stranger')` → 该脸**既不在待确认、也不在「我不同意」、也不参与聚类**
+15. `merge` 后 `undo` 能完整还原（人脸归属 + `pb_photo_person` + 双方质心 + `fromPerson` 的
+    `delFlag`），且 `revertedByLogCode` 已回填
+16. `undo` 对 `isRevertible=0` 的记录（普通确认）**必须报错拒绝**
+17. 每次写操作都新增了一条 `pb_review_log`，`opType`/`fromPersonCode`/`toPersonCode` 正确
+18. `verifyLinks()` 仍然 `clean=True`（改判/陌生人之后不能留下幽灵关联）
+19. **纪律 ③ 回归**：同一张合影里 P 有 2 张脸，把其中 1 张改判给别人 →
+    `pb_photo_person` 里 P 的那行**必须还在**（还有 1 张脸属于 P）
+
+### E. 回归
+20. `pytest code/src/test` 全绿（含新增的防污染、兜底桶、改判、撤销单测）
+21. `CENTROID_CONFIRMED_ONLY=False` 时行为与修正前一致（**用旧口径跑一遍 S0 验证集，
+    给出 FR 数字**，与之前基线对比，确认代码改动没有意外改变匹配能力）
+22. `tools/backtest_s0.py` 跑通，给出准确率与耗时
+23. `tools/scan_cli.py --db <临时库>` 指向临时库跑一小批，确认**正式库行数不变**
+    （`--db` 是 DR-10 强调过的坑，务必验证）
+24. **photoDir 零风险**：扫描前后 `photoDir` 的文件数与总字节数完全一致
+
+## 五、硬约束
+- **原图绝对只读**：`d:\PhotoLib\photo` 一律只读，扫描前后文件数与字节数必须一致
+- **迁移只加不删**：`--migrate` 不删列不改类型不动数据；不删任何行
+- **业务层禁止裸 SQL**：一切读写经 `sqliteCommon`；新表走生成的
+  `query_pb_review_log` / `insert_pb_review_log` / `update_pb_review_log` / `delete_pb_review_log`
+- **禁止手工改 `auto_generated/`**：改表一律回 `pb_*.txt` 再重跑生成器
+- **单写入者**：所有写库在主进程；本步不引入子进程
+- 现有代码风格（文件头纪律说明、错误码、`_VERSION`、日志）保持一致，别把注释删了
+- 不要顺手重构与本步无关的代码
+
+## 六、完成后必须输出
+1. 改动文件清单（新增 / 修改，逐个列路径）
+2. 验收结果（上面 24 条**逐条**给命令与实际输出 / 数值）
+3. 遗留问题与需要我决策的点
+4. **存量数据修正后的统计**：四态各多少条、质心重算前后对比
+5. 步骤 7 可以开始的判断：以上 24 条是否全部通过
+```
 
 ---
 ---
@@ -126,11 +362,14 @@
   - d:/home/lianyi/git/stock_rotation_strategy/src/database/mysqlCodeGenerator.py  ← 生成器结构参照
   - d:/home/lianyi/git/contentHub/code/src/database/*.txt  ← 表定义书写规范参照
 
-## 第一件事：把 recID 改成 INT
-把 code/src/database/ 下 8 个表定义文件的首行统一改为：
-    recID INT AUTO_INCREMENT PRIMARY KEY COMMENT '记录ID'
-涉及：pb_family / pb_person / pb_person_category / pb_photo / pb_face / pb_person_centroid / pb_photo_person / pb_scan_job
-这是唯一数据源，改完才能跑生成器。禁止只改生成产物。
+## 第一件事：确认表定义已定稿（9 张表）
+表定义**已是最终态**，跑生成器前逐条核对，不一致先改 `.txt`（唯一数据源），**禁止只改生成产物**：
+- 9 个文件：pb_family / pb_person / pb_person_category / pb_photo / pb_face / pb_person_centroid / pb_photo_person / pb_scan_job / **pb_review_log**
+- 每个文件首行必须是 `recID INT AUTO_INCREMENT PRIMARY KEY COMMENT '记录ID'`（9 个都是 INT，**没有 BIGINT**）
+- `pb_face` 含 `isConfirmed`（归属是否经人工确认）+ **`isStranger`**（是否标记为陌生人）两个独立字段
+- `pb_person_centroid.bucketKey` 允许特殊值 **`ALL`**（兜底桶，不分桶）；`sampleCount` 只统计**人工确认**样本
+- `pb_photo_person.source`：`0` 自动归属未确认 / `1` 人工确认或改判
+- `pb_review_log` 是第 9 张表（纠错审计与撤销依据），字段见 `plan/数据库设计.md` §4.9
 
 ## 本步产出文件
 1. code/src/common/sqliteHandle.py
@@ -150,13 +389,18 @@
      MEDIUMBLOB                      -> BLOB
    - 保留 #common begin/end 区段（通用 insertTableGeneral / updateTableGeneral / chkTableExist）
    - 各表生成：create_pb_xxx / query_pb_xxx / insert_pb_xxx / update_pb_xxx / delete_pb_xxx
-   - 建表时一并输出索引（清单照 plan/数据库设计.md §五，命名 idx_<表>_<字段>，含 pb_face(personCode IS NULL) 部分索引）
+   - 建表时一并输出索引（清单照 plan/数据库设计.md §五，命名 idx_<表>_<字段>，**含 4 个部分索引**：
+     `pb_face(personCode IS NULL)` 待确认队列、`pb_face(personCode, isConfirmed) WHERE isConfirmed=0 AND isStranger=0` 「我不同意」列表、
+     `pb_review_log(isRevertible) WHERE isRevertible=1 AND revertedByLogCode IS NULL` 撤销候选、`pb_photo(movedToPhotoCode)`）
    - 产物落 code/src/database/auto_generated/sqliteCommon.py
    - 注意：SQLite 无 VARCHAR 类型，VARCHAR(n) 的长度 (n) 不被强制，业务层自行校验
+   - **`.txt` 里的 `UNIQUE` 关键字不写进列定义**，由生成器按 §五 转成命名唯一索引 `idx_<表>_<字段>`（避免同一份唯一性生成两次）
 3. code/src/database/auto_generated/sqliteCommon.py   ← 生成产物，禁止手工改
 4. code/src/tools/build_db.py
    - 按 pb_*.txt 建库建表建索引；缺目录自动创建（db 目录）
    - 支持重复执行（幂等）
+   - 支持 `--migrate`：比对 .txt 与实际列，只 `ALTER TABLE ADD COLUMN` 补缺的（**不动任何一行**），不删列不改类型
+   - 支持 `--db <路径>` 指向临时库（**校验用**，不碰正式库）
 
 ## 硬约束
 - 业务层禁止裸 SQL（本步只生成数据访问层，不写业务）
@@ -168,12 +412,14 @@
 ## 验收清单（逐条实际运行验证）
 1. 运行生成器，auto_generated/sqliteCommon.py 成功产出，且文件头标注「自动生成，请勿手改」
 2. python code/src/tools/build_db.py 建库成功，d:\PhotoLib\db\photolib.db 存在
-3. sqlite3 / PRAGMA 查询确认 8 张表齐全，索引齐全
+3. PRAGMA 查询确认 **9 张表**齐全，索引齐全（含 4 个部分索引）
 4. PRAGMA table_info(pb_photo) 显示 recID 类型为 INTEGER 且 pk=1
-5. PRAGMA journal_mode 返回 wal；PRAGMA foreign_keys 返回 1
-6. 重复执行 build_db.py 不报错、不重复建表（chkTableExist 幂等）
-7. 写一条测试记录走通用 insert → query → update → 删除，验证 %s→? 转换与 blob 读写正常
-8. PRAGMA integrity_check 返回 ok
+5. PRAGMA table_info(pb_face) 确认存在 `isConfirmed` 与 `isStranger` 两列，默认值均 0
+6. PRAGMA journal_mode 返回 wal；PRAGMA foreign_keys 返回 1
+7. 重复执行 build_db.py 不报错、不重复建表（chkTableExist 幂等）
+8. `--migrate` 在一个缺列的旧库副本上跑通：只加列、不删数据（前后行数一致）
+9. 写一条测试记录走通用 insert → query → update → 删除，验证 %s→? 转换与 blob 读写正常
+10. PRAGMA integrity_check 返回 ok
 
 ## 输出格式
 1. 改动文件清单
@@ -430,50 +676,67 @@ thumbDir\   生成物，可随时重建
      age >  18  → 从 birth_year+18 起每 10 年一桶（18+ 10 年一桶）
    - birth_year 未知 → 降级 bucket_key_equal(shot_year)：等宽 5 年
    - shot_year 未知 → 返回空/NULL，不参与跨桶比对（截图类）
-2. code/src/engine/match/centroid.py
-   - 按 (personCode, bucketKey) 归一化均值向量；sampleCount < 3 的桶不启用
-   - recompute(personCode, bucketKey)：人工确认后**立即**重算，不做全量重跑
-   - load_all_centroids() -> (matrix, index)：启动/请求时全量加载，3 万 × 512 float32 ≈ 60MB
+2. code/src/engine/match/centroid.py —— **质心防污染是本步的重点**
+   - 按 (personCode, bucketKey) 归一化均值向量
+   - ⚠️ **只用 `pb_face.isConfirmed=1` 的人工确认样本计算质心**，自动归属的样本一律不入（否则误认样本拉偏质心 → 越错越错）
+   - `sampleCount` = 参与计算的**确认样本**数
+   - **`ALL` 兜底桶**：bucketKey='ALL' 表示「该人全部确认样本、不分桶」。某年代桶确认样本 <3 时用它兜底，保证早期样本不足仍能自动归属
+   - 该人总确认样本 <3 → **不启用任何质心**（不参与自动匹配，其脸全部走待确认队列）
+   - `recompute_person(personCode)`：重算该人**全部**桶（含 ALL），是唯一写质心的入口；确认/改判/拆分/合并后调用
+   - `load_centroids(personCode, bucketKeys)`：**按候选桶惰性加载**（DR-12：10 万 × 512 float32 = 205MB，全量加载已超内存预算；本项目本来就只取相邻三桶）
 3. code/src/engine/match/matcher.py
    - match(face)：
-     候选桶 = [B0-1, B0, B0+1] 中所有有样本的桶
+     候选桶 = [B0-1, B0, B0+1] 中所有有样本的桶 **∪ {ALL}**
      score = **max**(cosine(face, centroid[bucket]))   ← 取 max，不取 mean
-     score >= T_HIGH → 自动归属
+     score >= T_HIGH → 自动归属（**`isConfirmed` 保持 0**，`pb_photo_person.source=0`）
      T_LOW <= score < T_HIGH → 待人工确认，记 Top-5 候选
      score < T_LOW → 未知人脸，进聚类（步骤 7）
-   - 全量人脸一次性比对用 numpy 矩阵乘（暴力搜索，不引 ANN 索引）
+   - 批量比对用 numpy 矩阵乘（暴力搜索，不引 ANN 索引）
    - Top-5 候选排序稳定（同分按 displayName）
-4. code/src/processor/review/assigner.py
-   - assign(faceCode, personCode, source) → 写 pb_face.personCode / isConfirmed，写 pb_photo_person（linkKey = photoCode:personCode 幂等）
-   - 确认后立即调用 centroid.recompute
-   - confirm_person(personCode, faceCodes[]) 批量确认
+4. code/src/processor/review/assigner.py —— **改判入口（纠错核心，DR-16）**
+   - `assign(faceCode, personCode)` 首次确认：写 `pb_face.personCode` + `isConfirmed=1`，写 `pb_photo_person`（linkKey 幂等，source=1），重算该人全部桶
+   - `fix(faceCode, action, personCode=None)` **改判**，`action ∈ {assign / unknown / stranger}`：
+     · `assign` 改到别人 → 删旧 `linkKey`、写新 `source=1`、**重算原人 *与* 新人** 全部桶
+     · `unknown` 置为未知 → `personCode=NULL`、`isConfirmed=0`、删旧 `linkKey`、重算原人
+     · `stranger` 标记陌生人 → `personCode=NULL`、`isStranger=1`、删旧 `linkKey`、重算原人
+   - `batch_fix(faceCodes[], action, personCode)` 同一 `clusterCode` 批量（一次点击解决 N 张）
+   - **每次操作必须写一条 `pb_review_log`**（`logCode` 幂等键、`opType`、`fromPersonCode`/`toPersonCode`、`similarity`、`faceCount`）
+   - 每次操作后**同步刷新** `pb_photo.faceCount` 与相关计数
 5. code/src/processor/review/merger.py
-   - merge(fromPerson, toPerson)：迁移 pb_face.personCode、pb_person_centroid、pb_photo_person、avatarFaceCode
-   - split(faceCode, newPersonCode 或置为未归属)
-6. code/src/test/test_bucket.py / test_matcher.py：桶边界单测必须覆盖 0/3/17/18/19/70 岁、跨年、shotYear=NULL
+   - `merge(fromPerson, toPerson)`：迁移 `pb_face.personCode`、`pb_person_centroid`、`pb_photo_person`、`avatarFaceCode`；写 `pb_review_log`（`isRevertible=1`）
+   - `split(faceCode, newPersonCode=None)`：从某人拆出 → 写日志（`isRevertible=1`）
+   - `undo(logCode)`：只允许撤销 `isRevertible=1 AND revertedByLogCode IS NULL` 的记录；反向恢复人脸归属与关联行，**重算双方质心**，回填 `revertedByLogCode` 并写一条 `opType=UNDO`
+6. code/src/test/：桶边界单测（0/3/17/18/19/70 岁、跨年、shotYear=NULL）+ 质心防污染单测 + 改判副作用单测
 
 ## 硬约束
 - 相邻三桶取 **max**，不是 mean
-- 每桶 sampleCount >= 3 才启用
+- **质心只用人工确认样本**；`ALL` 兜底桶只在桶样本不足时启用
+- **自动归属时 `isConfirmed` 保持 0** —— `isConfirmed` 只表示「经人工确认」，不参与「是否进待确认队列」的判定
+- 四态互斥（由 `personCode` / `isConfirmed` / `isStranger` 推导，**不要新增 matchType 字段**）：
+  未归属 = `personCode IS NULL AND isStranger=0`｜自动归属未确认 = `personCode NOT NULL AND isConfirmed=0 AND isStranger=0`｜人工确认 = `isConfirmed=1`｜陌生人 = `isStranger=1`
 - 向量 BLOB 为 float32[512] 小端
-- 不引入 FAISS / sqlite-vec 等向量库（3 万规模暴力比对 <10ms）
+- 不引入 FAISS / sqlite-vec 等向量库（暴力比对即可）
 - 阈值写进 config/basicSettings.py，可切换「保守/激进」两套
-- 匹配只写库不做 IO，不写 photoDir
+- 匹配只写库不做文件 IO，不写 photoDir
 
 ## 验收清单
 1. 桶边界单测全部通过（列出实际测试用例与结果）
 2. 相邻三桶 max 生效：构造一个在相邻桶分数更高的人脸，确认取到较大值
-3. sampleCount < 3 的桶不参与匹配
-4. 三段式决策可复现：同一批人脸跑两次结果完全一致
-5. 切换「保守/激进」阈值，结果按预期变化且可回退
-6. 全量 3 万人脸 load_all_centroids 后内存占用 <100MB
-7. assign 后该 person 的 pb_person_centroid 立即更新（sampleCount 变化可见）
-8. merge/split 后 pb_photo_person 与 pb_face 一致，无孤儿记录
-9. 用 S0 验证集做回归：分桶后的 FR 明显低于不分桶
+3. **某桶只有 1 张确认样本时回退 `ALL` 桶并能匹配成功**（构造数据验证）
+4. **总确认样本 <3 的人不参与自动匹配**（其脸全部落到待确认）
+5. **质心防污染**：往某桶塞 1 张属于他人的**自动**样本（`isConfirmed=0`），`recompute_person` 后 `centroid` BLOB 与 `sampleCount` **均不变**
+6. 三段式决策可复现：同一批人脸跑两次结果完全一致
+7. 切换「保守/激进」阈值，结果按预期变化且可回退
+8. **10 万人脸下按候选桶惰性加载，内存占用 <100MB**（不是靠全量加载）
+9. `assign` 后该 person 的 `pb_person_centroid` 立即更新（`sampleCount` 变化可见）
+10. **改判副作用齐全**：`fix('assign')` 后原人与新人的质心都重算、旧 `linkKey` 已删、新 `source=1` 已写、`pb_review_log` 新增一条
+11. `fix('stranger')` 后该脸既不进待确认队列也不进聚类
+12. `merge`/`split` 后 `pb_photo_person` 与 `pb_face` 一致无孤儿；`undo` 能完整还原
+13. 用 S0 验证集做回归：分桶后的 FR 明显低于不分桶
 
 ## 输出格式
 1. 改动文件清单
-2. 验收结果（9 条逐条给命令与实际输出/数值）
+2. 验收结果（13 条逐条给命令与实际输出/数值）
 3. 遗留问题与需要我决策的点
 ```
 
@@ -486,47 +749,54 @@ thumbDir\   生成物，可随时重建
 【photo-browser · 步骤 7/12 · 聚类与待确认数据】
 
 ## 目标
-把识别不出来的脸自动聚成「未命名人物」候选，并让待确认队列的数据口径与扫描进度一致。
+把识别不出来的脸自动聚成「未命名人物」候选，并让待确认队列的数据口径准确（不把自动归属的脸算进来）。
 
 ## 前置
-步骤 6 已完成（matcher 能输出「未知人脸」集合）。
+步骤 6 已完成（matcher 能输出「未知人脸」集合，assigner/merger 已就位）。
 
 ## 必须先读的项目文档
-- plan/开发计划.md 第 3.2 节
-- plan/数据库设计.md §4.5 pb_face.clusterCode、§四 D-4（不建独立待确认表）
+- plan/开发计划.md 第 3.2 节、DR-16（纠错闭环）
+- plan/数据库设计.md §4.5 pb_face（**四态语义表**）、§4.9 pb_review_log、§四 D-4
 
 ## 本步产出文件
 1. code/src/engine/cluster/dbscan.py
    - 纯 numpy 实现 DBSCAN（余弦距离 = 1 - cos），可选 sklearn 作为加速后端（若装则用 sklearn，不装则用自实现）
    - 参数默认 eps=0.45、min_samples=3（集中放 basicSettings.py）
-   - **只对未归类人脸集合聚类**（personCode IS NULL）
-   - clusterCode 幂等：同一簇重跑应得到相同编码（编码规则：cluster_<hash>，hash 基于簇内 faceCode 排序后计算）
+   - **只对未归类集合聚类**：`personCode IS NULL AND isStranger=0 AND delFlag='0'`
+   - clusterCode 幂等：同一簇重跑应得到相同编码（编码规则：`cluster_<hash>`，hash 基于簇内 faceCode 排序后计算）
    - 代表样本：每簇取 detScore 最高的人脸作为簇代表，便于前端展示
-2. 待确认队列查询（写入生成层或 processor）
-   - 待确认定义：personCode IS NULL OR isConfirmed=0
-   - 每个待确认人脸返回 Top-N 候选人物（复用步骤 6 的 matcher，候选含头像 faceCode、displayName、similarity）
-   - 统计条数，供与 pb_scan_job.pendingCount 交叉校验
-3. code/src/tools/cluster_cli.py：--eps 0.45 --min-samples 3 [--dry-run]
+2. 队列查询（写入生成层或 processor）—— **两个队列，口径不同**
+   - **待确认队列** = `personCode IS NULL AND isStranger=0 AND delFlag='0'`
+     每个条目返回 Top-N 候选人物（复用步骤 6 的 matcher，含头像 faceCode、displayName、similarity）
+   - **「我不同意」列表** = `personCode IS NOT NULL AND isConfirmed=0 AND isStranger=0 AND delFlag='0'`
+     按 `photoCode` 分组，供前端展示「机器认的，可否决」；返回该人当时的 `similarity`
+   - ⚠️ **绝对不要用 `OR isConfirmed=0`**：自动归属的 `isConfirmed` 本来就是 0，用它会把**全部自动归属**扫进待确认队列（10 万张 ≈ 4~8 万条，队列爆炸）
+   - ⚠️ **`pendingCount` 口径要拆开**：`pb_scan_job.pendingCount` 记的是「疑似移动/重命名待确认张数」（步骤 3 的 `movedToPhotoCode`），**与待确认人脸数是两个不同计数**，不要混用同一个字段；待确认人脸数请直接 SQL count
+3. code/src/tools/cluster_cli.py：--eps 0.45 --min-samples 3 [--dry-run] [--rebuild]
 4. code/src/test/test_dbscan.py：合成数据验证聚类正确性、clusterCode 幂等性
 
 ## 硬约束
-- 不新建待确认表（用 personCode 可空表达，数据库设计 D-4）
-- 不新建 pb_face_cluster 表（用 clusterCode，Q-3 建议暂不建）
-- 已归类人脸绝不能被重新聚类
-- 聚类只读 embedding，不写 photoDir
+- 不新建待确认表（`personCode` 可空即表达，数据库设计 D-4）
+- 不新建 `pb_face_cluster` 表（用 `clusterCode`，Q-3）
+- 不新建「我不同意」队列表（用 `personCode + isConfirmed` 组合表达，Q-3b）
+- 已归类人脸绝不能被重新聚类；**`isStranger=1` 的脸既不进队列也不进聚类**
+- 聚类只读 embedding，不写 photoDir；不写 `pb_review_log`（聚类是机器行为，不是人工操作）
 - eps / min_samples 必须可配置
 
 ## 验收清单
 1. 对未归类集合聚类，簇数量合理；输出每簇代表样本的 contact sheet（临时拼图即可）供抽查
 2. 肉眼抽查 3 个簇，确认簇内确实是同一个人
-3. 重跑聚类，clusterCode 完全稳定（不产生新编码）
-4. 已归类人脸（personCode 非空）数量在聚类前后不变
-5. 待确认队列条数 == pb_scan_job.pendingCount
-6. 单测通过；3 万规模聚类耗时可接受（给出实际秒数）
+3. 重跑聚类，`clusterCode` 完全稳定（不产生新编码）
+4. 已归类人脸（`personCode` 非空）数量在聚类前后不变
+5. **待确认队列条数 = `SELECT COUNT(*) FROM pb_face WHERE personCode IS NULL AND isStranger=0 AND delFlag='0'`**（直接 SQL 数，不读 `pendingCount`）
+6. **构造 10 条自动归属数据（`personCode` 非空 + `isConfirmed=0`），待确认队列仍为 0 条**（DR-16 修正点，必须验证）
+7. `isStranger=1` 的脸既不在待确认队列也不在「我不同意」列表
+8. 「我不同意」列表条数 = `personCode IS NOT NULL AND isConfirmed=0` 的行数
+9. 单测通过；聚类耗时可接受（给出实际秒数与规模）
 
 ## 输出格式
 1. 改动文件清单
-2. 验收结果（6 条逐条给命令与实际输出/数值）
+2. 验收结果（9 条逐条给命令与实际输出/数值）
 3. 遗留问题与需要我决策的点
 ```
 
@@ -575,7 +845,7 @@ thumbDir\   生成物，可随时重建
 - 导入不阻塞、不做长事务（分批提交）
 
 ## 验收清单
-1. 导入 200 人 CSV：姓名/姓氏/关系/生日/邮箱/电话/分类全部正确落库
+1. 导入 200 人 CSV：姓名/姓氏/关系/生日/邮箱/电话/分类全部正确落库，在D:\temp\contacts 有真实vCard和csv文件
 2. 重复导入**同一文件**：新增 0 条，已存在记录被更新，pb_person_category 无残留旧行
 3. 按 category='family' 查询结果正确
 4. vCard 4.0 的 KIND:group 能识别为 pb_family，并把成员挂上 familyGroupCode
@@ -624,20 +894,26 @@ thumbDir\   生成物，可随时重建
    - POST /api/scan/resume/{jobCode} → 继续下一批
    - POST /api/scan/stop/{jobCode}
    - GET /api/scan/jobs → 任务列表
-4. code/src/api/review.py（P1）
-   - GET /api/review/pending?page&size&pageToken
-   - PUT /api/review/{faceCode}/assign { personCode } → 确认归属
-   - POST /api/review/batch-assign { faceCodes[], personCode }
+4. code/src/api/review.py（P1 · 纠错闭环，DR-16）
+   - GET  /api/review/pending?page&size            待确认队列 = `personCode IS NULL AND isStranger=0`
+   - GET  /api/review/disputed?page&size&groupByPhoto  **「我不同意」列表** = `personCode IS NOT NULL AND isConfirmed=0 AND isStranger=0`，按 photoCode 分组
+   - GET  /api/review/pending/count               侧栏角标，返回 `{ pendingCount, disputedCount }` **两个数**
+   - PUT  /api/review/{faceCode}/assign { personCode }        首次确认
+   - POST /api/review/batch-assign { faceCodes[], personCode } 批量确认
+   - POST /api/review/fix { faceCode \| faceCodes[], action, personCode? }   **改判**，action ∈ `assign` / `unknown` / `stranger`
+   - POST /api/review/batch-fix { faceCodes[], action, personCode }  同一 clusterCode 批量
    - POST /api/review/merge { fromPersonCode, toPersonCode }
    - POST /api/review/split { faceCode, personCode? }
-   - POST /api/review/ignore { faceCode }（标记陌生人）
-   - GET /api/review/pending/count → 侧栏角标
+   - POST /api/review/undo { logCode }              **撤销**一条 isRevertible=1 的 SPLIT/MERGE
+   - GET  /api/review/log?faceCode=&photoCode=      操作历史（排障用）
+   - GET  /api/review/revertible                   当前可撤销的操作列表
+   > `fix` / `batch-fix` / `undo` **只做编排**：删旧 linkKey、写新 source=1、重算原人与新人全部桶、同步 faceCount、落 `pb_review_log` 全部交给步骤 6 的 `assigner`/`merger`/`centroid`，**api 层不重复实现这套逻辑**
 5. code/src/api/contacts.py（P1）
    - POST /api/contacts/import/csv（multipart）
    - GET /api/contacts（分页 + 按 category 筛选）
    - GET /api/families、GET /api/places（供筛选与后续地图）
 6. code/src/main/app.py：路由统一注册、静态资源、CORS 仅本机
-7. code/src/test/：关键接口冒烟测试
+7. code/src/test/：关键接口冒烟测试 + 纠错接口副作用测试
 
 ## 硬约束
 - 业务层**禁止裸 SQL**，全部经 sqliteCommon
@@ -646,20 +922,29 @@ thumbDir\   生成物，可随时重建
 - 服务只绑 127.0.0.1
 - 合并/拆分/软删等不可逆操作：服务端做参数复述所需的查询，前端负责二次确认
 - 原图零风险：任何接口都不得写/删 photoDir
+- **改判必须重算原人 *与* 新人**的质心（只重算一边 = 越改越乱）
+- **每个写操作都要落 `pb_review_log`**，不允许静默改库
 
 ## 验收清单
 1. uvicorn 启动后访问 /docs 能看到全部接口且可试调
 2. 触发扫描 → 轮询 /api/scan/status/{jobCode} 能看到**真实计数**推进，到 batchSize 转 PAUSED
-3. 3 万张照片下 GET /api/timeline 首屏响应 <500ms（给出实测毫秒数）
+3. 10 万张照片下 GET /api/timeline 首屏响应 <500ms（给出实测毫秒数）
 4. GET /api/photos 筛选 personCode / 年份区间 / hasFace 均正确
 5. 待确认队列分页正确，Top-5 候选按相似度降序
 6. assign 后该 person 的 photoCount 立即变化；确认后质心即时重算
 7. merge 双方数据正确合并，无孤儿记录
-8. 确认无接口修改 photoDir（代码走查 + 文件数/字节数前后比对）
+8. **改判 `fix(action='assign')`：原人与新人的 `pb_person_centroid` 都已重算**（查 `modifyYMDHMS` 或对比质心内容，只重算一边算不合格）
+9. **改判后无残留旧 `linkKey`**；`pb_photo_person` 中该照片只关联新 person
+10. **`fix(action='stranger')` 后该脸不在待确认队列、也不在「我不同意」列表**
+11. **`/api/review/disputed` 返回的条数 = `personCode IS NOT NULL AND isConfirmed=0 AND isStranger=0` 的行数**（自动归属的脸确实在这里，不在待确认队列里）
+12. **`/api/review/undo` 能把一次 merge 完整还原**（人脸归属 + `pb_photo_person` + 双方质心），且 `pb_review_log` 回填了 `revertedByLogCode`
+13. **每次纠错调用都新增一条 `pb_review_log`**，`opType` / `fromPersonCode` / `toPersonCode` / `faceCount` 正确
+14. `GET /api/review/pending/count` 返回 `{ pendingCount, disputedCount }` **两个数且不相等**（构造数据验证）
+15. 确认无接口修改 photoDir（代码走查 + 文件数/字节数前后比对）
 
 ## 输出格式
 1. 改动文件清单
-2. 验收结果（8 条逐条给命令与实际输出/数值）
+2. 验收结果（15 条逐条给命令与实际输出/数值）
 3. 遗留问题与需要我决策的点
 ```
 
@@ -743,14 +1028,15 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 【photo-browser · 步骤 11/12 · 照片流 + 照片详情 + 待确认队列】
 
 ## 目标
-打通主链路：看照片 → 看人脸 → 确认归属。这是全项目最关键的一步。
+打通主链路：看照片 → 看人脸 → 确认归属 → **发现认错了能改**。这是全项目最关键的一步。
 
 ## 前置
 步骤 10 已完成（前端骨架与主题就绪）。
 
 ## 必须先读的项目文档
 - plan/UI/photo-browser UI 设计.md 第 4.3/4.4/4.6 节（三个页面的 ASCII 布局）、第 1.2 节设计原则、第 6.2 节交互流程
-- plan/开发计划.md 步骤 11 行的全部验收项
+- plan/开发计划.md 步骤 11 行的全部验收项、**DR-16（纠错闭环）**
+- plan/数据库设计.md §4.5 四态语义表
 
 ## 本步产出文件
 1. src/views/PhotosView.vue
@@ -764,14 +1050,18 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 3. src/views/PhotoDetailView.vue
    - 主图（支持 Range 预加载）+ 右侧信息栏：拍摄信息（时间/相机/尺寸/地点/文件 hash）
    - 「出现的人」列表可跳转人物详情
-   - 操作：确认归属 / 标记重复 / 软删除（软删需 danger 二次确认）
-4. src/components/photo/FaceBox.vue
+   - 操作：确认归属 / **改判（✗ 不是他）** / 标记重复 / 软删除（软删需 danger 二次确认）
+4. src/components/photo/FaceBox.vue —— **纠错入口都在这里（DR-16）**
    - 绝对定位框 + 2px 描边；**已归属绿 / 待确认橙**
    - 悬停显示人名 + 相似度
    - **颜色 + 图标 + 文字三重编码**（灰度/色盲下仍可辨）
+   - **三种描边样式区分归属来源**：实线 = 人工确认（`isConfirmed=1`）、**虚线 = 机器自动认的（`isConfirmed=0`，可否决）**、点线 = 待确认
+   - **悬停出「✗ 不是他」按钮**（图标 + 文字，不只靠颜色）：点击开改判浮层 → 候选人物（带相似度）/ 新建人物 / 置为未知 / 标记陌生人
+   - 改判浮层里也要有「就这张照片的其他脸也否决」的入口
 5. src/components/photo/BucketTimeline.vue
    - 按年代桶分组的横向缩略图带；桶数自适应，空桶不显示
 6. src/views/ReviewView.vue（**待确认队列，核心页**）
+   - **双 Tab**：「待确认 N」（`/api/review/pending`）+「我不同意 M」（`/api/review/disputed`）
    - 顶部：剩余 N / 总数 M、跳过、忽略此人脸
    - 左侧未知人脸大图；右侧候选人物按相似度降序（头像 + 姓名 + 相似度 + 确认按钮）
    - 灰区条目橙色提示；候选旁可显示关系提示（如「兄妹，长相接近」，取自 relation 字段）
@@ -779,33 +1069,43 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
    - **键盘快捷键**：1/2/3 选候选、N 新建、S 跳过、I 忽略
    - **批量确认**：同一聚类簇下所有人脸一次全确认
    - 「合并」/「拆分」入口在手边，不藏三级菜单
-7. src/components/review/CandidateRow.vue、src/components/review/ConfirmMerge.vue
+   - **「我不同意」Tab**：按照片分组，每组支持**整张一键否决**（≤2 次点击）+ 簇内批量改判；每条显示「机器认成 X，相似度 0.62」与「去改判」
+7. src/components/review/DisputedList.vue（「我不同意」列表）
+8. src/components/review/CandidateRow.vue、src/components/review/ConfirmMerge.vue
    - ConfirmMerge：**复述双方姓名 + 照片数**，动词按钮「确认合并」，二次确认
-8. 对应 store 与 api 接入（photos / review）
+9. src/components/common/FixFaceDialog.vue（改判浮层，三种 action 共用）
+10. 对应 store 与 api 接入（photos / review）
 
 ## 硬约束
 - **网格里绝不加载原图**
 - 不确定就要问：灰区（`T_LOW`–`T_HIGH`）一律进队列，**不静默归属**
 - 人脸框必须永远可见
-- 不可逆操作（合并/软删）必须参数复述 + 二次确认
+- **「✗ 不是他」必须一次点击可达**（人脸框悬停即出），不许绕到人物详情 Tab2 —— 用户在照片流里看到认错的第一反应就是就地纠正
+- **自动归属但未确认的脸要能被一眼识别**（虚线描边 + 角标），否则用户根本不知道哪些可以否决
+- 不可逆操作（合并/软删/**标记陌生人**）必须参数复述 + 二次确认
 - 原图零风险：UI 不提供任何编辑/覆盖/删除原图的入口
 - 状态识别不得单靠颜色
+- 侧栏角标分**两个数**（待确认数 / 我不同意数），不要合并成一个
 
 ## 验收清单
-1. 3 万张照片滚动不卡（说明用了分页还是虚拟滚动，给出实测帧率或耗时）
+1. 10 万张照片滚动不卡（说明用了分页还是虚拟滚动，给出实测帧率或耗时）
 2. 打开照片流时，Network 面板**只看到 /api/thumb**，没有 /api/original
 3. 点击缩略图 → 进入详情 → 才发起 /api/original 请求；拖动滚动原图流畅（Range 生效）
-4. 人脸框在已归属/待确认两种状态下颜色、图标、文字都正确且可辨
+4. 人脸框在**人工确认 / 自动归属 / 待确认**三种状态下颜色、描边样式、图标、文字都正确且可辨
 5. 确认一张人脸归属后：该人照片数立即更新，队列自动前进到下一条
 6. 批量确认 50 张同类人脸 ≤3 次点击
 7. 键盘 1/2/3/N/S/I 全部生效（逐个测）
 8. 合并弹窗正确复述双方姓名与照片数，取消无副作用
-9. 网格 hover 微交互、懒加载骨架、角标淡入均正常
-10. 浅色与深色两套主题下本页全部可读
+9. **人脸框悬停「✗ 不是他」→ 选候选 → 改判成功**：该人照片数与待确认数同时变化，「我不同意」列表少一条
+10. **「我不同意」Tab 里整张照片一键否决 ≤2 次点击**，改后这些脸进入待确认
+11. 标记陌生人有二次确认，确认后该脸从所有队列与聚类中消失
+12. 侧栏角标两个数字（待确认 / 我不同意）分别正确、与接口一致
+13. 网格 hover 微交互、懒加载骨架、角标淡入均正常
+14. 浅色与深色两套主题下本页全部可读
 
 ## 输出格式
 1. 改动文件清单
-2. 验收结果（10 条逐条说明实测情况）
+2. 验收结果（14 条逐条说明实测情况）
 3. 遗留问题与需要我决策的点
 ```
 
@@ -832,12 +1132,12 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
    - 人物卡片网格：头像 + 姓名 + 照片数 + 年代跨度
    - 筛选：分类（family/friend/colleague 芯片）/ 家庭组
    - 空状态引导（先导入联系人再扫描）
-2. src/components/common/PersonCard.vue —— 圆形头像，hover 上浮，点击进详情
+2. src/components/common/PersonCard.vue —— 圆形头像，hover 上浮，点击进详情；**识别质量徽标**（见硬约束）
 3. src/views/PersonDetailView.vue（人物详情）
    - 头部：头像 + 姓名 + 家庭关系 + 分类 + 照片数
    - Tab1 时间轴：**按年代桶分组**的该人照片（复用 BucketTimeline）
-   - Tab2 人脸样本：该人所有 face，可移除错样本
-   - 操作：合并到… / 改头像 / 编辑资料
+   - Tab2 人脸样本：**分两段** —— 「人工确认 N」（实线）与「自动归属 M」（虚线，各带「✗ 移除」）；移除后该脸回到待确认队列
+   - 操作：合并到… / **撤销上次合并** / 改头像 / 编辑资料 / **操作历史**（查 `pb_review_log`，「这张脸当初怎么被认成这个人的」）
 4. src/views/ScanJobsView.vue（扫描任务）
    - 新建扫描（选根目录 + 批大小，默认 100）
    - 任务列表：状态 / 本批进度（真实计数）/ 累计 / 操作
@@ -847,8 +1147,8 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 5. src/views/SettingsView.vue（设置）
    - 照片根目录（只读展示）
    - 识别参数：T_high / T_low / 分桶策略（改动提示「需重新生成质心」）
-   - 数据：重新生成质心 / 备份 / 恢复 / 关于
-6. src/views/OverviewView.vue 补全（统计卡 + 最近入库缩略图行 + 扫描状态条 + 待确认入口）
+   - 数据：重新生成质心（可选「仅用已确认样本」）/ 备份 / 恢复 / 关于
+6. src/views/OverviewView.vue 补全（统计卡 + 最近入库缩略图行 + 扫描状态条 + 待确认入口 + **我不同意入口**）
 7. 后端补齐（后端为主、前端为壳）
    - GET /api/places、GET /api/map（Leaflet + 离线瓦片，可选功能）
    - 重复照片对比接口
@@ -862,22 +1162,27 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 - 备份 = 停服务 → 拷贝 `db\` + `thumb\`；**不要备份 photoDir**（原图不动）
 - 不提供任何编辑/覆盖/删除原图的入口
 - 移动端仅浏览 + 轻操作；扫描/合并/删除引导到桌面端
+- **「撤销上次合并」只对 `isRevertible=1`（SPLIT/MERGE）开放**（DR-16）；撤销后必须重算双方质心
+- **质心健康度提示**（DR-16）：某人「自动归属数 ≫ 人工确认数」时在人物卡片上提示「识别质量偏低，建议人工确认 N 张」—— 用数据引导用户去纠错，而不是等他自己发现
 
 ## 验收清单
 1. 人物库卡片显示头像/姓名/照片数/年代跨度，分类与家庭组筛选正确
 2. 人物详情时间轴按年代桶分组且空桶不显示
-3. Tab2 可移除错样本，移除后该脸回到待确认队列
-4. 扫描任务：新建 → 运行 → 到 100 张自动 PAUSED → 点「继续下一批」→ 断点续扫 → DONE，全程计数正确
-5. FAILED 任务能展开查看原始错误
-6. 设置页改 T_high/T_low 有「需重算质心」提示，且能触发重算
-7. 备份脚本产出完整备份（db + thumb），恢复后应用正常
-8. 8 个页面在浅色/深色下全部可读，<1024 与 <768 断点正常
-9. 全项目回归：主链路（扫描 → 浏览 → 确认 → 人物时间轴）端到端走通
-10. 输出 M4 自测清单：接下来一周你要用哪些功能、怎么记录问题
+3. **Tab2 能一眼分出「人工确认」与「自动归属」两段**；移除自动样本后该脸回到待确认队列
+4. **执行一次合并后可「撤销」**：人脸归属 + `pb_photo_person` + 双方质心全部还原，`pb_review_log` 回填 `revertedByLogCode`
+5. **操作历史**能按人脸/照片查到历次 `ASSIGN/FIX/SPLIT/MERGE`
+6. **质心健康度提示**在「自动 ≫ 确认」的人身上正确出现，在正常人物上不出现
+7. 扫描任务：新建 → 运行 → 到 100 张自动 PAUSED → 点「继续下一批」→ 断点续扫 → DONE，全程计数正确
+8. FAILED 任务能展开查看原始错误
+9. 设置页改 T_high/T_low 有「需重算质心」提示，且能触发重算
+10. 备份脚本产出完整备份（db + thumb），恢复后应用正常
+11. 8 个页面在浅色/深色下全部可读，<1024 与 <768 断点正常
+12. 全项目回归：主链路（扫描 → 浏览 → 确认 → **改判** → 人物时间轴）端到端走通
+13. 输出 M4 自测清单：接下来一周你要用哪些功能、怎么记录问题
 
 ## 输出格式
 1. 改动文件清单
-2. 验收结果（10 条逐条说明实测情况）
+2. 验收结果（13 条逐条说明实测情况）
 3. 遗留问题与需要我决策的点
 4. M4 一周自测建议清单
 ```
@@ -887,20 +1192,21 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 
 ## 附录 A · 步骤与里程碑对照
 
-| 步 | 主题 | 里程碑 |
-| --- | --- | --- |
-| 1 | 工程基线与配置骨架 | — |
-| 2 | SQLite 运行层 + 生成器 + 建库 | — |
-| 3 | 扫描器 | **M1**（扫描幂等、去重准确、续扫可用） |
-| 4 | 缩略图与原图文件服务 | — |
-| 5 | 人脸引擎 | — |
-| 6 | 分桶 + 质心 + 匹配 | — |
-| 7 | 聚类与待确认数据 | **M2**（识别复现 S0、确认闭环生效） |
-| 8 | 联系人导入 | — |
-| 9 | 后端 API 全量 | **M3**（接口全可用、扫描可后台跑） |
-| 10 | 前端骨架 + 双主题 | — |
-| 11 | 照片流 + 详情 + 待确认队列 | — |
-| 12 | 人物库/详情 + 扫描台 + 设置 + 打磨 | **M4**（自己真正用一周） |
+| 步 | 主题 | 里程碑 | 状态 |
+| --- | --- | --- | --- |
+| **R** | **返工修正 1–6（纠错闭环 DR-16）** | — | ✅ 已完成（已并入步骤 6 / 7，不单列） |
+| 1 | 工程基线与配置骨架 | — | ✅ 已完成 |
+| 2 | SQLite 运行层 + 生成器 + 建库 | — | ✅ 已完成 |
+| 3 | 扫描器 | **M1**（扫描幂等、去重准确、续扫可用） | ✅ 已完成 |
+| 4 | 缩略图与原图文件服务 | — | ✅ 已完成 |
+| 5 | 人脸引擎 | — | ✅ 已完成 |
+| 6 | 分桶 + 质心 + 匹配 | — | ✅ 已完成 |
+| 7 | 聚类与待确认数据 | **M2**（识别复现 S0、确认闭环生效） | ✅ 已完成（聚类 + 两个队列已实测；**M2 的「确认闭环」仍待人工确认 3 张脸**） |
+| 8 | 联系人导入 | — | ✅ 已完成（CSV+vCard 双通道 + 家庭组 + 1012 张头像；**M2 待人工确认 3 张脸**） |
+| 9 | 后端 API 全量 | **M3**（接口全可用、扫描可后台跑） | ⬜ 未开始 |
+| 10 | 前端骨架 + 双主题 | — | ⬜ 未开始 |
+| 11 | 照片流 + 详情 + 待确认队列 | — | ⬜ 未开始 |
+| 12 | 人物库/详情 + 扫描台 + 设置 + 打磨 | **M4**（自己真正用一周） | ⬜ 未开始 |
 
 ## 附录 B · 每步固定的输出格式
 
@@ -910,4 +1216,5 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 3. 遗留问题与需要我决策的点（如果有拿不准的需求，不要自行假设，列出来问我）
 ```
 
-> 提醒：新对话里请**只粘贴当前步骤的提示语**，不要把 12 步一起粘过去，否则上下文会过长导致遗漏约束。
+> 提醒：新对话里请**只粘贴当前步骤的提示语**，不要把多步一起粘过去，否则上下文会过长导致遗漏约束。
+> 当前应粘贴的是 **「修正步骤 R」**。

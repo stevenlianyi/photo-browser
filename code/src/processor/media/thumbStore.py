@@ -42,6 +42,7 @@
 #   2. **缩略图绝不留半文件**：任何写入都经write_atomic，
 #      前端要么看不到这个文件（还没 replace），要么看到完整文件。
 
+import hashlib
 import os
 import re
 import sys
@@ -72,6 +73,7 @@ THUMB_DEFAULT_SIZE: int = basicSettings.THUMB_DEFAULT_SIZE
 #: 分桶子目录名
 THUMB_SUBDIR: str = basicSettings.THUMB_SUBDIR
 FACE_SUBDIR: str = basicSettings.FACE_SUBDIR
+VCARD_SUBDIR: str = basicSettings.VCARD_SUBDIR
 #: 分桶取前几位
 HASH_BUCKET_LEN: int = basicSettings.HASH_BUCKET_LEN
 #: 落盘扩展名
@@ -79,6 +81,8 @@ THUMB_EXT: str = basicSettings.THUMB_EXT
 FACE_EXT: str = basicSettings.FACE_EXT
 #: 原子写临时文件扩展名
 TMP_EXT: str = basicSettings.TMP_EXT
+#: 通讯录头像的落盘扩展名
+VCARD_AVATAR_EXT: str = basicSettings.VCARD_AVATAR_EXT
 
 #: 库中 photoCode / faceCode 的最大长度（pb_photo.photoCode VARCHAR(64)）
 CODE_MAX_LEN: int = 64
@@ -197,6 +201,93 @@ def orig_abs_path(relPath: str, photoRoot: str = None) -> str:
         raise ThumbStoreError("relPath 逃出照片根: %r" % relPath)
     return target
 
+
+
+# ============================================================
+# 二之三、通���录头像（步骤 8）
+# ============================================================
+# 为什么不归进 face_relpath（而是另建一层）
+# --------------------------------------------
+#   faces/ 里的每张都对应一行 pb_face，而 pb_face.photoCode 是
+#   **NOT NULL 外键** -> 一张裁剪图天然属于某张照片。
+#   通讯录头像是 vCard 里内嵌的 base64，**不属于任何照片**。
+#   强行塞进 faces/ 就得虚构一行「无照片的 pb_face」，而那会破坏
+#   下面这条不变式：**每个 pb_face 都必须挂在某张 pb_photo 下**。
+#
+# 为什么文件名用 sha1(personCode) 而不直接用 personCode
+# ----------------------------------------------------------
+#   ① 与 faces/ 保持一致（faceCode/fileHash 都是十六进制哈希），
+#      不同业务用同一套命名规则，面子与面子之间不会靠文件名猜亲属。
+#   ② **personCode 不是十六进制**，而是任意字符串列（手工建档时
+#      完全可以形成 'VC_../..'）。一旦它被拼进路径，就是一个**目录穿越**。
+#      本模块的 face_relpath 已用 _CODE_RE 拦住了这个风险，头像同样必须。
+#      哈希本身不可能包含分隔符 —— 所以这不是「过度加密」，是必要的。
+#
+# 分桶取 sha1 前 HASH_BUCKET_LEN 位，与 faces/ 一致。
+
+
+def vcardAvatarName(personCode: str) -> str:
+    """personCode -> 头像文件名（sha1 十六进制 40 位）。
+
+    ⚠️⚠️ 不能对 personCode 做 .lower()（本步真数据给的缺陷）
+    ------------------------------------------------------
+      本来加 lower() 的理由是“路径在 Windows/macOS 上不央温”，但**personCode
+      本身大小写敏感**：pb_person.personCode 的 UNIQUE 在 SQLite 里对 TEXT 是
+      大小写敏感的，所以 `CS_Nanyang` 与 `CS_nanyang` 是**两个人**（通讯录里
+      真实存在这两个人）。一小化就让它们共用一张头像：
+        落盘只有 1010 个文件，而库里有 1012 行 avatarFile 非空。
+      → 路径必须与 personCode **一对一**；而且路径是哈希得到的，
+        大小写已经被哈希吸收掉了，“不太温”这个理由不成立。
+    """
+    code = str(personCode or "").strip()
+    if not code:
+        raise ThumbStoreError("personCode 为空，拿不出头像文件名")
+    return hashlib.sha1(code.encode("utf-8")).hexdigest()
+
+
+def vcardAvatar_relpath(personCode: str) -> str:
+    """通讯录头像相对 thumbRoot 的路径（**正斜杠**）。
+
+    例：vcardAvatar_relpath("VC_0154_Qing_Bai") -> 'vcards/3f/3fa1c2...9d.jpg'
+
+    ⚠️ 这个路径是**可推导的**（DR-1）：pb_person.avatarFile 只是一份缓存，
+    而不是唯一事实来源 —— 所以它为 NULL 时可以直接推导出路��、
+    用 exists 探一下就能补回，不需要一次性回填脚本。
+    """
+    name = vcardAvatarName(personCode)
+    return "%s/%s/%s%s" % (VCARD_SUBDIR, name[:HASH_BUCKET_LEN], name,
+                           VCARD_AVATAR_EXT)
+
+
+def vcardAvatar_abspath(personCode: str, thumbRoot: str = None) -> str:
+    """通讯录头像绝对路径。thumbRoot 缺省取 paths.thumb_dir()。"""
+    return os.path.join(thumbRoot or paths.thumb_dir(),
+                        *vcardAvatar_relpath(personCode).split("/"))
+
+
+def vcardAvatar_exists(personCode: str, thumbRoot: str = None) -> bool:
+    """头像是否已落盘且**非空**（沿用 exists()：0 字节不算有）。"""
+    return fileSize(vcardAvatar_abspath(personCode, thumbRoot)) > 0
+
+
+def write_vcard_avatar(personCode: str, data, thumbRoot: str = None) -> str:
+    """写通讯录头像（原子写），返回**相对路径**（写入 pb_person.avatarFile）。
+
+    为什么直接存原始字节而不用 Pillow 重编码
+    -----------------------------------------
+      通讯录头像本来就是压缩好的 JPEG/PNG，再编码一次只会更模糊。
+      不用 Pillow 还有个好处：一个截断的 JPEG 在解码时抛异常，
+      而头像丢掉了是**正常的**（用户可能已经删了这个人）。
+
+    ⚠️ 仍然走 assertNotPhoto：thumb 根下的写入一律经那个守卫，
+    原图目录绝对只读这条硬约束不能在这里裂开。
+    """
+    if not data:
+        raise ThumbStoreError("头像数据为空（不调用写入）")
+    target = assertNotPhoto(vcardAvatar_abspath(personCode, thumbRoot))
+    ensure_bucket_dir(vcardAvatar_relpath(personCode), thumbRoot)
+    write_atomic(target, data)
+    return vcardAvatar_relpath(personCode)
 
 # ========================================================
 # 三、只读边界（photo 绝对只读）
@@ -366,6 +457,37 @@ def exists(relOrAbsPath: str, thumbRoot: str = None) -> bool:
     if not os.path.isabs(absPath):
         absPath = os.path.join(thumbRoot or paths.thumb_dir(), *absPath.split("/"))
     return fileSize(absPath) > 0
+# ------------------------------------------------------------
+# 非库产物目录（**统计/巡检/清理一律跳过**）
+# ------------------------------------------------------------
+# 为什么要显式登记，而不是"反正没人扫它"
+# --------------------------------------
+#   thumb/ 下面除了 thumbs/ 与 faces/，还有 cluster/（步骤 7 的簇拼图）。
+#   那些 jpg **不是库产物**：不进 pb_* 任何表、没有 fileHash/faceCode 索引、
+#   删掉不影响任何功能。它们只是给人眼抽查的临时产物。
+#
+#   现在 listBucketDirs / thumbStats 都是**显式指定 kind** 的，扫不到它；
+#   但 findTmpFiles 是**递归扫整个 thumbRoot** 的，将来若有人写
+#   「thumb 目录占用多少空间 / 清理旧文件」，就会把它们算进去 ——
+#   而对着一个「库里有几千张图」的目录做清理/统计，结论一定是错的。
+#   ⇒ 登记成DERIVED_THUMB_SUBDIRS，让「哪些不是库产物」有唯一真相，
+#     而不是散落在各人的记忆里。
+
+def isDerivedSubdir(name: str) -> bool:
+    """该子目录是否是「非库产物」（统计/清理/巡检应跳过）。"""
+    return str(name or "").strip().lower() in (
+        str(x).strip().lower() for x in basicSettings.DERIVED_THUMB_SUBDIRS)
+
+
+def derivedSubdirs(thumbRoot: str = None) -> list:
+    """实际存在的非库产物子目录（绝对路径）。"""
+    root = thumbRoot or paths.thumb_dir()
+    out = []
+    for name in sorted(basicSettings.DERIVED_THUMB_SUBDIRS):
+        absPath = os.path.join(root, name)
+        if os.path.isdir(absPath):
+            out.append(absPath)
+    return out
 
 
 def listBucketDirs(kind: str = THUMB_SUBDIR, thumbRoot: str = None) -> list:

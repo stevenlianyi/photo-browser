@@ -216,6 +216,90 @@ CLUSTER_NOISE: str = "_NOISE_"
 # 内存/查询层需要占位时统一用这个值，勿散落 0 / -1 / "UNK"
 SHOT_YEAR_UNKNOWN: int = -1
 
+# ============================================================
+# 七之二、pb_person.relation / pb_person_category.category（步骤 8 联系人导入）
+# ============================================================
+# 为什么不放在导入模块里：这两个字段的值会出现在 API 过滤条件、人物库筛选 Chip、
+# 合并/拆分校验里，属于**全项目共用的枚举**，必须只有一个出口（见本文件纪律第 1 条）。
+
+#: pb_person.relation —— 家庭关系（数据库设计§4.2）。空串 = 未知（**不猜**）
+RELATION_PARENT: str = "parent"
+RELATION_SPOUSE: str = "spouse"
+RELATION_CHILD: str = "child"
+RELATION_SIBLING: str = "sibling"
+
+RELATION_ALL: tuple = (RELATION_PARENT, RELATION_SPOUSE,
+                       RELATION_CHILD, RELATION_SIBLING)
+
+#: pb_person_category.category 的三个规范值（数据库设计 §4.3）
+CATEGORY_FAMILY: str = "family"
+CATEGORY_FRIEND: str = "friend"
+CATEGORY_COLLEAGUE: str = "colleague"
+
+CATEGORY_ALL: tuple = (CATEGORY_FAMILY, CATEGORY_FRIEND, CATEGORY_COLLEAGUE)
+
+#: 归一表：Outlook「类别」列是**用户自定义标签**，而库里 category 只有三个规范值。
+#: 只映射「语义明确」的写法；命中不了的**原样保留**（截到 VARCHAR(32)）——
+#: 丢标签比标签不归一更糟：用户按「大学同学」筛选时找不到人。
+CATEGORY_ALIASES: dict = {
+    # 家人
+    "家人": CATEGORY_FAMILY, "家庭": CATEGORY_FAMILY, "家属": CATEGORY_FAMILY,
+    "亲戚": CATEGORY_FAMILY, "亲人": CATEGORY_FAMILY, "家人组": CATEGORY_FAMILY,
+    "family": CATEGORY_FAMILY, "families": CATEGORY_FAMILY,
+    "relatives": CATEGORY_FAMILY, "home": CATEGORY_FAMILY,
+    # 朋友
+    "朋友": CATEGORY_FRIEND, "好友": CATEGORY_FRIEND, "好友们": CATEGORY_FRIEND,
+    "friend": CATEGORY_FRIEND, "friends": CATEGORY_FRIEND,
+    "friendship": CATEGORY_FRIEND,
+    # 同事
+    "同事": CATEGORY_COLLEAGUE, "同事们": CATEGORY_COLLEAGUE, "同学": CATEGORY_COLLEAGUE,
+    "客户": CATEGORY_COLLEAGUE, "合作伙伴": CATEGORY_COLLEAGUE,
+    "colleague": CATEGORY_COLLEAGUE, "colleagues": CATEGORY_COLLEAGUE,
+    "co-worker": CATEGORY_COLLEAGUE, "coworker": CATEGORY_COLLEAGUE,
+    "classmate": CATEGORY_COLLEAGUE, "client": CATEGORY_COLLEAGUE,
+}
+
+#: relation 归一表（vCard/Outlook 没有「家庭关系」标准列，导出方爱写中文口语）
+RELATION_ALIASES: dict = {
+    "父亲": RELATION_PARENT, "母亲": RELATION_PARENT, "爸爸": RELATION_PARENT,
+    "妈妈": RELATION_PARENT, "父母": RELATION_PARENT, "长辈": RELATION_PARENT,
+    "parent": RELATION_PARENT, "father": RELATION_PARENT, "mother": RELATION_PARENT,
+    "配偶": RELATION_SPOUSE, "妻子": RELATION_SPOUSE, "丈夫": RELATION_SPOUSE,
+    "太太": RELATION_SPOUSE, "先生": RELATION_SPOUSE,
+    "spouse": RELATION_SPOUSE, "wife": RELATION_SPOUSE, "husband": RELATION_SPOUSE,
+    "partner": RELATION_SPOUSE,
+    "儿子": RELATION_CHILD, "女儿": RELATION_CHILD, "孩子": RELATION_CHILD,
+    "子女": RELATION_CHILD,
+    "child": RELATION_CHILD, "son": RELATION_CHILD, "daughter": RELATION_CHILD,
+    "兄弟": RELATION_SIBLING, "姐妹": RELATION_SIBLING, "兄弟姐妹": RELATION_SIBLING,
+    "sibling": RELATION_SIBLING, "brother": RELATION_SIBLING, "sister": RELATION_SIBLING,
+}
+
+
+def normalizeCategory(raw: str) -> str:
+    """Outlook「类别」标签 -> 库里 category 的值。
+
+    命中归一表 -> 规范值（family/friend/colleague）；
+    未命中    -> **原样返回**（去首尾空白、截到 32 字），绝不返回空串。
+
+    ⚠️ 不要在这里 raise 或返回 ""：一个没归一的标签仍然是一条有效信息，
+       丢掉它等于「用户导了 10 个类别，库里只剩 3 个」。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    return CATEGORY_ALIASES.get(text.lower(), text[:32])
+
+
+def normalizeRelation(raw: str) -> str:
+    """关系列 -> parent/spouse/child/sibling；认不出来返回 ""（**不猜**）。"""
+    text = str(raw or "").strip().lower()
+    if not text:
+        return ""
+    if text in RELATION_ALL:
+        return text
+    return RELATION_ALIASES.get(text, "")
+
 
 if __name__ == "__main__":
     print("globalDefinition _VERSION:", _VERSION)

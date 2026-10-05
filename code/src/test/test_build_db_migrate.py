@@ -73,8 +73,21 @@ class TestMigrateNoop:
 
 class TestMigrateAddColumn:
     def _dropColumn(self, tableName, columnName):
-        """模拟「老库没有这一列」。SQLite 3.35+ 支持 DROP COLUMN"""
+        """模拟「老库没有这一列」。SQLite 3.35+ 支持 DROP COLUMN
+
+        ⚠️ **必须先删掉依赖该列的索引**：SQLite 拒绝 DROP 被索引引用的列
+        （报 "error in index ... after drop column"）。
+        movedToPhotoCode 现在带一个部分/普通索引（§五 的「疑似移动」队列），
+        所以这个辅助方法会先按生成层登记的索引清单把相关索引删掉 ——
+        这也正是「真实老库」的样子：老库是先有列、后加索引的。
+        """
         db = sqliteCommon.dbHandle()
+        for index in sqliteCommon.TABLE_INDEXES.get(tableName, ()):
+            if columnName not in index["columns"]:
+                continue
+            name = index["name"]
+            if sqliteCommon.chkIndexExist(name):
+                assert db.executeWrite("DROP INDEX %s;" % name) >= 0
         assert db.executeWrite("ALTER TABLE %s DROP COLUMN %s;" % (tableName, columnName)) >= 0
 
     def test_adds_missing_column_and_keeps_data(self, dbFile):
@@ -158,6 +171,51 @@ class TestMigrateCreateMissingTable:
         cols = [c["name"] for c in sqliteCommon.tableInfo("pb_scan_job")]
         want = [c["name"] for c in sqliteCommon.TABLE_COLUMNS["pb_scan_job"]]
         assert cols == want
+
+    def test_creates_review_log_table(self, dbFile):
+        """**修正步骤 R**：第 9 张表 pb_review_log 在老库上不存在，--migrate 必须建它"""
+        sqliteCommon.dropTableGeneral("pb_review_log")
+        assert sqliteCommon.chkTableExist("pb_review_log") is False
+        result = build_db.migrate(dbFile=dbFile, verbose=False)
+        assert "pb_review_log" in result["created"]
+        assert sqliteCommon.chkTableExist("pb_review_log") is True
+        cols = [c["name"] for c in sqliteCommon.tableInfo("pb_review_log")]
+        assert cols == [c["name"] for c in sqliteCommon.TABLE_COLUMNS["pb_review_log"]]
+        assert "opType" in cols and "isRevertible" in cols \
+            and "revertedByLogCode" in cols
+
+    def test_adds_isstranger_column_to_old_face_table(self, dbFile):
+        """**修正步骤 R**：老库的 pb_face 没有 isStranger，必须补上且**不动数据**"""
+        self_check = build_db.migrate(dbFile=dbFile, verbose=False)
+        assert self_check["failed"] == []
+        cols = [c["name"] for c in sqliteCommon.tableInfo("pb_face")]
+        assert "isStranger" in cols
+        row = [c for c in sqliteCommon.tableInfo("pb_face") if c["name"] == "isStranger"][0]
+        # PRAGMA table_info 的键名是 SQLite 自己定的（notnull / dflt_value），
+        # 别写成 row["notNull"] —— 那是生成层 TABLE_COLUMNS 的键名，不是 PRAGMA 的
+        assert int(row["notnull"]) == 1
+        assert str(row["dflt_value"]) == "0", "默认必须是 0（不是陌生人）"
+
+    def test_recreates_new_partial_indexes(self, dbFile):
+        """**修正步骤 R**：4 个新索引（部分索引也要能被补建）"""
+        names = ("idx_pb_face_personCode_isnull",
+                 "idx_pb_face_personCode_isConfirmed",
+                 "idx_pb_review_log_isRevertible",
+                 "idx_pb_photo_movedToPhotoCode")
+        db = sqliteCommon.dbHandle()
+        for name in names:
+            assert sqliteCommon.chkIndexExist(name) is True, "%s 建表后就该在" % name
+            assert db.executeWrite("DROP INDEX %s;" % name) >= 0
+            assert sqliteCommon.chkIndexExist(name) is False
+        result = build_db.migrate(dbFile=dbFile, verbose=False)
+        for name in names:
+            assert name in result["indexesAdded"], "%s 没被补建" % name
+            assert sqliteCommon.chkIndexExist(name) is True
+        # 部分索引要真的带 WHERE（否则它会退化成全表索引，10 万行下白建）
+        db.executeRead("SELECT sql FROM sqlite_master WHERE type='index' "
+                       "AND name = 'idx_pb_face_personCode_isConfirmed';")
+        sql = db.fetchValue(0) or ""
+        assert "WHERE isConfirmed=0 AND isStranger=0" in sql, sql
 
 
 class TestMigrateTypeMismatch:
