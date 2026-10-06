@@ -7,10 +7,10 @@
 #   改表 = 改 pb_*.txt + 重跑生成器；直接改这里会在下次生成时被覆盖，
 #   且 .txt 与本文件会静默不一致（字段/索引/长度全部对不上）。
 #
-#   生成时间 : 2026-10-05 17:39:25
+#   生成时间 : 2026-10-06 17:03:12
 #   生成器   : database/sqliteCodeGenerator.py v20261005
-#   数据源   : pb_family.txt, pb_person.txt, pb_person_category.txt, pb_photo.txt, pb_face.txt, pb_person_centroid.txt, pb_photo_person.txt, pb_scan_job.txt, pb_review_log.txt
-#   表数量   : 9 张，字段 164 个，索引 23 个
+#   数据源   : pb_family.txt, pb_person.txt, pb_person_category.txt, pb_place.txt, pb_photo.txt, pb_face.txt, pb_person_centroid.txt, pb_photo_person.txt, pb_scan_job.txt, pb_review_log.txt
+#   表数量   : 10 张，字段 181 个，索引 26 个
 #
 #   上层：processor / engine / api —— **业务层禁止裸 SQL，一律调本文件**（数据库设计.md §1.2）
 #   下层：common/sqliteHandle.py（读写双连接 + PRAGMA + %s->? 占位符转换）
@@ -62,6 +62,7 @@ TABLE_ORDER = (
     'pb_family',   # 家庭组
     'pb_person',   # 人员
     'pb_person_category',   # 人员分类
+    'pb_place',   # 地点字典
     'pb_photo',   # 照片
     'pb_face',   # 人脸
     'pb_person_centroid',   # 人员年代桶质心
@@ -75,6 +76,7 @@ TABLE_CN = {
     'pb_family': '家庭组',
     'pb_person': '人员',
     'pb_person_category': '人员分类',
+    'pb_place': '地点字典',
     'pb_photo': '照片',
     'pb_face': '人脸',
     'pb_person_centroid': '人员年代桶质心',
@@ -178,6 +180,10 @@ TABLE_COLUMNS = {
             "sqliteType": 'TEXT', "length": 200, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
             "autoIncrement": False, "default": None, "comment": '头像人脸编码 关联pb_face.faceCode'},
+        {"name": 'avatarFile', "type": 'VARCHAR(200)',
+            "sqliteType": 'TEXT', "length": 200, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '通讯录头像 相对thumbRoot的路径 vcards/xx/sha1(personCode).jpg'},
         {"name": 'source', "type": 'TINYINT',
             "sqliteType": 'INTEGER', "length": None, "scale": None,
             "notNull": True, "unique": False, "primaryKey": False,
@@ -232,6 +238,72 @@ TABLE_COLUMNS = {
             "sqliteType": 'TEXT', "length": 32, "scale": None,
             "notNull": True, "unique": False, "primaryKey": False,
             "autoIncrement": False, "default": None, "comment": '分类 family或friend或colleague'},
+        {"name": 'label', "type": 'VARCHAR(32)',
+            "sqliteType": 'TEXT', "length": 32, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": 'label'},
+        {"name": 'memo', "type": 'VARCHAR(200)',
+            "sqliteType": 'TEXT', "length": 200, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": 'memo'},
+        {"name": 'regID', "type": 'VARCHAR(32)',
+            "sqliteType": 'TEXT', "length": 32, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '注册ID'},
+        {"name": 'regYMDHMS', "type": 'VARCHAR(16)',
+            "sqliteType": 'TEXT', "length": 16, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '注册年月日'},
+        {"name": 'modifyID', "type": 'VARCHAR(32)',
+            "sqliteType": 'TEXT', "length": 32, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '修改用户ID'},
+        {"name": 'modifyYMDHMS', "type": 'VARCHAR(16)',
+            "sqliteType": 'TEXT', "length": 16, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '修改年月日'},
+        {"name": 'delFlag', "type": 'CHAR(1)',
+            "sqliteType": 'TEXT', "length": 1, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '删除标记'},
+    ],
+    'pb_place': [
+        {"name": 'recID', "type": 'INT',
+            "sqliteType": 'INTEGER PRIMARY KEY AUTOINCREMENT', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": True,
+            "autoIncrement": True, "default": None, "comment": '记录ID'},
+        {"name": 'placeCode', "type": 'VARCHAR(64)',
+            "sqliteType": 'TEXT', "length": 64, "scale": None,
+            "notNull": True, "unique": True, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '地点编码 幂等键 由 placeName 派生'},
+        {"name": 'placeName', "type": 'VARCHAR(256)',
+            "sqliteType": 'TEXT', "length": 256, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '地点显示名 与 pb_photo.placeName 同值'},
+        {"name": 'source', "type": 'TINYINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '来源 0=系统聚合 1=手工'},
+        {"name": 'photoCount', "type": 'INT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '照片数 缓存值 由 rebuildPlaces 全量复算'},
+        {"name": 'firstShotYear', "type": 'SMALLINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '最早拍摄年'},
+        {"name": 'lastShotYear', "type": 'SMALLINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '最晚拍摄年'},
+        {"name": 'centerLat', "type": 'DECIMAL(10,7)',
+            "sqliteType": 'NUMERIC', "length": 10, "scale": 7,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '中心纬度 同地多张照片的均值'},
+        {"name": 'centerLon', "type": 'DECIMAL(10,7)',
+            "sqliteType": 'NUMERIC', "length": 10, "scale": 7,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '中心经度 步骤12地图用'},
         {"name": 'label', "type": 'VARCHAR(32)',
             "sqliteType": 'TEXT', "length": 32, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
@@ -775,6 +847,11 @@ TABLE_INDEXES = {
     ),
     'pb_person_category': (
     ),
+    'pb_place': (
+        {"name": 'idx_pb_place_placeCode', "columns": ('placeCode',), "unique": True, "where": None},
+        {"name": 'idx_pb_place_placeName', "columns": ('placeName',), "unique": False, "where": None},
+        {"name": 'idx_pb_place_photoCount', "columns": ('photoCount',), "unique": False, "where": None},
+    ),
     'pb_photo': (
         {"name": 'idx_pb_photo_photoCode', "columns": ('photoCode',), "unique": True, "where": None},
         {"name": 'idx_pb_photo_relPathHash', "columns": ('relPathHash',), "unique": True, "where": None},
@@ -814,6 +891,7 @@ CONFLICT_COLUMNS = {
     'pb_family': ('familyCode',),
     'pb_person': ('personCode',),
     'pb_person_category': (),
+    'pb_place': ('placeCode',),
     'pb_photo': ('photoCode',),
     'pb_face': ('faceCode',),
     'pb_person_centroid': ('personCode', 'bucketKey'),
@@ -827,6 +905,7 @@ QUERY_FILTER_FIELDS = {
     'pb_family': ('familyCode',),
     'pb_person': ('personCode', 'displayName', 'vcardUid', 'familyGroupCode'),
     'pb_person_category': ('personCode', 'category'),
+    'pb_place': ('placeCode', 'placeName'),
     'pb_photo': ('photoCode', 'relPathHash', 'fileHash', 'dupOfPhotoCode'),
     'pb_face': ('faceCode', 'photoCode', 'personCode'),
     'pb_person_centroid': ('personCode', 'bucketKey'),
@@ -838,8 +917,9 @@ QUERY_FILTER_FIELDS = {
 # 表名 -> 允许为 NULL 的字段（query 的 nullFields 参数白名单：待确认队列等）
 NULLABLE_FIELDS = {
     'pb_family': ('notes', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
-    'pb_person': ('familyName', 'familyGroupCode', 'relation', 'email', 'phone', 'birthday', 'vcardUid', 'avatarFaceCode', 'ownerID', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
+    'pb_person': ('familyName', 'familyGroupCode', 'relation', 'email', 'phone', 'birthday', 'vcardUid', 'avatarFaceCode', 'avatarFile', 'ownerID', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_person_category': ('label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
+    'pb_place': ('source', 'photoCount', 'firstShotYear', 'lastShotYear', 'centerLat', 'centerLon', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_photo': ('mimeType', 'width', 'height', 'orientation', 'takenAt', 'shotYear', 'lat', 'lon', 'placeName', 'cameraModel', 'dupOfPhotoCode', 'movedToPhotoCode', 'scannedYMDHMS', 'ownerID', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_face': ('personCode', 'clusterCode', 'bbox', 'detScore', 'poseYaw', 'posePitch', 'quality', 'embedding', 'shotBucket', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_person_centroid': ('centroid', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
@@ -853,6 +933,7 @@ ORDER_FIELDS = {
     'pb_family': ('recID', 'familyCode', 'familyName'),
     'pb_person': ('recID', 'personCode', 'displayName'),
     'pb_person_category': ('recID', 'personCode', 'category'),
+    'pb_place': ('recID', 'photoCount', 'placeName', 'placeCode', 'lastShotYear'),
     'pb_photo': ('recID', 'shotYear', 'takenAt', 'fileSize', 'scannedYMDHMS'),
     'pb_face': ('recID', 'shotBucket', 'quality', 'faceCode'),
     'pb_person_centroid': ('recID', 'personCode', 'bucketKey', 'sampleCount'),
@@ -866,6 +947,7 @@ PRIMARY_KEYS = {
     'pb_family': 'recID',
     'pb_person': 'recID',
     'pb_person_category': 'recID',
+    'pb_place': 'recID',
     'pb_photo': 'recID',
     'pb_face': 'recID',
     'pb_person_centroid': 'recID',
@@ -1607,6 +1689,7 @@ def createTableSQL_pb_person(tableName):
         "birthday TEXT,"
         "vcardUid TEXT,"
         "avatarFaceCode TEXT,"
+        "avatarFile TEXT,"
         "source INTEGER NOT NULL DEFAULT 0,"
         "isConfirmed INTEGER NOT NULL DEFAULT 0,"
         "ownerID TEXT,"
@@ -2052,6 +2135,250 @@ def delete_pb_person_category(tableName, recID, hardDelete = False):
 # pb_person_category 删表
 def drop_pb_person_category(tableName):
     """删除 pb_person_category 表及其索引（不可逆；只给「改表要重建」用）。"""
+    return dropTableGeneral(tableName)
+
+
+# ==========================================================================
+# pb_place 地点字典
+# ==========================================================================
+
+# pb_place 建表（幂等：已存在直接返回 True，不重复建）
+def create_pb_place(tableName):
+    """建 pb_place 表 + 索引。返回 True = 表已就绪。"""
+    if tableName not in TABLE_COLUMNS:
+        _LOG.error("create_pb_place: 非法表名 %r" % tableName)
+        return False
+    if chkTableExist(tableName):
+        return True
+    db = dbHandle()
+    if db.executeWrite(createTableSQL_pb_place(tableName)) == sqliteHandle.RET_ERROR:
+        return False
+    for indexSql in indexSqlList_pb_place():
+        if db.executeWrite(indexSql) == sqliteHandle.RET_ERROR:
+            db.rollbackWrite()
+            return False
+    return chkTableExist(tableName)
+
+
+
+def createTableSQL_pb_place(tableName):
+    """pb_place 的建表 DDL（表名来自调用方，必须是 pb_place）。"""
+    sqlStr = (
+        "CREATE TABLE IF NOT EXISTS " + tableName + " ("
+        "recID INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "placeCode TEXT NOT NULL,"
+        "placeName TEXT NOT NULL,"
+        "source INTEGER,"
+        "photoCount INTEGER,"
+        "firstShotYear INTEGER,"
+        "lastShotYear INTEGER,"
+        "centerLat NUMERIC,"
+        "centerLon NUMERIC,"
+        "label TEXT,"
+        "memo TEXT,"
+        "regID TEXT,"
+        "regYMDHMS TEXT,"
+        "modifyID TEXT,"
+        "modifyYMDHMS TEXT,"
+        "delFlag TEXT"
+        ");"
+    )
+    return sqlStr
+
+
+
+def indexSqlList_pb_place():
+    """pb_place 的索引 DDL（清单见 数据库设计.md §五，全部 IF NOT EXISTS 故幂等）。"""
+    sqlList = [
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_pb_place_placeCode ON pb_place(placeCode);',   # txt-UNIQUE
+        'CREATE INDEX IF NOT EXISTS idx_pb_place_placeName ON pb_place(placeName);',   # INDEX_SPEC
+        'CREATE INDEX IF NOT EXISTS idx_pb_place_photoCount ON pb_place(photoCount);',   # INDEX_SPEC
+    ]
+    return sqlList
+
+
+
+# pb_place 查询记录
+def query_pb_place(tableName, recID = 0, placeCode = "", placeName = "", nullFields = (),
+        delFlag = "0", mode = "full", orderBy = "recID", descFlag = False,
+        limitNum = 0, offsetNum = 0):
+    """查 pb_place。
+
+    参数
+    ----
+    recID        : int  —— 主键精确查，>0 时生效
+    placeCode    : str  —— 非空时等值过滤
+    placeName    : str  —— 非空时等值过滤
+    nullFields   : tuple  —— 追加 'field IS NULL' 条件，字段必须在 NULLABLE_FIELDS 白名单内
+    delFlag      : str  —— "0" 只看未删（默认）；"1" 只看已删；"" / "*" 不限
+    mode         : str  —— "full" 全部列；"light" 剔除 BLOB 列（人脸向量等），列表页用它省内存
+    orderBy      : str  —— 必须在 ORDER_FIELDS 白名单里，否则回落 recID
+    descFlag     : bool —— 是否倒序
+    limitNum     : int  —— >0 时生效
+    offsetNum    : int  —— 分页偏移
+
+    返回
+    ----
+    list[dict]（空列表 = 没查到，不是出错）
+    """
+    result = []
+    if tableName not in TABLE_COLUMNS:
+        return result
+    db = dbHandle()
+    valuesList = []
+    whereList = []
+    try:
+        try:
+            recID = int(recID)
+        except (TypeError, ValueError):
+            recID = 0
+        if recID > 0:
+            whereList.append("recID = %s")
+            valuesList.append(recID)
+
+        for fieldName, fieldValue in (('placeCode', placeCode), ('placeName', placeName)):
+            if fieldValue is not None and fieldValue != "":
+                whereList.append(fieldName + " = %s")
+                valuesList.append(fieldValue)
+
+        for fieldName in (nullFields or ()):
+            if fieldName in NULLABLE_FIELDS.get(tableName, ()):
+                whereList.append(fieldName + " IS NULL")
+
+        if delFlag not in (None, "", "*"):
+            whereList.append("delFlag = %s")
+            valuesList.append(delFlag)
+
+        columnList = ["*"]
+        if mode == "light":
+            columnList = [c["name"] for c in TABLE_COLUMNS[tableName]
+                if c["sqliteType"] != "BLOB"]
+            if not columnList:
+                columnList = ["*"]
+        sqlStr = "SELECT " + ", ".join(columnList) + " FROM " + tableName
+        if whereList:
+            sqlStr += " WHERE " + " AND ".join(whereList)
+        orderField = orderBy if orderBy in ORDER_FIELDS.get(tableName, ()) else "recID"
+        sqlStr += " ORDER BY " + orderField
+        if descFlag:
+            sqlStr += " DESC"
+        if int(limitNum or 0) > 0:
+            sqlStr += " LIMIT %s OFFSET %s"
+            valuesList.append(int(limitNum))
+            valuesList.append(int(offsetNum or 0))
+
+        if db.executeRead(sqlStr, tuple(valuesList)) == sqliteHandle.RET_ERROR:
+            return result
+        result = db.fetchAll()
+    except Exception as e:
+        _LOG.error("query_pb_place: %s" % e)
+    return result
+
+
+
+# pb_place 增加记录
+def insert_pb_place(tableName, dataSet):
+    """新增一条 pb_place，返回新行 recID（<=0 表示失败）。
+
+    - 只取 dataSet 中**属于本表**的字段；recID 由库自增，传了也忽略
+    - 值按 .txt 类型归一（INTEGER / NUMERIC / TEXT / BLOB），空数值走库默认值
+    - 未给 delFlag / regYMDHMS 时自动补 comGD.DEL_FLAG_NO / 当前时间
+    """
+    result = 0
+    if tableName not in TABLE_COLUMNS:
+        return result
+    saveSet, skipList = normalizeDataSet(tableName, dataSet)
+    saveSet.pop("recID", None)
+    if skipList:
+        _LOG.warning("insert_pb_place: 跳过无法归一的字段 %s" % skipList)
+    if "delFlag" not in saveSet:
+        saveSet["delFlag"] = comGD.DEL_FLAG_NO
+    if "regYMDHMS" not in saveSet:
+        saveSet["regYMDHMS"] = misc.getTime()
+    result = insertTableGeneral(tableName, saveSet)
+    return result
+
+
+
+# pb_place 批量增加记录（executemany + 显式事务）
+def insertMany_pb_place(tableName, dataSetList):
+    """批量新增 pb_place（整批一次提交，失败整批回滚），返回写入行数。
+
+    步骤 3 扫描入库走这里：一次几百行，别一行一提交。
+    """
+    result = 0
+    if tableName not in TABLE_COLUMNS or not dataSetList:
+        return result
+    rtn, _columnNames = insertManyTableGeneral(tableName, dataSetList,
+        fillStandard=True)
+    return rtn
+
+
+
+# pb_place 批量 upsert（幂等重扫走这里）
+def upsertMany_pb_place(tableName, dataSetList, conflictColumns = None, updateColumns = None):
+    """按业务幂等键批量写 pb_place：
+
+    INSERT ... ON CONFLICT(<冲突键>) DO UPDATE SET ... / DO NOTHING
+
+    - conflictColumns 缺省用 CONFLICT_COLUMNS 里的本表默认值
+    - updateColumns 为 None 时更新「除冲突键以外」的所有列；传 () 则 DO NOTHING
+    - 冲突时**不覆盖** regYMDHMS（注册时间）与 delFlag（不会悄悄复活软删行）
+    """
+    result = 0
+    if tableName not in TABLE_COLUMNS or not dataSetList:
+        return result
+    conflict = list(conflictColumns) if conflictColumns else list(CONFLICT_COLUMNS.get(tableName, ()))
+    update = list(updateColumns) if updateColumns else ()
+    rtn, _columnNames = insertManyTableGeneral(tableName, dataSetList,
+        conflictColumns=conflict, updateColumns=update,
+        fillStandard=True)
+    return rtn
+
+
+
+# pb_place 修改记录
+def update_pb_place(tableName, recID, dataSet):
+    """按 recID 改一条 pb_place，返回影响行数（0 = 无字段可改或没命中）。
+
+    - recID 与 modifyYMDHMS 由本函数控制，dataSet 里传了也忽略
+    - TEXT 字段传空串是真的「清空」（不会被当成未提供）
+    """
+    if tableName not in TABLE_COLUMNS:
+        return 0
+    saveSet, skipList = normalizeDataSet(tableName, dataSet)
+    saveSet.pop("recID", None)
+    if skipList:
+        _LOG.warning("update_pb_place: 跳过无法归一的字段 %s" % skipList)
+    if not saveSet:
+        return 0
+    saveSet["modifyYMDHMS"] = misc.getTime()
+    return updateTableGeneral(tableName, "recID = %s", [recID], saveSet)
+
+
+
+# pb_place 删除记录
+def delete_pb_place(tableName, recID, hardDelete = False):
+    """删一条 pb_place，返回影响行数。
+
+    hardDelete=False（默认）-> 软删除：delFlag='1' + 刷 modifyYMDHMS
+    hardDelete=True           -> 物理 DELETE
+
+    ⚠️ 软删除后记录仍在表里，业务幂等键（placeCode）依然被唯一索引占着；
+       想复用同一条记录请走 update，别指望再 insert 一遍。
+    """
+    if tableName not in TABLE_COLUMNS:
+        return 0
+    if hardDelete:
+        return deleteTableGeneral(tableName, "recID = %s", [recID])
+    saveSet = {"delFlag": comGD.DEL_FLAG_YES, "modifyYMDHMS": misc.getTime()}
+    return updateTableGeneral(tableName, "recID = %s", [recID], saveSet)
+
+
+
+# pb_place 删表
+def drop_pb_place(tableName):
+    """删除 pb_place 表及其索引（不可逆；只给「改表要重建」用）。"""
     return dropTableGeneral(tableName)
 
 

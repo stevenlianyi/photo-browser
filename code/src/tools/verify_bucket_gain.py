@@ -129,13 +129,25 @@ def _randomInSubspace(rng, basis, avoid=()):
        （单位向量、两两余弦 0），但年龄旋转作用在它们身上毫无效果 ——
        相似度分布完全不对，而代码读起来毫无破绽。
        （本工具第一版就死在这里：同人跨 20 年相似度恒为 0.89。）
+
+    ⚠️⚠️⚠️ 修正（R2 前就存在的 bug，本轮为了给出 S0 对比数字必须先修）：
+       **只能对 `avoid` 正交化，绝不能把 basis 自己也算进去。**
+       原来的循环是 `for other in list(avoid) + list(basis)`，而 v 恰恰是
+       basis 的线性组合 —— 于是这一步把 v 整个投影没了：
+           v 的模长 1.95 -> 正交化后 1.39e-07< 1e-6 -> 走重抽分支
+           -> 重抽还是 basis 的组合 -> 还是被投影没 -> **无限递归**
+       表现是 `--synthetic` 直接 RecursionError 崩掉（本轮实测两个
+       Python 环境都崩），也就是说这个工具的合成模式**从来没跑出过数字**。
+       现在改成：只对 avoid 正交化（保证 prior / ident 互相垂直），
+       数值退化时退到 _unitOrthogonal()（补一条子空间外的随机方向），
+       不再重抽同一条 doomed 路径。
     """
     v = sum(float(rng.randn()) * b for b in basis)
-    for other in list(avoid) + list(basis):
+    for other in list(avoid):
         v = v - float(v @ other) * other
     n = float(np.linalg.norm(v))
-    if n < 1e-6:                       # 数值退化：换一条
-        return _randomInSubspace(rng, basis, avoid)
+    if n < 1e-6:                       # 数值退化：补一条子空间外的随机方向
+        return _unitOrthogonal(rng, len(basis[0]), list(basis) + list(avoid))
     return faceEngine.l2normalize(v)
 
 
@@ -282,10 +294,32 @@ def syntheticStats(samples: list) -> dict:
                       "between": len(between)}}
 
 
+#: `--root` 模式下每个人「留几成当探针」。
+#:
+#: ⚠️⚠️ 为什么必须有这个（R2 之前就存在的 bug，本轮为了给出真实数字必须先修）：
+#:   verifySetSamples() 原先把**每一条**样本都标成 isProbe=True，而 buildIndex()
+#:   建质心时是 `if one["isProbe"]: continue` —— 于是训练集为空、三种口径的
+#:   质心数全是 0，报告里只有一行「没有启用的质心」。也就是说 **`--root` 模式
+#:   从来没跑出过任何 FR 数字**。
+#:   没有训练集就没有质心，没有质心就没有「真人最高分」，而 FR 正是用真人最高分
+#:   判的 —— 这不是数据不好，是这条路径没接上。
+#:
+#: 切分口径（与合成模式的「训练在中间、探针在两端」不同，因为验证集**没有年龄**，
+#: 只能按文件名顺序机械切分；**三档口径用的是同一份切分**，所以 FR 仍可比）：
+#:   每个人按文件名排序后，前 70% 当训练样本、后 30% 当探针。
+VERIFY_PROBE_RATIO: float = 0.3
+#: 训练样本少于这个数的人整个不参与（连一个桶都建不出 3 样本质心）
+VERIFY_MIN_TRAIN: int = 3
+
+
 def verifySetSamples(root: str, workers: int = 0) -> list:
     """跑真实 S0 验证集：root\\<姓名>\\*.jpg，每张取面积最大的脸。
 
     验证集目录名只有姓名，**没有出生年** -> 走**等宽降级**（真实的 birthYear 未知情形）。
+    ⚠️ 因此「自适应分桶」这一档在本验证集上与「等宽 5 年」**完全同键**
+    （两者都落到 bucketKeyAdaptive 的降级分支），两行数字必然逐位相同 ——
+    这不是工具坏了，而是这个验证集里没有可用的出生年。要量「自适应 vs 等宽」
+    的差异，需要一个**带出生年**的验证集（或合成对照）。
     拍摄年只从文件名前 4 位取；取不到的那些 shotYear=None -> **不参与分桶判定**，
     本工具单列出来，绝不混进 FR 统计（否则分桶组天然吃亏，那是不公平的比较）。
     """
@@ -325,8 +359,60 @@ def verifySetSamples(root: str, workers: int = 0) -> list:
             continue
         stem = os.path.splitext(os.path.basename(absPath))[0]
         shotYear = int(stem[:4]) if len(stem) >= 4 and stem[:4].isdigit() else None
+        if shotYear is None:
+            shotYear = _shotYearFromMeta(absPath, stem)
         out.append({"label": label, "shotYear": shotYear, "birthYear": None,
-                    "embedding": vec, "isProbe": True, "path": absPath})
+                    "embedding": vec, "isProbe": False, "path": absPath})
+    # ---- 按 VERIFY_PROBE_RATIO 切成训练/探针（见上面常量注释）----
+    return _rebalanceSamples(out)
+
+
+def _shotYearFromMeta(absPath: str, stem: str):
+    """文件名里没有年份时，用**项目自己的**拍摄年解析（EXIF -> mtime）兜底。
+
+    ⚠️⚠️ 这条回落是决定性的，不是「放宽口径」
+    ----------------------------------------
+      本机真实验证集的文件名是 01.jpg ~ 10.jpg，**一个年份都没有**。
+      只认文件名的话100 张样本的 shotYear 全是 None，于是
+        · 「分桶」两档：bucketKeyOf(None, ...) 返回空 -> 一个质心都建不出来
+          （实测质心数 0，报告里只有一行「没有启用的质心」）；
+        · 「不分桶」档：全部落进 ALL 桶，等于没有年代概念。
+      FR 是「真人最高分 < T_LOW」，而真人最高分要由质心算出来——
+      没有质心，FR 在数学上无从算起。这不是数据不好，是年份没被读出来。
+
+      这里用的是 processor.scanner.meta.resolveShotYear：**与生产扫描器
+      完全同一套规则**（EXIF DateTimeOriginal -> DateTime -> 文件 mtime，
+      外加 SHOT_YEAR_MIN/MAX 可信区间与截图名过滤），
+      所以读出来的是真实拍摄年，不是编的。
+    """
+    try:
+        from processor.scanner import meta as scannerMeta
+        got = scannerMeta.resolveShotYear(
+            scannerMeta.readMeta(absPath).get("takenAt"), stem,
+            os.path.getmtime(absPath))
+        return got.get("shotYear")
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _rebalanceSamples(samples: list) -> list:
+    """把 verifySetSamples() 的样本切成「训练 / 探针」。
+
+    单独一个函数而不是塞在 verifySetSamples() 里：它只依赖 label 与 path，
+    单测可以直接喂样本，不用真的跑一遍人脸提取。
+    """
+    perPerson = {}
+    for one in samples:
+        perPerson.setdefault(one["label"], []).append(dict(one))
+    out = []
+    for label in sorted(perPerson):
+        items = sorted(perPerson[label], key=lambda one: str(one.get("path") or ""))
+        nTrain = int(len(items) * (1.0 - VERIFY_PROBE_RATIO))
+        if nTrain < VERIFY_MIN_TRAIN:      # 训练样本不够 -> 整个人不参与
+            continue
+        for i, one in enumerate(items):
+            one["isProbe"] = i >= nTrain
+            out.append(one)
     return out
 
 

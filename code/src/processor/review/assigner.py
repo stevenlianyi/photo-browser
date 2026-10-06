@@ -17,7 +17,7 @@
 #   applyAuto()     把一批 MatchResult 里 decision=auto 的落库
 #   syncLinks() / verifyLinks()  关联表与脸表的一致性核对与修复
 #
-# 四条不可省的纪律
+# 五条不可省的纪律
 # ----------------
 #   ① **确认后立即 recompute 质心**。不等全量重跑。
 #      质心是匹配的唯一依据，用户确认完却要等很久才生效，
@@ -39,6 +39,15 @@
 #         经常是空的（「从待确认直接确认」「置为未知」两种操作都是），
 #         而生成层的 update_* 会把 None 整条丢掉 —— 那是一次**静默的空操作**，
 #         返回 0 行、不报错、库里原封不动（与 _patchFace 踩过的坑同一个根因）。
+#   ⑤ **归属变更后必须刷 shotBucket，再重算质心**（DR-22 / 修正步骤 R2）。
+#      归属那一刻**生日才确定**：这张脸此前是未归属的，shotBucket 是步骤 5
+#      落的**等宽 5 年占位桶**；而质心的桶键是「拍摄年 + 出生年」算出来的
+#      **自适应**桶。不刷的后果是「质心按等宽桶建好、脸表刷成自适应桶」->
+#      僵尸质心 + 新桶无质心 -> 这个人自动匹配恒为 0，而**库里看不出异常**。
+#      顺序固定：**写 personCode -> 刷 shotBucket -> 重算质心**，不可颠倒。
+#      落点：_setBelong()（含 confirm/autoAssign/fix('assign')）与
+#      fix('unknown'|'stranger')；merger 的 merge/undo/split 也各自接了
+#      （见 merger.py 的「谁负责重刷」段）。
 #
 # isConfirmed 的语义（DR-16①，本轮返工的**根因**）
 # ----------------------------------------------
@@ -80,8 +89,9 @@ from common import miscCommon as misc                             # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
 from database.auto_generated import sqliteCommon                  # noqa: E402
 from engine.match import centroid as centroid                     # noqa: E402
+from engine.match import rebucket as rebucket                     # noqa: E402
 
-_VERSION = "20261005"
+_VERSION = "20261006"
 
 _LOG = misc.setLogNew("assigner", "assigner.log")
 
@@ -103,9 +113,20 @@ OP_BATCH_ASSIGN: str = "BATCH_ASSIGN"    # 批量确认（同一簇多张脸）
 OP_SPLIT: str = "SPLIT"                  # 从某人拆出某张脸（可撤销）
 OP_MERGE: str = "MERGE"                  # 两人合并为一人（可撤销）
 OP_UNDO: str = "UNDO"                    # 回滚一条 SPLIT/MERGE
+# ⚠️ DISABLE / ENABLE 是步骤 9（contacts CRUD · DR-19）加进来的两个 opType。
+#   它们**不是**新增机制，只是 DR-19 明确要求「停用要落 pb_review_log」，
+#   而这张表是纠错留痕的**唯一**落点 —— 如果不登记进 OP_TYPES，
+#   logReview 会直接抛「未登记的 opType」。
+#   为什么不放在 api 层直接写这张表：那样就出现了「日志有两个写入口」，
+#   而写日志那一段（upsert + forceColumns，因为 from/to 经常是空的）
+#   恰恰是最容易写错的地方（见 logReview 的注释）—— 一旦分叉成两份，
+#   就会出现「有一半的日志 fromPersonCode 是 NULL」。
+OP_DISABLE: str = "DISABLE"              # 人员停用（DR-19；不可撤销）
+OP_ENABLE: str = "ENABLE"                # 人员恢复（DR-19；不可撤销）
 
 OP_TYPES: tuple = (OP_ASSIGN, OP_FIX, OP_UNKNOWN, OP_STRANGER,
-                   OP_BATCH_ASSIGN, OP_SPLIT, OP_MERGE, OP_UNDO)
+                   OP_BATCH_ASSIGN, OP_SPLIT, OP_MERGE, OP_UNDO,
+                   OP_DISABLE, OP_ENABLE)
 
 #: fix() 的三个动作 -> (opType, 落 pb_face 的方式)
 FIX_ACTIONS: dict = {
@@ -389,12 +410,29 @@ def _setBelong(faceCode: str, personCode: str, source: int,
 
     返回 {faceCode, photoCode, bucketKey, fromPerson, toPerson, changed,
           isConfirmed, linkKey, centroids, logCode}
+
+    ⚠️ **桶键与质心的顺序不可颠倒（DR-22，本步最关键的一处）**
+    --------------------------------------------------
+      归属这一刻**生日才确定** —— 之前这张脸是未归属的，它的 shotBucket 是
+      faceStore 落的**等宽 5 年占位桶**；而质心的桶键是按「拍摄年 + 出生年」
+      算出来的**自适应**桶。所以必须：
+
+          ① 先写 personCode -> ② 按新主人的 birthday 刷 shotBucket
+                              -> ③ 再重算质心
+
+      顺序反了（先重算质心、后刷桶，或者干脆不刷）：
+        质心按等宽桶建好、脸表随后刷成自适应桶 ->
+        **质心表里留着等宽桶键的行（僵尸，新桶取不到）、自适应桶一条质心都没有**
+        -> 这个人的自动匹配恒为 0，而库里**看不出任何异常**
+        （每张脸都有桶、每个质心样本数都够）。
+      这正是 bucket.py 那套自适应分桶「在生产里从未生效」的根因
+      （DR-20：全库只有 faceStore 写 shotBucket，从没有第二处改它）。
     """
     face = _faceByCode(faceCode)
-    _personByCode(personCode)                     # 目标人必须存在（弱外键，自己守）
+    person = _personByCode(personCode)               # 目标人必须存在（弱外键，自己守）
     code = str(face["faceCode"])
     photoCode = str(face.get("photoCode") or "")
-    bucket = str(face.get("shotBucket") or "")
+    bucketKey = str(face.get("shotBucket") or "")
     wasPerson = str(face.get("personCode") or "")
     wasStranger = int(face.get("isStranger") or 0)
     # 自动归属写 0、人工确认写 1 —— 唯一真相在 source 上，调用方不许自己编
@@ -407,10 +445,18 @@ def _setBelong(faceCode: str, personCode: str, source: int,
         linkKey = linkKeyOf(photoCode, personCode)
         if not sqliteCommon.query_pb_photo_person("pb_photo_person", linkKey=linkKey):
             _writeLink(photoCode, personCode, code, confidence, source)
-        return {"faceCode": code, "photoCode": photoCode, "bucketKey": bucket,
+        # ⚠️ 幂等分支**也要刷桶**：这个人的 birthday 可能刚被改过（DR-18），
+        #    而「重复点一次确认」正是用户改完生日后的自然下一步。
+        #    不刷的话新桶键永远等不到 —— 而下面那条「改了生日要重算质心」
+        #    的纪律在这里已经return 掉了。
+        rebucketed = rebucket.rebucketFace(face, person)
+        if rebucketed["changed"]:
+            bucketKey = rebucketed["newBucket"]
+        return {"faceCode": code, "photoCode": photoCode, "bucketKey": bucketKey,
                 "fromPerson": wasPerson, "toPerson": str(personCode),
                 "isConfirmed": confirmed,
                 "changed": False, "linkKey": linkKey, "centroids": [],
+                "bucketRebucketed": rebucketed["changed"],
                 "logCode": ""}
 
     rtn = _patchFace(code, photoCode,
@@ -419,6 +465,14 @@ def _setBelong(faceCode: str, personCode: str, source: int,
     if rtn <= 0:                         # 0 = 一行都没改，说明脸已经不在库里
         raise AssignerError("pb_face 归属写入失败: %s"
                             % sqliteCommon.dbHandle().lastErrMsg)
+
+    # ---- ② DR-22：personCode 落库之后，**立刻**按新主人的生日刷桶 ----
+    #⚠️ 必须在 _patchFace 之后：rebucketFace 依赖「脸当前的 personCode」
+    #   来定位主人，先刷后写会按**旧主人**（或未归属口径）算桶键。
+    #   它只改 shotBucket 一列，不碰刚写好的 personCode / isConfirmed
+    #   （rebucket.py 文件头纪律 ①）。
+    rebucketed = rebucket.rebucketFace(face, person)
+    bucketKey = rebucketed["newBucket"]
 
     linkKey = _writeLink(photoCode, personCode, code, confidence, source)
     # 纪律 ②：改判要把**旧人**的关联与质心一起收拾干净
@@ -431,18 +485,22 @@ def _setBelong(faceCode: str, personCode: str, source: int,
         logCode = logReview(opType, faceCode=code, photoCode=photoCode,
                             fromPersonCode=wasPerson, toPersonCode=personCode,
                             similarity=confidence, faceCount=1)
+    # ---- ③ 桶已刷对，现在才重算质心（顺序不可颠倒，见函数头）----
     # 移走样本的场合（改判/陌生人）要重算**两个人的全部桶**（含 ALL），
     # 单纯新增确认只重算目标人即可 —— 这里统一走 _recomputePersons，多算的代价是毫秒级
     centroids = []
     if recompute:
         todo = [str(personCode)] + ([wasPerson] if wasPerson != str(personCode) else [])
         centroids = [one for stat in _recomputePersons(todo) for one in stat["buckets"]]
-    _LOG.info("归属 %s: %s -> %s (桶 %s, source=%s, isConfirmed=%d)",
-              code, wasPerson or "(无)", personCode, bucket or "(无)", source, confirmed)
-    return {"faceCode": code, "photoCode": photoCode, "bucketKey": bucket,
+    _LOG.info("归属 %s: %s -> %s (桶 %s%s, source=%s, isConfirmed=%d)",
+              code, wasPerson or "(无)", personCode, bucketKey or "(无)",
+              ("，已重刷" if rebucketed["changed"] else ""),
+              source, confirmed)
+    return {"faceCode": code, "photoCode": photoCode, "bucketKey": bucketKey,
             "fromPerson": wasPerson, "toPerson": str(personCode),
             "isConfirmed": confirmed, "changed": True, "linkKey": linkKey,
-            "centroids": centroids, "logCode": logCode}
+            "centroids": centroids, "bucketRebucketed": rebucketed["changed"],
+            "logCode": logCode}
 
 
 def setBelong(faceCode: str, personCode: str, source: int,
@@ -564,6 +622,14 @@ def fix(faceCode: str, action: str, personCode: str = None,
         raise AssignerError("pb_face 改判失败: %s"
                             % sqliteCommon.dbHandle().lastErrMsg)
 
+    # ---- DR-22：退回未归属 -> 刷回**等宽降级桶**（生日不再是这个人的）----
+    # ⚠️ 顺序与 _setBelong 一致：先写 personCode=NULL，再刷桶，最后重算质心。
+    #   留在自适应桶上的话，这张脸将来重新归属时会被算成「桶已经对了」而
+    #   跳过刷桶 —— 而那个桶是按**上一个主人**的生日算的，语义已经错了。
+    #   stranger 同理：它永远不会再参与匹配，但库里不该留着一个
+    #   「指向某个已不属于它的人的自适应桶」的键。
+    rebucketed = rebucket.rebucketFace(face, None)
+
     # 纪律 ③：这张照片里**再没有别的脸**属于那个人时才删关联
     dropped = 0
     if wasPerson and _facesInPhotoFor(photoCode, wasPerson, excludeFaceCode=code) == 0:
@@ -573,12 +639,14 @@ def fix(faceCode: str, action: str, personCode: str = None,
                         similarity=similarity, faceCount=1,
                         detail=reason or "")
     centroids = _recomputePersons([wasPerson]) if wasPerson else []
-    _LOG.info("改判 %s action=%s 原属 %s（关联删除 %d 条）%s",
-              code, act, wasPerson or "(无)", dropped, reason)
+    _LOG.info("改判 %s action=%s 原属 %s（关联删除 %d 条，桶 -> %s）%s",
+              code, act, wasPerson or "(无)", dropped,
+              rebucketed["newBucket"] or "(无拍摄年份)", reason)
     return {"faceCode": code, "photoCode": photoCode, "action": act,
-            "bucketKey": str(face.get("shotBucket") or ""),
+            "bucketKey": rebucketed["newBucket"],
             "fromPerson": wasPerson, "toPerson": "", "changed": True,
             "droppedLinks": dropped,
+            "bucketRebucketed": rebucketed["changed"],
             "centroids": [one for stat in centroids for one in stat["buckets"]],
             "logCode": logCode, "reason": reason}
 
@@ -718,6 +786,195 @@ def confirmPerson(personCode: str, faceCodes: list,
               selfStat["enabled"])
     return {"personCode": str(personCode), "assigned": assigned,
             "failed": failed, "centroids": centroids}
+
+
+# ============================================================
+# 二之二、人员停用 / 恢复（DR-19）—— 步骤 9 的 contacts CRUD 调用
+# ============================================================
+#
+# 为什么放在这里而不是 api/contacts.py
+# ---------------------------------
+#   停用要按固定顺序改**四张表**（pb_person_centroid / pb_face /
+#   pb_photo_person / pb_review_log），其中 pb_face.personCode 的写权限
+#   按数据库设计 §D-4 只在本模块（processor/review）手里。
+#   放到 api 层去写就等于开了一条绕过 review 层的 personCode 写入路径 ——
+#   而那正是「越改越乱」类静默 bug 的来源。
+#   ⇒ 本模块是**唯一**实现，api 层只转发。
+
+def personImpact(personCode: str) -> dict:
+    """停用影响面（**只读，不写任何一行**）。DR-19 要求的前置复述。
+
+    五个数字
+    --------
+      photoCount        关联行数（= 他出现过的照片数）
+      faceCount         脸数（含自动归属）
+      confirmedCount    isConfirmed=1 的脸数（**只有这些进过质心**）
+      centroidCount     质心行数（停用会全删）
+      pendingAfter      停用后待确认队列会变成多少（= 当前 pending + 他的脸数）
+
+    ⚠️ `pendingAfter` 之所以必须在**执行前**算出来给用户看：
+      误导入的陌生人可能挂着几百张脸，停用会让待确认队列暴涨。
+      用户必须先知道这个数字（开发计划 DR-19 原文：「他必须先知道」）。
+    """
+    code = str(personCode or "")
+    out = {"personCode": code, "photoCount": 0, "faceCount": 0, "confirmedCount": 0,
+           "centroidCount": 0, "pendingAfter": 0}
+    if not code:
+        return out
+    if not sqliteCommon.query_pb_person("pb_person", personCode=code):
+        return out
+    out["photoCount"] = len(sqliteCommon.query_pb_photo_person(
+        "pb_photo_person", personCode=code, mode="light"))
+    for row in sqliteCommon.query_pb_face("pb_face", personCode=code, mode="light"):
+        out["faceCount"] += 1
+        if int(row.get("isConfirmed") or 0):
+            out["confirmedCount"] += 1
+    out["centroidCount"] = len(sqliteCommon.query_pb_person_centroid(
+        "pb_person_centroid", personCode=code, mode="light"))
+    from processor.review import queue as reviewQueue      # 局部 import：见下方说明
+    out["pendingAfter"] = int(reviewQueue.countPending() or 0) + out["faceCount"]
+    out["warning"] = ("停用后：%d 个质心桶将删除、%d 张人脸退回待确认队列"
+                      "（队列将从 %d 涨到 %d）"
+                      % (out["centroidCount"], out["faceCount"],
+                         out["pendingAfter"] - out["faceCount"], out["pendingAfter"]))
+    return out
+
+
+def disablePerson(personCode: str, reason: str = "") -> dict:
+    """**停用**一个人（DR-19）。只改 `delFlag`，**绝不硬删**。
+
+    四步顺序是**固定的，不可颠倒**
+    --------------------------------
+      ① `centroid.dropPerson()` 删掉该人**全部**质心
+      ② 该人所有脸退回未归属（`personCode=NULL, isConfirmed=0, isStranger=0`）
+      ③ 关联行按纪律 ③ 存废
+      ④ 落 `pb_review_log(opType=DISABLE)`
+      ⑤ `pb_person.delFlag='1'`
+
+    两条「不做就出事」的理由
+    ----------------------
+      · **必须先删质心再退人脸**（① 在 ② 之前）：只删质心而留 personCode，
+        那张脸就变成「人工确认但无质心」—— 既不在待确认队列
+        （personCode 非空），也不在「我不同意」（isConfirmed=1），
+        **从所有队列里消失**，用户再也找不到它。而质心还在的话，
+        他仍会被匹配，只是人脸已经不可达 —— 静默失配最难查。
+      · **不能只退人脸不删关联**（③）：关联表是 (照片 × 人)，
+        人脸全退之后那些行就是「这张照片里再无人出现」的幽灵关联，
+        verifyLinks 会报 orphanLink，且人员时间轴上会凭空多出照片。
+
+    ⚠️ ② 用**一次批量 upsert** 而不是逐张 fix('unknown')：
+      误导入的陌生人可能挂着几百张脸，逐张调fix 会产生几百条 UNKNOWN 日志
+      并触发几百次质心重算（而此时这个人已经一张脸都不剩了，
+      每次重算都是纯浪费）。这里一次事务搞定，并且**只落一条** DISABLE 日志
+      —— 一次停用就是一次操作，不是一次操作 × N 张脸。
+    """
+    code = str(personCode or "").strip()
+    if not code:
+        raise AssignerError("personCode 不能为空")
+    if not sqliteCommon.query_pb_person("pb_person", personCode=code):
+        raise AssignerError("personCode=%s 在 pb_person 里不存在" % code)
+
+    # 先取人脸（**读在写之前**：退回未归属之后 personCode 就查不到了）
+    faces = sqliteCommon.query_pb_face("pb_face", personCode=code, mode="light",
+                                       orderBy="recID")
+    confirmedBefore = sum(1 for f in faces if int(f.get("isConfirmed") or 0))
+
+    # ---- ① 删质心 ----
+    droppedCentroids = centroid.dropPerson(code)
+
+    # ---- ② 人脸全部退回未归属（一次批量 upsert）----
+    db = sqliteCommon.dbHandle()
+    db.begin()
+    try:
+        for face in faces:
+            rtn = _patchFace(str(face.get("faceCode") or ""),
+                             str(face.get("photoCode") or ""),
+                             {"personCode": None, "isConfirmed": 0,
+                              "isStranger": 0, "modifyYMDHMS": misc.getTime()},
+                             forceColumns=("personCode",))
+            if rtn <= 0:
+                raise AssignerError("pb_face 退回未归属失败: %s"
+                                    % sqliteCommon.dbHandle().lastErrMsg)
+        # ② 之后立刻刷桶：主人没了 ->桶键退回等宽降级桶（DR-22 的同一顺序）
+        for face in faces:
+            try:
+                rebucket.rebucketFace(face, None)
+            except Exception as e:                    # 单张刷桶失败不该中断停用
+                _LOG.warning("disablePerson %s: 脸 %s 刷桶失败（继续）: %s"
+                             % (code, face.get("faceCode"), e))
+        # ---- ③ 关联行：人脸全退之后，这些行按纪律 ③ 全部存废 ----
+        droppedLinks = sqliteCommon.deleteTableGeneral(
+            "pb_photo_person", "personCode = %s", (code,))
+        # ---- ⑤ pb_person.delFlag ----
+        rtn = sqliteCommon.updateTableGeneral(
+            "pb_person", "personCode = %s", (code,),
+            {"delFlag": comGD.DEL_FLAG_YES, "modifyYMDHMS": misc.getTime()})
+        if rtn == -2:                    # sqliteHandle.RET_ERROR
+            raise AssignerError("pb_person 软删失败: %s"
+                                % sqliteCommon.dbHandle().lastErrMsg)
+        # ---- ④ 落日志（在事务内：与上面四步要么全成要么全滚）----
+        logCode = logReview(OP_DISABLE, fromPersonCode=code, faceCount=len(faces),
+                            detail="disable p=%s;n=%d;c0=%d;r=%s"
+                                   % (code, len(faces), confirmedBefore,
+                                      str(reason or "")[:200]),
+                            isRevertible=0)
+        db.commit()
+    except Exception:
+        db.rollbackWrite()
+        raise
+
+    _LOG.info("停用 %s：质心删 %d、人脸退回 %d（确认样本 %d）、关联删 %d、日志 %s",
+              code, droppedCentroids, len(faces), confirmedBefore,
+              droppedLinks, logCode)
+    return {"personCode": code, "faces": len(faces),
+            "confirmedBefore": confirmedBefore,
+            "centroidsDropped": int(droppedCentroids or 0),
+            "linksDropped": int(droppedLinks or 0),
+            "logCode": logCode, "delFlag": comGD.DEL_FLAG_YES}
+
+
+def enablePerson(personCode: str) -> dict:
+    """**恢复**一个人（`delFlag` 改回 '0'）。
+
+    ⚠️ 恢复**不会**把任何人脸还回去 —— 停用时人脸已经退回未归属，
+      而未归属的脸没有 `personCode`，也就没有主人可用来推桶键。
+      所以恢复之后这个人：
+        · 质心 = 0 行 -> **不参与自动匹配**（没有可比的向量）
+        · 全部人脸在待确认队列里 -> 必须**重新确认**才能重新长出质心
+      这个提示必须由服务端在响应里给（`note`），前端照着显示即可 ——
+      「他怎么忽然匹配不准了」是这类操作最常见的后遗症。
+    """
+    code = str(personCode or "").strip()
+    if not code:
+        raise AssignerError("personCode 不能为空")
+    rows = sqliteCommon.query_pb_person("pb_person", personCode=code, delFlag="*")
+    if not rows:
+        raise AssignerError("personCode=%s 在 pb_person 里不存在" % code)
+    if str(rows[0].get("delFlag") or comGD.DEL_FLAG_NO) == comGD.DEL_FLAG_NO:
+        return {"personCode": code, "changed": False, "delFlag": comGD.DEL_FLAG_NO,
+                "logCode": "", "faceCount": 0, "centroidCount": 0,
+                "note": _ENABLE_NOTE}
+    rtn = sqliteCommon.updateTableGeneral(
+        "pb_person", "personCode = %s", (code,),
+        {"delFlag": comGD.DEL_FLAG_NO, "modifyYMDHMS": misc.getTime()})
+    if rtn == -2:                        # sqliteHandle.RET_ERROR
+        raise AssignerError("pb_person 恢复失败: %s" % sqliteCommon.dbHandle().lastErrMsg)
+    faceCount = len(sqliteCommon.query_pb_face("pb_face", personCode=code, mode="light"))
+    centroidCount = len(sqliteCommon.query_pb_person_centroid(
+        "pb_person_centroid", personCode=code, mode="light"))
+    logCode = logReview(OP_ENABLE, toPersonCode=code, faceCount=faceCount,
+                        detail="enable p=%s;n=%d;g=%d" % (code, faceCount, centroidCount),
+                        isRevertible=0)
+    _LOG.info("恢复 %s：人脸 %d（已退回未归属，需重新确认）、质心 %d", code,
+              faceCount, centroidCount)
+    return {"personCode": code, "changed": True, "delFlag": comGD.DEL_FLAG_NO,
+            "faceCount": faceCount, "centroidCount": centroidCount,
+            "logCode": logCode, "note": _ENABLE_NOTE}
+
+
+#: 恢复后必须给用户看的一句话（DR-19 明确要求）
+_ENABLE_NOTE: str = ("需重新确认人脸才能自动匹配：停用时人脸已退回未归属队列，"
+                     "没有确认样本就没有质心，这个人当前不参与自动匹配")
 
 
 # ============================================================

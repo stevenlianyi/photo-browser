@@ -84,8 +84,19 @@ def makeIndex(specs, minSamples: int = 3, names=None) -> centroid.CentroidIndex:
     return centroid.CentroidIndex(matrix, rows, persons, display, minSamples)
 
 
-def faceOf(vec, bucketKey, faceCode="fc_test", photoCode="PH_test"):
+def faceOf(vec, bucketKey, faceCode="fc_test", photoCode="PH_test",
+           personCode="P_assigned"):
+    """造一张 pb_face 行。
+
+    ⚠️ **默认 personCode 非空 = 已归属**（DR-21 / 修正步骤 R2）
+    ------------------------------------------------
+      未归属脸的候选桶被**放宽成「全部已启用桶」**了（等宽桶与自适应桶的键
+      根本不对齐，按相邻三桶一把质心都取不到）。而本文件绝大多数用例测的
+      是「已归属脸按相邻三桶取 max」这条**没变**的路径，所以默认给一个
+      personCode；要测未归属路径就显式传 personCode=""。
+    """
     return {"faceCode": faceCode, "photoCode": photoCode,
+            "personCode": (personCode or None),
             "shotBucket": bucketKey,
             "embedding": faceEngine.encodeEmbedding(vec)}
 
@@ -246,6 +257,7 @@ class TestThreeWayDecision:
         """
         face = unit(31)
         got = matcher.match({"faceCode": "fc_s", "shotBucket": None,
+                             "personCode": "P01",
                              "embedding": faceEngine.encodeEmbedding(face)},
                             index=makeIndex([("P01", bucket.ALL_BUCKET, 5, face)]))
         assert got.candidateBuckets == [bucket.ALL_BUCKET]
@@ -257,6 +269,7 @@ class TestThreeWayDecision:
     def test_no_bucket_and_no_all_centroid_is_cluster(self):
         """候选桶里连一个启用的质心都没有时才是 no_bucket（原来是无条件判它）"""
         got = matcher.match({"faceCode": "fc_s", "shotBucket": None,
+                             "personCode": "P01",
                              "embedding": faceEngine.encodeEmbedding(unit(31))},
                             index=makeIndex([("P01", "2000-2002", 5, unit(31))]))
         assert got.decision == matcher.DECISION_CLUSTER
@@ -504,8 +517,10 @@ class TestBatchAndReproducibility:
         """脏行（无桶/无向量）**占位**返回 cluster，绝不静默缩短列表"""
         faces = [faceOf(unit(600), "2000-2002", "fc_ok"),
                  {"faceCode": "fc_novec", "shotBucket": "2000-2002",
+                  "personCode": "P01",
                   "embedding": None},
                  {"faceCode": "fc_nobucket", "shotBucket": None,
+                  "personCode": "P01",
                   "embedding": faceEngine.encodeEmbedding(unit(603))},
                  faceOf(unit(601), "2000-2002", "fc_ok2")]
         index = makeIndex([("P01", "2000-2002", 5, unit(602))])

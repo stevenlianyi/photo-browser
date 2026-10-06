@@ -169,22 +169,104 @@ def normalizeBday(raw: str) -> tuple:
     return "", text, False
 
 
+#: 中国手机号位数（`1` 开头的 11 位）
+CN_MOBILE_LEN: int = 11
+
+#: 中国国际区号（`+86` / `0086` / 直接写 `86`）
+CN_COUNTRY_CODE: str = "86"
+
+
 def phoneKey(raw: str) -> str:
     """电话归一化，**只用于比对**，绝不写进库。
 
-    同一个号在不同导出里长得不一样：`+86285187018` 与 `02885187018` 是同一个。
-    规则：只留数字 -> 去国际区号 86 -> 去长途前缀 0。
-    ⚠️ 只归一化前缀，不合并号段：真实数据里 +86285187018 与 02885187018
-       其实不是同一个号（前者少一位），差点被当成「同一人」丢掉一个真人。
+    规则（按「有没有国际写法标记」分两条路）
+    ----------------------------------------
+      **① 带 `+` 号或 `00` 开头 -> 国际写法**
+         先吃掉 `+` / `00`，再吃掉国际区号 `86`。剩下的就是国内号。
+      **② 不带 `+` 也不带 `00` -> 默认国内号**（中国手机号 11 位）
+         `13800138000` / `138-0013-8000` / `138 0013 8000` / `8613800138000`
+         都要归一到 `13800138000`。
+      **③ 分隔符一律去掉**：`-`、空格、括号、点、斜杠 —— 「取消中间的 `-`」。
+      **④ 剩下的国内长途前缀 `0`（座机区号）也去掉**：`02885187018` -> `2885187018`。
+
+    为什么必须区分「带不带国际标记」而不是「只看数字前缀」
+    --------------------------------------------------
+      老实现只看数字前缀（`len > 11 and startswith("86")`），于是
+      **`008613800138000` 整条坏掉**：`00` 前缀没被吃掉，只剩掉一个 `0`，
+      结果是 `08613800138000`（14 位）—— 它跟谁都配不上对，
+      于是同一个人的两条记录**永远合并不了**，而且**不报错**。
+      现在 `00` 被识别成「国际长途前缀」，先吃掉它再吃 `86`。
+
+    ⚠️ 只归一化前缀，**不合并号段**：真实数据里
+       `+86285187018`（12 位，`86` + 9 位）与 `02885187018`（11 位）
+       其实**不是同一个号**（前者少一位，是被截断的脏数据）。
+       新规则下它们分别归一成 `86285187018` 与 `2885187018`，**不相等** ——
+       这正是我们要的：宁可漏一次合并提示，也不能把两个真人并成一个。
+       （而 `+862885187018`（13 位）与 `02885187018` 会归一到同一个
+         `2885187018`，因为那确实是同一个号 `86 2885187018`。）
     """
-    digits = re.sub(r"[^0-9]", "", str(raw or ""))
+    text = str(raw or "").strip()
+    digits = re.sub(r"[^0-9]", "", text)
     if not digits:
         return ""
-    if len(digits) > 11 and digits.startswith("86"):
-        digits = digits[2:]
+    # ① 国际写法：显式 + 号，或以 00 开头（国际长途前缀）
+    international = ("+" in text) or digits.startswith("00")
+    if international:
+        digits = digits.lstrip("0")          # 吃掉 00 / 000...
+        if digits.startswith(CN_COUNTRY_CODE) and len(digits) > CN_MOBILE_LEN:
+            digits = digits[len(CN_COUNTRY_CODE):]
+    # ② 非国际写法，但带了 86 区号且比国内 11 位长 -> 也按区号去掉
+    #    （有人写 8613800138000 就是不写 +）
+    if len(digits) > CN_MOBILE_LEN and digits.startswith(CN_COUNTRY_CODE):
+        digits = digits[len(CN_COUNTRY_CODE):]
+    # ③ 国内长途前缀 0（座机区号）
     if len(digits) > 7 and digits.startswith("0"):
         digits = digits[1:]
     return digits
+
+
+def isChineseMobile(raw: str) -> bool:
+    """这个号码看起来是不是一个**中国手机号**。
+
+    三个条件同时成立才算：
+      ① **不是**「带非 `86` 区号的国际写法」（`+1 4155550123` 不是中国号，
+         哪怕它恰好也是 11 位、也以 `1` 开头 —— 只按形状判会把美国号认成中国号）
+      ② 归一后 11 位
+      ③ 以 `1` 开头（中国手机号段全在 `1` 下）
+    另有 `phoneKey` 侧的一道保证：非国际写法下仅当**位数超过 11** 才会切 `86`，
+    所以 `8613800138000` 这种「不写 + 的区号写法」也能被认出。
+
+    ⚠️ 它**不是**校验器，只是给 UI 的一个提示位：`phone` 是自由文本列，
+       通讯录里真实存在 `010-8888` 这种内部短号与 `+1...` 这种海外号。
+       任何「不是手机号就不收」的做法都会把真人挡在门外。
+       所以本函数只用来决定「要不要显示『疑似同一手机号』」，不用来拒收。
+    """
+    if _foreignCountryCode(raw):
+        return False
+    key = phoneKey(raw)
+    return len(key) == CN_MOBILE_LEN and key.startswith("1")
+
+
+def _foreignCountryCode(raw: str) -> str:
+    """这个号码是「带非 86 区号的国际写法」吗？是就返回那个区号，否则返回空串。
+
+    为什么要单独判它：`phoneKey` 的职责是**比对键**，它对所有国家的号码一视同仁
+    （只吃 `+` / `00` 与 `86`，其余原样保留）—— 那是对的，国际化阶段不该在
+    比对层做国家判断。而「这是不是中国手机号」是**展示层**的语义问题，
+    需要知道国家，所以单独一个函数，两处不混。
+    """
+    text = str(raw or "").strip()
+    digits = re.sub(r"[^0-9]", "", text)
+    if not digits:
+        return ""
+    international = ("+" in text) or digits.startswith("00")
+    if not international:
+        return ""
+    stripped = digits.lstrip("0")
+    if stripped.startswith(CN_COUNTRY_CODE):
+        return ""
+    # 取 1~3 位当区号（够分辨 1 / 44 / 81 / 852 这类）
+    return stripped[:3]
 
 
 def nameKey(text: str) -> str:
@@ -769,7 +851,79 @@ def applyPlan(planned: dict, ownerID: str = "", batchRows: int = None) -> dict:
 
     # ---- 4. 同姓建议（只提示） ----
     summary["familySuggestions"] = suggestFamilies(items)
+
+    # ---- 5. 生日到位 -> 刷桶 + 重算质心（DR-22 / R2，**必须放在最后**）----
+    # 为什么联系人导入是刷桶的**触发点**之一
+    # --------------------------------------
+    #   pb_person.birthday 决定这个人走自适应分桶还是等宽降级
+    #   （bucket.birthYearOf），而桶键又决定质心建在哪个年代桶上。
+    #   生日**刚到位**的那一刻，就是这些人的脸该刷成自适应桶的时刻 ——
+    #   漏掉的话后果与 DR-20 同类，只是范围局限在「本次导入的人」：
+    #     脸表留等宽桶 -> 质心按等宽桶建 -> 这批人跨年代认不出来，且不报错。
+    #   注意它是**幂等**的：桶已经对的行走一遍 changed=0；脸表与出生年口径
+    #   完全一致时什么也不写。放在最后是为了让「分类/家庭组」那几步的
+    #   pb_person 写入先落定，避免刷桶读到半成品档案。
+    summary["rebucketed"] = _rebucketTouchedPersons(
+        summary["created"] + summary["updated"])
     return summary
+
+
+def _hasBirthYear(personCode: str) -> bool:
+    """这个人的档案里有没有**合法出生年**（决定他走自适应还是等宽降级）。"""
+    from engine.match import bucket as bucket
+    for row in sqliteCommon.query_pb_person("pb_person",
+                                            personCode=str(personCode or ""),
+                                            mode="light"):
+        return bool(bucket.birthYearOf(row.get("birthday")))
+    return False
+
+
+def _rebucketTouchedPersons(personCodes: list) -> dict:
+    """对本次新建/更新的人跑「刷 shotBucket + 重算质心」。返回统计。
+
+    为什么**只处理本次导入的人**
+    --------------------------
+      导入动的是 pb_person，而桶键取决于「这个人的生日」。
+      全库刷桶是`tools/rebucket_cli.py --all` 的活（那是改存量口径的
+      一次性动作，不该由一次导入顺带做掉—— 它会扫全库脸表）。
+      本函数只对「本次落库的人」跑，代价与导入规模成正比。
+
+    为什么**刷桶要在重算质心之前**（DR-22）
+      顺序反了就是僵尸质心（新桶取不到、旧桶留着），匹配率归零且库里
+      看不出异常。这里靠调用顺序保证，不靠调用方记得。
+
+    失败不炸导入
+    ----------
+      联系人导入的主目标是「把人建进来」；刷桶/重算失败（脏向量、样本不足、
+      某个人脸表有异常）不该让整个导入回滚。记进 warnings 让用户看见即可——
+      这与头像写入失败的处置口径一致（同一个函数的注释里写着）。
+    """
+    out = {"persons": 0, "withBirthday": 0, "faces": 0, "changed": 0,
+           "recomputed": 0, "failed": []}
+    if not personCodes:
+        return out
+    from engine.match import centroid as centroid
+    from engine.match import rebucket as rebucket
+    for code in personCodes:
+        try:
+            info = rebucket.rebucketPerson(code)
+            if info.get("error"):
+                continue
+            out["persons"] += 1
+            out["faces"] += int(info.get("faces") or 0)
+            out["changed"] += int(info.get("changed") or 0)
+            if _hasBirthYear(code):
+                out["withBirthday"] += 1
+            stat = centroid.recomputePerson(code)
+            out["recomputed"] += len(stat.get("buckets") or ())
+        except (rebucket.BucketStaleError, RuntimeError, ValueError) as e:
+            out["failed"].append((code, str(e)))
+            _LOG.error("导入后刷桶/重算失败 %s：%s", code, e)
+    if out["changed"] or out["recomputed"]:
+        _LOG.info("导入后刷桶：%d 人（其中 %d 人有生日）、%d 张脸改桶、"
+                  "重算 %d 个桶质心", out["persons"], out["withBirthday"],
+                  out["changed"], out["recomputed"])
+    return out
 
 
 def _progress(text: str) -> None:

@@ -1,0 +1,114 @@
+/* ============================================================
+ * 全局基础样式 —— Tailwind 三层 + 少量全局基线
+ * ============================================================
+ * 颜色一律走 Tailwind 语义类（bg-bg / bg-card / text-ink / border-line …），
+ * 其底层是 tokens.css 的 CSS 变量 —— 本文件不出现任何 hex 色值。
+ * ============================================================ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: theme('fontFamily.sans');
+    /* 正文 14px：设计稿正文基准。Tailwind 的 rem 默认是 16px，
+       这里用 px 锁定，避免用户改浏览器默认字号时整体布局跟着漂 */
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-bg text-ink text-body;
+    /* 深浅切换时不做整页过渡 —— 照片区禁止任何视觉叠加（含滤镜/过渡），
+       滚动与切主题必须是瞬时的，否则会看到照片「闪一下」 */
+    transition: none;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply text-ink;
+    /* 中文没有 italic，斜体会变成伪斜体很难看 */
+    font-style: normal;
+  }
+
+  /* 键盘焦点必须可见（验收第 8 条）。
+     ⚠️ 不要在组件里写 `focus:outline-none` / `focus-visible:outline-none`：
+        Tailwind 生成的选择器是 `.xxx:focus`（0,2,0），特异度高于这里的
+        `:focus-visible`（0,1,0），会把焦点环覆盖成 transparent ——
+        表现为「鼠标点击正常、Tab 键盘导航完全没有焦点指示」。
+        鼠标点击本来就不会命中 :focus-visible，不需要额外抑制。 */
+  :focus-visible {
+    outline: 2px solid var(--pb-focus);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* 跳转链接的落点是整个内容区，聚焦时画一圈框会很难看；
+     它只有 tabindex="-1"，不参与 Tab 序列，所以单独关掉 */
+  main:focus,
+  main:focus-visible {
+    outline: none;
+  }
+
+  ::selection {
+    background-color: var(--pb-primary-soft);
+    color: var(--pb-text);
+  }
+
+  /* 滚动条跟随主题（color-scheme 已由 tokens.css 设置，这里只补 webkit） */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--pb-border-strong);
+    border: 2px solid transparent;
+    background-clip: content-box;
+    border-radius: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background-color: transparent;
+  }
+}
+
+@layer components {
+  /* ---- 页面骨架：内容区最大宽度 1600 + 24px 内边距（设计稿 §4.1）---- */
+  .pb-page {
+    @apply mx-auto w-full max-w-content px-4 py-6 md:px-6;
+  }
+
+  /* ---- 卡片：12px 圆角 + 1px 边框 + 极轻阴影 ---- */
+  .pb-card {
+    @apply rounded-card border border-line bg-card;
+    box-shadow: var(--pb-shadow-card);
+  }
+
+  /* ---- 区块标题：副标题规格（16px/600）---- */
+  .pb-section-title {
+    @apply text-subtitle text-ink;
+  }
+
+  /* ---- 区块内的说明 / 元信息 ---- */
+  .pb-hint {
+    @apply text-caption text-ink-weak;
+  }
+
+  /* ---- 照片占位块：低饱和底 + 极轻内描边，本身不加任何滤镜 ---- */
+  .pb-photo-frame {
+    @apply relative overflow-hidden rounded-thumb border border-line bg-photo;
+  }
+
+  /* ---- 键盘用户的跳转链接（无障碍）---- */
+  .pb-skip-link {
+    @apply sr-only;
+  }
+  .pb-skip-link:focus {
+    @apply not-sr-only fixed left-4 top-4 z-50 rounded-btn bg-card px-4 py-2;
+    box-shadow: var(--pb-shadow-pop);
+  }
+}

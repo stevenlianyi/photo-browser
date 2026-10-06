@@ -51,6 +51,19 @@
 #   逃生口：basicSettings.CENTROID_CONFIRMED_ONLY=False 退回旧口径（全样本），
 #   **只用于**回归对比与冷启动（用户还没确认过任何脸时的 S0 回归）。
 #
+# 「先刷桶，再重算质心」是硬顺序（DR-22 / 修正步骤 R2）
+# ------------------------------------------------------
+#   本模块**只写 pb_person_centroid**；pb_face.shotBucket 由engine.match.rebucket
+#   单独负责（写入路径见 rebucket.py 文件头的「谁负责重刷」表）。
+#   两者必须按顺序配合，顺序反了会**静默**失配：
+#     先 recompute（按旧桶键建好质心）-> 再 rebucket（改脸表的桶键）
+#     => 质心表里留着旧桶键的行（僵尸，新桶取不到），新桶键又没有质心
+#     => 该人匹配率归零，而**库里看不出任何异常**。
+#   所以 recompute / recomputePerson 在执行前会调 _assertBucketOrder()：
+#   脸表实际 shotBucket 与「按当前主人的生日算出来的桶键」不一致就**抛错**，
+#   并在消息里给出该跑的命令（tools/rebucket_cli.py --person <code>）。
+#   **不默默按旧口径算** —— 那样只会把错误变得更持久、更难查。
+#
 # 只在主进程调用（与 faceStore 同一条单写入者纪律）
 #   本模块 import sqliteCommon，**绝不允许**进子进程（步骤 5 的 pool 有静态自查）。
 #
@@ -74,8 +87,9 @@ from config import basicSettings as basicSettings                 # noqa: E402
 from database.auto_generated import sqliteCommon                  # noqa: E402
 from engine.face import engine as faceEngine                      # noqa: E402
 from engine.match import bucket as bucket                         # noqa: E402
+from engine.match import rebucket as rebucket                     # noqa: E402
 
-_VERSION = "20261005"
+_VERSION = "20261006"
 
 _LOG = misc.setLogNew("centroid", "centroid.log")
 
@@ -96,6 +110,14 @@ ALL_BUCKET: str = bucket.ALL_BUCKET
 #: ⚠️ 模块级转发是**为了让单测能 monkeypatch 一次全生效**：
 #:   loadFaceVectors 默认值取这个常量，而不是在默认参数里直接读 basicSettings。
 CONFIRMED_ONLY: bool = basicSettings.CENTROID_CONFIRMED_ONLY
+
+#: DR-22 前置检查的开关。**只在单测与排障时关**，日常恒为 True。
+#:
+#: 为什么要留这个开关：检查本身要把这个人的每张脸回查一次 pb_photo 拿拍摄年。
+#: 它在 10 万张脸的库上不是免费的（见 _assertBucketOrder 的说明），
+#: 而单测里造「脸 -> 质心」的最小样本时并不总是有对应的 pb_photo 行。
+#:⚠️ 关掉它 = 放弃 DR-22 的保护，生产路径**不许**关。
+_BUCKET_CHECK: dict = {"enabled": True}
 
 
 # ============================================================
@@ -254,8 +276,43 @@ def computeCentroid(personCode: str, bucketKey: str,
     }
 
 
+# ============================================================
+# 二之二、DR-22 硬顺序：先刷桶，再重算质心
+# ============================================================
+
+def _assertBucketOrder(personCode: str) -> dict:
+    """**重算质心的前置检查**（DR-22）：脸表的 shotBucket 是不是当前口径的。
+
+    为什么必须前置检查，而不是「重算完再看」
+    --------------------------------------
+      顺序反了会**静默**失配：先按旧桶键建好质心、再刷脸表的桶键 ->
+      质心表里留着旧桶键的行（僵尸，新桶取不到），新桶键又没有质心 ->
+      该人匹配率归零，而**库里看不出任何异常**（每张脸都有桶、每个质心都
+      样本充足，只是彼此对不上）。所以这里宁可**拒绝执行**。
+
+    为什么检查的是「脸表 vs 期望」而不是「脸表 vs 质心表」
+    --------------------------------------------------
+      脸表的桶键是**因**，质心的桶键是**果**。拿「果」校验「因」会把
+      「还没重算过」与「按错口径重算过」混成同一个信号 ——
+      于是「第一次给某人建质心」永远被误判成不一致（死锁），
+      而 split/merge 造成的「样本搬走、旧桶还挂着」（**合法**、
+      recomputePerson 本来就是来清它的）又永远判不出来。
+      直接问「脸表现在写的桶，是不是按这个人当前的生日算出来的」，
+      答案是唯一的、精确的，而且每一次归属变更都会立刻被覆盖
+      （assigner 在重算之前就已经把桶刷对了）。
+
+    抛错而不是告警：抛错会被调用方的日志与 CLI 接住；
+    告警会被当成「已知的正常噪音」逐步无视 —— 而这个状态一旦被无视，
+    后果就是匹配率归零且无人察觉。
+    """
+    if not _BUCKET_CHECK.get("enabled", True):
+        return {"personCode": str(personCode or ""), "checked": 0, "skipped": True}
+    return rebucket.assertFacesFresh(personCode,
+                                     confirmedOnly=CONFIRMED_ONLY)
+
+
 def recompute(personCode: str, bucketKey: str, minSamples: int = None,
-              confirmedOnly: bool = None) -> dict:
+              confirmedOnly: bool = None, _bucketChecked: bool = False) -> dict:
     """重算并 upsert pb_person_centroid。**人工确认后立即调这个。**
 
     为什么"立即"是硬要求
@@ -270,14 +327,23 @@ def recompute(personCode: str, bucketKey: str, minSamples: int = None,
     ---------
       '1995-1999' 这样的年代桶：只用**该桶**的确认样本
       ALL_BUCKET   兜底桶：用**全部**确认样本（不分桶）
-      空串/None    这张脸没有拍摄年份 -> **连行都不建**（见下）
+      空串/None    这张脸没有拍摄年份-> **连行都不建**（见下）
 
     minSamples
     ---------
       低于下限的桶把 centroid 写 NULL、sampleCount 照实写。
       留一行 sampleCount=1/2 的记录是有价值的：它让「这个人只有一个样本，
       质心不可用」在库里查得出来，而不是表现为"这个人没有这个年代的桶"。
+
+    _bucketChecked（**内部参数，业务代码不要传**）
+      recomputePerson 会先做一次前置检查，再逐桶调本函数；
+      这个标志只是不把**同一次**检查重跑一遍（每桶一次 = 每人多几十次
+      pb_photo 回查，10 万张脸的库上白跑几百万次查询）。
+      它**不是**跳过刷桶的口子：真正的门禁在 _assertBucketOrder，
+      而它唯一的绕法是本参数 —— 只由 recomputePerson 内部传。
     """
+    if not _bucketChecked:
+        _assertBucketOrder(personCode)
     limit = MIN_SAMPLES if minSamples is None else int(minSamples)
     person = str(personCode or "")
     info = computeCentroid(person, bucketKey, confirmedOnly)
@@ -337,8 +403,12 @@ def recomputePerson(personCode: str, minSamples: int = None,
     """
     person = str(personCode or "")
     onlyConfirmed = CONFIRMED_ONLY if confirmedOnly is None else bool(confirmedOnly)
+    # ⚠️ DR-22：刷桶必须在重算**之前**完成。这里是唯一的前置检查点，
+    #    逐桶 recompute 的那一次靠 _bucketChecked=True 省掉（同一次不查两遍）。
+    _assertBucketOrder(person)
     buckets = listBucketsOf(person, onlyConfirmed) + [ALL_BUCKET]
-    results = [recompute(person, one, minSamples, onlyConfirmed) for one in buckets]
+    results = [recompute(person, one, minSamples, onlyConfirmed, _bucketChecked=True)
+               for one in buckets]
     stale = [row for row in sqliteCommon.query_pb_person_centroid(
         "pb_person_centroid", personCode=person)
         if str(row.get("bucketKey") or "") not in buckets]
@@ -535,6 +605,23 @@ class CentroidIndex(object):
                 "buckets": len(self._byBucket), "dbFile": self.dbFile}
 
     # ---- 候选子集 ----
+    def allBucketKeys(self) -> list:
+        """全库**已启用**的桶键集合（升序）。DR-21 的「全部桶」就是它。
+
+        为什么必须有这个出口（DR-21）
+        --------------------------
+          未归属脸的 shotBucket 是**等宽 5 年**桶（没有生日可用），
+          而别人的质心是**自适应**桶（宽 3 / 宽 10）。两套键**根本不对齐**：
+          等宽 "2000-2004" 的邻居是 "1995-1999"/"2005-2009"，
+          而自适应童年桶可能是 "1997-1999" —— 后者永远不在前者的邻居集合里。
+          ⇒ 按「相邻三桶」取候选，一张未归属脸**一把质心都取不到**，
+            只能靠 ALL 兜底桶，等于退化成不分桶 —— 而这恰恰是最需要匹配的阶段。
+
+        ⚠️ 它天然**含 ALL_BUCKET**：ALL 也是一张质心行的 bucketKey，
+           所以「全部已启用桶」已经把兜底桶包进来了，不需要另外并。
+        """
+        return sorted(self._byBucket.keys())
+
     def positionsFor(self, bucketKeys) -> list:
         """候选桶键列表 -> 升序行号列表（**去重且升序**，升序是 reduceat 的前提）"""
         out = set()

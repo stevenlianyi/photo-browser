@@ -53,6 +53,18 @@ _LOG = misc.setLogNew("sqliteHandle", "sqlitehandle.log")
 # fetchMany 的默认批量
 FETCH_MANY_DEFAULT = 2000
 
+#: **非主线程**的读连接页缓存上限（KB 为单位取负）。
+#:
+#: 为什么要单独一个常量：`PRAGMA_LIST` 里的 `cache_size = -64000`（≈64MB）
+#: 是按「一条主连接」定的。而步骤 9 之后读路径是**每线程一条连接**
+#: （理由见 sqliteHandle._readConn），线程数上界 ≈ FastAPI 线程池 40 + 扫描线程，
+#: 64MB × 几十 = 上 GB —— 页缓存虽然是按需增长，但**上限必须收住**，
+#: 否则一个失控的查询就能把内存吃满。
+#:
+#: 8MB 的依据：这些连接只做「点查 + 按索引翻页 + 小聚合」，
+#: 实测 10 万张照片的 `/api/timeline` 首屏仍在 100ms 量级，无感。
+THREAD_READ_CACHE_SIZE: int = -8000
+
 # 返回码（同时供生成层引用，故挂在类外）
 RET_NO_ROW = 0     # 执行成功但无行
 RET_HAS_ROWSET = -1   # 有结果集，行数未知 -> 调 fetch*
@@ -263,12 +275,99 @@ class sqliteHandle:
         self.dbR = self.dbW if self.readOnly else open_db(self.dbFile, read_only=True)
         self.dbWCursor = self.dbW.cursor()
         self.dbRCursor = self.dbR.cursor()
+        self._ownerThread = threading.current_thread()
+        self._tls = threading.local()
+        #: 为「非主线程」懒建的读连接（close 时要一起关）
+        self._threadReadConns = []
         self.pragmaWrite = readPragmas(self.dbW)
         self.pragmaRead = readPragmas(self.dbR)
         self.fetchManyBatchNum = FETCH_MANY_DEFAULT
         self._lock = threading.RLock()
 
     # ---------- 内部 ----------
+    #
+    # ⚠️⚠️ 为什么读路径必须**每线程一个连接**，而不只是"每线程一个游标"
+    # ------------------------------------------------------------------
+    #   「每线程一个游标」只解决了一半问题（见下面 _readConn 的说明）。
+    #   第二半是 CPython `sqlite3` 的 **per-connection prepared-statement cache**：
+    #   同一个连接上**文本相同的 SQL 会被缓存并复用同一个 `sqlite3_stmt`**，
+    #   于是两个游标共享同一个底层语句 —— B 游标 execute 时会
+    #   `sqlite3_reset` 掉这个共享语句，**把 A 游标待取的那一行丢掉**：
+    #
+    #       线程A: executeRead("SELECT COUNT(*) ... delFlag = ?")   -> 语句已 step 出 1 行
+    #       线程B: executeRead(同一段 SQL 文本)                      -> reset 掉共享语句
+    #       线程A: fetchValue()                                      -> None（静默！）
+    #
+    #   实测证据（`code/.probe_min.py`，现已删除）：
+    #     · 6 线程跑**同一段 SQL 文本** -> 第 1 次尝试就复现
+    #       （`code=-1` 有结果集、`description` 非空、`rowcount=-1`、
+    #        同一游标两次 `fetchone()` 都是 None、另起独立查询却正常）
+    #     · 把每线程的 SQL 文本各加几个空格（= 不同缓存键）-> **60 次零失败**
+    #   ⇒ 结论：语句缓存是**连接级**的，所以只有"每线程一个**连接**"才治本。
+    #
+    #   为什么只给**读**路径开每线程连接（写路径不用）
+    # ------------------------------------------------
+    #     · 读是并发的主体（FastAPI 请求线程池 + 后台扫描线程同时读）；
+    #     · 读路径是「execute 之后另起一次调用才 fetch」，天然要给每条线程
+    #       自己的结果集；而**写路径每条语句都在 `self._lock` 里一次做完
+    #       （bind + step 到底，不迭代取行）**，不存在"待取的行被别人 reset"；
+    #     · 写路径受「单写入者」硬约束保护（scanScheduler 的门闩 + 本项目
+    #       不用多线程并发写），开多条写连接反而会把"静默交错进同一事务"
+    #       变成"database is locked"，是另一种回退。
+    #     · 另外：读连接本来就和写连接不是同一条（WAL 设计），所以这一步**没有
+    #       引入任何新的可见性语义** —— 改动前非主线程也在读 `dbR`。
+
+    def _readConn(self):
+        """本线程该用的**读连接**。
+
+        主线程沿用启动时那条 `dbR`（单线程调用方行为与改动前逐位相同）；
+        其余线程**懒建**一条自己的只读连接并缓存进 thread-local。
+        """
+        conn = getattr(self._tls, "readConn", None)
+        if conn is not None:
+            return conn
+        if threading.current_thread() is self._ownerThread:
+            conn = self.dbR
+        else:
+            conn = self._openReadConn()
+        self._tls.readConn = conn
+        return conn
+
+    def _openReadConn(self):
+        """给当前（非主）线程开一条只读连接。
+
+        ⚠️ `cache_size` 必须调小：PRAGMA_LIST 里是 **-64000 ≈ 64MB/连接**，
+           那是为"一条主连接"定的。读线程最多可能有几十条
+           （FastAPI 默认线程池 40 + 扫描线程），64MB × 几十 = 上 GB，
+           而每条连接实际只会摸到很少的页 —— 页缓存是**按需增长**的，
+           但上限必须收住，否则一个失控的查询能把内存吃满。
+           8MB 对「点查 + 按索引翻页」绰绰有余；正经的大分析查询
+           （timeline 的 GROUP BY）走的是请求线程，也是 8MB，实测无感
+           （10 万张首屏 p50 仍在 100ms 量级）。
+        """
+        conn = open_db(self.dbFile, read_only=True)
+        try:
+            conn.execute("PRAGMA cache_size = %d" % THREAD_READ_CACHE_SIZE)
+        except sqlite3.Error as e:                    # 只降级，不失败
+            _LOG.warning("_openReadConn: 设置 cache_size 失败（沿用默认）: %s" % e)
+        with self._lock:
+            self._threadReadConns.append(conn)
+            total = len(self._threadReadConns)
+        _LOG.debug("_openReadConn: 为线程 %s 新建读连接（当前共 %d 条）"
+                   % (threading.current_thread().name, total))
+        return conn
+
+    def _readCursor(self):
+        """本线程的读游标。
+
+        executeRead 会**每条语句新建一个游标**并存进 thread-local，
+        所以 fetch* 取回的必定是「本线程、本条语句」那个游标。
+        """
+        return getattr(self._tls, "readCursor", None) or self._readConn().cursor()
+
+    def _writeCursor(self):
+        """本线程的写游标（写在共享的 `dbW` 上，理由见上面那段说明）。"""
+        return getattr(self._tls, "writeCursor", None) or self.dbWCursor
 
     def _err(self, tag, e, sqlstr=""):
         self.lastErrMsg = "%s:%s,sql:%s" % (tag, e, sqlstr)
@@ -298,18 +397,31 @@ class sqliteHandle:
         """执行读语句（SELECT / PRAGMA 读）。
 
         返回 RET_HAS_ROWSET(-1) 表示有结果集，请接着调 fetchAll/fetchMany/fetchOne。
+
+        ⚠️ 用**本线程自己的**游标（见 __init__ 里的说明）：共享游标会让
+           「后台线程 + 请求线程」交替时互相抢结果集。
         """
         try:
             sqlText, vals = toSqliteSQL(sqlstr, values)
             self.lastSQL = sqlText
-            with self._lock:
-                cursor = self.dbRCursor.execute(sqlText, vals)
-                return self._rtn(cursor, cursor.description is not None)
+            # ⚠️ 每条语句都新建游标，且用**本线程的连接**（见 _readConn 的说明）：
+            #    · 新游标 -> 上一次 execute 的结果集不会被这次 execute 顶掉，
+            #      "execute A -> execute B -> fetch" 也不会拿错（B 的游标在 tls 里）
+            #    · 本线程连接 -> 不与其他线程共享 per-connection 的语句缓存
+            #      （共享语句会被对方的 execute `sqlite3_reset` 掉 -> 静默丢行）
+            cursor = self._readConn().cursor()
+            self._tls.readCursor = cursor
+            cursor.execute(sqlText, vals)
+            return self._rtn(cursor, cursor.description is not None)
         except Exception as e:
             return self._err("executeRead", e, sqlstr)
 
     def executeReadList(self, sqlList):
-        """连续执行多条读语句（每条是 (sql, values)）。返回每条的结果码列表。"""
+        """连续执行多条读语句（每条是 (sql, values)）。返回每条的结果码列表。
+
+        ⚠️ 逐条**各自**用新游标（与 executeRead 一致），所以只有最后一条的
+           结果集还在游标上 —— 这与老行为一致（老代码也是只有最后一个）。
+        """
         result = []
         for item in sqlList:
             sqlstr, values = item[0], (item[1] if len(item) > 1 else ())
@@ -324,7 +436,9 @@ class sqliteHandle:
             sqlText, vals = toSqliteSQL(sqlstr, values)
             self.lastSQL = sqlText
             with self._lock:
-                cursor = self.dbWCursor.execute(sqlText, vals)
+                cursor = self.dbW.cursor()
+                self._tls.writeCursor = cursor
+                cursor.execute(sqlText, vals)
                 rtn = self._rtn(cursor, False)
                 if self.autoCommitFlag:
                     self.dbW.commit()
@@ -338,11 +452,13 @@ class sqliteHandle:
         result = []
         try:
             with self._lock:
+                cursor = self.dbW.cursor()
+                self._tls.writeCursor = cursor
                 for item in sqlList:
                     sqlstr, values = item[0], (item[1] if len(item) > 1 else ())
                     sqlText, vals = toSqliteSQL(sqlstr, values)
                     self.lastSQL = sqlText
-                    result.append(self._rtn(self.dbWCursor.execute(sqlText, vals), False))
+                    result.append(self._rtn(cursor.execute(sqlText, vals), False))
                 if self.autoCommitFlag:
                     self.dbW.commit()
             return result
@@ -372,8 +488,14 @@ class sqliteHandle:
                         "executeWriteMany: 列数不匹配 -> SQL %d 列, 数据 %d 列"
                         % (nCol, len(row)))
             with self._lock:
-                cursor = self.dbWCursor.executemany(sqlText, rows)
+                cursor = self.dbW.cursor()
+                self._tls.writeCursor = cursor
+                cursor.executemany(sqlText, rows)
                 rtn = self._rtn(cursor, False)
+                # ⚠️ 这里**不要**去取 `cursor.lastrowid`：CPython 在
+                #    `executemany()` 之后不更新它（实测为 None），
+                #    要批量的最后一个 id 得用 `SELECT last_insert_rowid()`。
+                #    详见 insertID() 的 docstring（那里有完整的实测表）。
                 if self.autoCommitFlag and not self.inTransaction():
                     self.dbW.commit()
             return rtn
@@ -382,28 +504,56 @@ class sqliteHandle:
             return self._err("executeWriteMany", e, sqlstr)
 
     # ---------- 取数 ----------
+    #
+    # ⚠️ 下面四个都从 thread-local 取**自己那个**游标（见 __init__ 的说明）。
+    #    改动前它们用的是共享游标，于是「A 执行 -> B 执行 -> A 取数」
+    #    会取到 B 的行；并发 fetchall 与 execute 还会直接段错误。
+    #    单线程调用方拿到的游标与以前是同一个（thread-local 里只存一个）。
 
     def insertID(self):
-        """最近一次 INSERT 的自增主键（recID）"""
-        return self.dbWCursor.lastrowid
+        """最近一次 INSERT 的自增主键（recID）。
+
+        ⚠️ 关于 `lastrowid` 的**实测结论**（步骤 9 专门查过，别再重复调查）
+        ------------------------------------------------------------------
+        本机 CPython 3.13.14 / sqlite3 3.53.1 上实测（`Cursor.lastrowid`）：
+
+        | 场景 | 行为 |
+        |---|---|
+        | 同游标两次 INSERT | **会更新**为新的 id |
+        | **另一个游标**在同一连接上 INSERT | **互不影响** -> 是**游标级**，无跨线程竞态 |
+        | commit 之后 | 不受影响 |
+        | UPDATE / DELETE 之后 | 不受影响（仍是上次插入的 id，SQLite 不清零） |
+        | **executemany 之后** | **`None`**（CPython 明确不更新，文档有写） |
+
+        所以：
+          * **不需要**为了并发去加锁或拍快照 —— `_writeCursor()` 取的是
+            **本线程自己的**游标，值天然是本线程的（早期怀疑过
+            「连接级 lastrowid 会被别的线程抢走」，实测不成立）。
+          * 真正要注意的是最后一行：**批量插入之后 `insertID()` 无意义**。
+            本仓库目前没有任何地方那样用（`insertMany*` 返回的是
+            `(影响行数, 列名)`，不返回 id；只有 `insert_pb_*` 单条插入才配
+            `insertID()`）。将来若要拿批量的最后一个 id，
+            得另写（`SELECT last_insert_rowid()`），别指望本函数。
+        """
+        return self._writeCursor().lastrowid
 
     def fetchAll(self):
         """取全部行 -> list[dict]"""
-        return [dict(row) for row in self.dbRCursor.fetchall()]
+        return [dict(row) for row in self._readCursor().fetchall()]
 
     def fetchMany(self, num=FETCH_MANY_DEFAULT):
         """取前 num 行 -> list[dict]（默认 2000，批量翻页用）"""
         if not num:
             num = self.fetchManyBatchNum
-        return [dict(row) for row in self.dbRCursor.fetchmany(num)]
+        return [dict(row) for row in self._readCursor().fetchmany(num)]
 
     def fetchOne(self):
         """取一行 -> dict | None"""
-        return self._rowToDict(self.dbRCursor.fetchone())
+        return self._rowToDict(self._readCursor().fetchone())
 
     def fetchValue(self, default=None):
         """取首行首列的值（COUNT(*) / MAX(id) 之类），无结果返回 default"""
-        row = self.dbRCursor.fetchone()
+        row = self._readCursor().fetchone()
         if row is None:
             return default
         return row[0] if len(row) > 0 else default
@@ -467,16 +617,35 @@ class sqliteHandle:
         return {"write": self.pragmaWrite, "read": self.pragmaRead}
 
     def close(self):
-        """关闭两个连接（close 之前会尝试回滚未提交事务）"""
+        """关闭**全部**连接（主读写两条 + 所有每线程读连接）。
+
+        ⚠️ 必须在**主线程**调（`sqliteCommon.closeDb()` 就是这么用的）：
+           每线程读连接是"谁建谁用"的，别的线程不该去关它们 ——
+           那个线程若还在用，关掉就是 use-after-free（段错误的温床）。
+           本函数只负责**进程收尾**时把句柄交还给 OS；
+           因此调用前必须确保后台线程已经停下
+           （`api.scan.resetScheduler()` 会等后台扫描线程退出，见 main/app.py 的 lifespan）。
+        """
         try:
             self.rollbackWrite()
         finally:
-            for conn in (self.dbW, self.dbR):
+            # ⚠️ 先去重：readOnly 模式下 dbW 与 dbR 是**同一条**
+            conns, seen = [], set()
+            with self._lock:
+                extra = list(self._threadReadConns)
+                self._threadReadConns = []
+            for conn in [self.dbW, self.dbR] + extra:
+                if conn is None or id(conn) in seen:
+                    continue
+                seen.add(id(conn))
+                conns.append(conn)
+            for conn in conns:
                 try:
-                    if conn is not None:
-                        conn.close()
+                    conn.close()
                 except sqlite3.Error as e:
                     _LOG.error("close:%s" % e)
+            if extra:
+                _LOG.info("close: 已关闭 %d 条每线程读连接" % len(extra))
         return True
 
 

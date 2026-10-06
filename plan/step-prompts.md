@@ -6,8 +6,13 @@
 > 前一步验收未通过，不要开始下一步。
 > 每步结束统一输出：**改动文件清单 + 验收结果 + 遗留问题**。
 >
-> ⚠️ **步骤 1–6 已执行完毕**。新增「纠错闭环」（DR-16）后这 6 步需要返工，
-> **必须先做「修正步骤 R」，再做步骤 7**。
+> ⚠️ **当前进度：步骤 1–11 已执行完毕，下一步是步骤 12（最后一步）。**
+> 进度以文末「附录 A」的状态表为准；步骤 11 的实际产出与本文件里步骤 11 提示语的
+> 偏差、以及步骤 12 要接着做的事，都写在文末「进入步骤 12 时要知道的现状」里。
+>
+> 历史：步骤 1–6 执行后核对发现两处返工，顺序是 **R2 → R → 步骤 7**：
+> **R2 = 分桶口径修复**（`pb_face.shotBucket` 从来没被重写成自适应桶，**S0 的分桶结论一直在跑对照组**）
+> → **R = 纠错闭环**（DR-16）→ 步骤 7。两项均已完成并入。
 
 ---
 
@@ -256,6 +261,188 @@ CENTROID_CONFIRMED_ONLY: bool = True   # True=只用 isConfirmed=1 样本（防�
 3. 遗留问题与需要我决策的点
 4. **存量数据修正后的统计**：四态各多少条、质心重算前后对比
 5. 步骤 7 可以开始的判断：以上 24 条是否全部通过
+```
+
+---
+---
+
+# 修正步骤 R2 · 分桶口径修复（自适应分桶从未生效 · DR-20/21/22）
+
+> **什么时候做**：**先于修正步骤 R**（R 已经假设质心口径正确了；R2 修的是桶键来源）。
+> **为什么必须做**：`faceStore.makeShotBucket()` 写的是等宽 5 年**占位**桶，
+> 注释说「步骤 6 会用自适应规则重算覆盖」，**但步骤 6 从来没做这个覆盖**。
+> 全库 `bucketKeyAdaptive()` 只在验证脚本、CLI 报告与测试里被调用，**没有任何生产路径写回
+> `pb_face.shotBucket`**。而 `matcher.bucketKeyOfFace()` 明确「只认 `shotBucket` 这一列」。
+> 结果：生产库里所有脸都是等宽 5 年桶 → **S0 的「自适应分桶让 FR 32.75%→19%」一直在跑对照组**，
+> `bucket.py` 的自适应逻辑是死代码，**且 DR-18「改生日重算质心」完全无效**（桶键不依赖生日）。
+
+```text
+【photo-browser · 修正步骤 R2 · 分桶口径修复】
+
+## 目标
+三件事，缺一不可：
+① **补「重刷 shotBucket」过程**（方案 A，用户已定）：让 `pb_face.shotBucket` 真正按
+   「拍摄年 + 出生年」算出自适应桶（0–18 岁 3 年 / 18+ 10 年），而不是等宽 5 年占位；
+② **放宽未归属脸的候选桶**（DR-21）：否则跨口径对不上，等宽桶的脸一把质心都取不到；
+③ **确立「先刷桶，再重算质心」的硬顺序**（DR-22），并加前置检查。
+
+## 前置
+步骤 1–6 已完成，**真实数据已在库里**（10 万行 pb_photo、真实人脸与质心）。
+修正步骤 R 尚未开始（若已开始的，先停下做完 R2）。
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-20 / DR-21 / DR-22**（本次要落地的全部口径）
+- plan/数据库设计.md §4.5 pb_face.shotBucket、§4.6 pb_person_centroid
+- plan/MVP_plan.md S3 的分桶规则与匹配决策
+
+## 必须先读���现有代码（逐条核对「现状 → 应为」，不要凭我的描述改）
+| 文件 | 关键点 |
+|---|---|
+| `code/src/engine/face/faceStore.py` | `makeShotBucket()` 返回**等宽 5 年**（约 72–93 行），文件头与函数注释都写着「步骤 6 会重算覆盖」，**但没有任何代码做这件事** |
+| `code/src/engine/match/bucket.py` | `bucketKeyAdaptive(shotYear, birthYear)` / `bucketKeyOf(shotYear, birthday)` / `birthYearOf(birthday)` —— **已实现且正确**，但生产路径没调用 |
+| `code/src/engine/match/matcher.py` | `bucketKeyOfFace()`（约 293 行）**只认 `shotBucket` 列**，注释解释了「质心按 shotBucket 建、匹配必须按同一列取」——这个纪律是对的，**不要改成实时算** |
+| `code/src/engine/match/centroid.py` | `listBucketsOf()` 从脸表读 `shotBucket`；`loadFaceVectors()` 按桶过滤；`recomputePerson()` 重算各桶 |
+| `code/src/processor/review/assigner.py` | `assign()` 读 `face["shotBucket"]` 用于重算质心（约 397 行），**但从不重写它** |
+| `code/src/processor/review/merger.py` | `merge()` 用 `update_pb_face` 迁移 `personCode`，**没管 `shotBucket`** |
+| `code/src/tools/verify_bucket_gain.py` | 已能对比「等宽 vs 自适应」的收益，**R2 要用它给出真实数字** |
+
+## 一、新增 `code/src/engine/match/rebucket.py`（本步核心）
+
+```python
+SHOT_BUCKET_WIDTH_FALLBACK = 5      # 无生日时的降级等宽（沿用 faceStore 口径）
+
+def shotBucketFor(shotYear, birthday) -> str:
+    """(拍摄年, pb_person.birthday 原文) -> 自适应桶键；生日不可用 -> 降级等宽 5 年。
+    ⚠️ 薄封装，最终一律调 bucket.bucketKeyAdaptive()，**不在这里重写规则**"""
+
+def rebucketFace(faceRow, personRow=None) -> dict:
+    """单张脸：按 (pb_photo.shotYear, 该脸所属人的 birthday) 重算并写回 pb_face.shotBucket。
+    - personRow 为 None（未归属）→ 降级等宽桶
+    - **只改 shotBucket 一列**，走 upsert + forceColumns（注意 faceStore 已有 FACE_IDENTITY_COLUMNS 纪律）
+    - ⚠️ **绝不碰 personCode / isConfirmed / isStranger / clusterCode / embedding**
+    - 返回 {'faceCode','oldBucket','newBucket','changed'}"""
+
+def rebucketPerson(personCode) -> dict:      # 该人全部脸（分页，别一次取全）
+def rebucketPhoto(photoCode) -> dict:        # 该照片全部脸
+def rebucketAll(batchRows=None, progress=None, onlyAdaptive=False) -> dict:
+    """全库。**未归属的脸保持等宽桶**（没有生日可用），
+    所以 onlyAdaptive=True 时只刷「已归属 + 目标人有合法生日」的那些"""
+def auditBuckets() -> dict:
+    """一致性巡检（只读，不写）：
+    - bucketWidth 分布：宽 3 / 宽 10 = 自适应，宽 5 = 等宽降级
+    - 孤儿质心：pb_person_centroid 里的 bucketKey 在该人脸表中**没有任何脸**
+    - 失配脸：该人脸表的 shotBucket 集合与该人质心的 bucketKey 集合不相交
+    - 无主质心：bucketKey='ALL' 之外的桶，sampleCount>0 但该桶已无脸"""
+```
+
+**巡检是本步最有价值的产出** —— 它能把「桶口径不一致」这类静默失配变成一条明确结论。
+请把 `auditBuckets()` 的输出做成一目了然的表格（宽度分布用计数 + 举例）。
+
+## 二、把刷桶接进写入路径（**根治点：不要靠人记得跑脚本**）
+
+| 触发点 | 做什么 |
+|---|---|
+| **`assigner.assign()`** | 归属那一刻**生日才确定** → 先按新主人的 birthday 重刷这张脸的 `shotBucket`，**再**重算质心。⚠️ 这是最关键的一处 |
+| `assigner.unassign()` / `fix('unknown')` | 退回未归属 → 刷回**等宽降级桶**（生日不再是这个人的） |
+| `fix('stranger')` | 同上（该脸永远不会再匹配，刷成等宽即可） |
+| `merger.merge()` | 迁移到目标人后，按**目标人**的 birthday 重刷全部迁移的脸（源与目标的 birthday 可能不同 → 桶键不同） |
+| `merger.split()` | 拆出的人（新建档案）生日可能为空 → 刷成等宽降级桶 |
+| **联系人导入后** | `import_contacts` 落库完成 → 对**本次新建/更新的人**跑 `rebucketPerson` + `recomputePerson`（生日到位了，桶键才该变） |
+| 扫描提取后（`faceStore`） | 保持现状：仍写等宽占位桶（此时还不知道这张脸是谁），由 `assign` 负责刷。**但要在 faceStore 的函数注释里把「谁负责重刷」写清楚**，别再留「步骤 6 会覆盖」这种已经失效的承诺 |
+
+## 三、DR-21：未归属脸的候选桶放宽到「全部已启用桶」
+
+`matcher.py` 现在对所有脸都用 `bucket.neighborBucketKeys(bucketKey, neighbor)`。
+问题：**未归属脸的桶是等宽 5 年，而别人的质心是自适应桶（宽 3 / 宽 10），键根本不对齐**
+（等宽 `"2000-2004"` 的邻居是 `"1995-1999"`/`"2005-2009"`，而自适应童年桶可能是 `"1997-1999"`）
+→ **未归属脸一把质心都取不到，只能靠 `ALL` 兜底 → 等于退化成不分桶**，
+而这恰恰是最需要匹配的阶段。
+
+改法：
+```python
+def candidateBucketsOf(faceRow, index=None):
+    """faceRow['personCode'] 为空 -> 返回 None（表示"全部已启用的桶"）
+    已归属 -> bucket.neighborBucketKeys(shotBucket, neighbor)"""
+```
+调用侧：候选为 `None` 时用 `index.subset(index.全部桶键)`（**`CentroidSubset` 的按人连续段与
+`np.maximum.reduceat` 优化完整保留，不用重写**），并把 `ALL` 一并加入。
+
+**成本核算要给出实测数字**（别只说「可接受」）：
+- 质心行数 = Σ(人 × 每人启用桶数)，行数 × 512 × 4B = 内存
+- 单脸一次矩阵乘的耗时（ms）
+- 10 万张脸全量重匹配的 wall-clock
+
+**注意与 DR-12 的关系**：DR-12 说「按候选桶惰性加载，10 万 × 512 = 205MB 已超预算」。
+本条放宽后，未归属脸要全量 —— 但**质心行数远小于人脸行数**（质心 = 人数 × 桶数，几百到几千行，
+几 MB），人脸的 embedding 才是 205MB 那一项，而那部分**没有变化**。请在报告里把
+「质心矩阵」与「人脸向量矩阵」两笔内存分开列，别混成一个数字。
+
+## 四、DR-22：硬顺序 + 前置检查
+
+- `centroid.recomputePerson()` / `recompute()` 执行前**先做一致性检查**：
+  脸表实际 `shotBucket` 集合 vs 质心表 `bucketKey` 集合，不一致 → **抛错并提示先跑 rebucket**，
+  **不要默默按旧口径算**（那会造出僵尸质心 + 新桶无质心 → 匹配率归零且库里看不出异常）
+- 提供 `tools/rebucket_cli.py`：
+  `--all` / `--person <code>` / `--photo <code>` / `--audit` / `--dry-run` / `--recompute`
+  ⚠️ `--recompute` 必须是**刷完桶之后**才重算，不要提供一个「只重算」的路径让人跳过刷桶
+
+## 五、验收清单（逐条实际运行，不要只写代码就宣称通过）
+
+### A. 桶口径修好了
+1. `auditBuckets()` 改前 vs 改后的 **bucketWidth 分布**：改前宽 5 占比 ~100%；改后
+   宽 3 / 宽 10 出现（有生日的人），宽 5 只剩「无生日 + 未归属」那些
+2. 抽 3 个人，各挑一张有 `shotYear` 的脸，贴出 `shotBucket` 改前 → 改后的值，
+   并手算 `bucketKeyAdaptive(shotYear, birthYear)` 验证与库里的值一致
+3. `rebucketPerson` 对**已归属 + 有生日**的人：桶键集合与 `bucket.bucketKeyAdaptive` 逐条重算一致
+4. 未归属的脸：桶宽仍是 5（降级），**不被误改成自适应桶**
+
+### B. 写入路径已接上（**这是根治点，逐个测**）
+5. 新建一个人（有生日）→ `assign()` 一张脸 → **该脸 `shotBucket` 立即变成自适应桶**（不是等宽）
+6. `fix('unknown')` / `unassign()` → 该脸刷回等宽降级桶
+7. `fix('stranger')` → 同上
+8. `merge()`（源与目标 birthday 不同）→ **迁移后的脸按目标人生日重刷**，与目标人其他脸同口径
+9. `split()` 拆出的人 birthday 为空 → 脸刷成等宽降级桶
+10. 走查确认：`assign()` 里「先刷桶、后重算质心」的顺序不可颠倒
+
+### C. DR-21 生效
+11. 构造一张**未归属**脸 + 一个**有自适应桶质心**的人 → 该脸能拿到分数（改前拿不到，改前请先贴出对照）
+12. 已归属脸仍走相邻三桶（**不要被 R2 改成全量**）：贴出候选桶列表证明仍是 3 个桶 + `ALL`
+13. `candidateBucketsOf()` 对未归属脸返回 `None` → 调用侧正确转成「全部桶」
+14. `CentroidSubset` 的 reduceat 路径仍被使用（代码走查 + 与改前相同的打分结果对照）
+
+### D. 顺序纪律
+15. 故意先 `recompute` 再 `rebucket`（用 `--recompute` 单独跑一次制造）→ 确认
+    **前置检查抛错并提示先跑 rebucket**，而不是默默产出错误的质心
+
+### E. 一致性与回归
+16. `auditBuckets()` 改后：**孤儿质心 0 条、失配脸 0 条、无主质心 0 条**（贴出完整报告）
+17. `pytest code/src/test` 全绿
+18. **`tools/verify_bucket_gain.py` 给出自适应 vs 等宽的真实 FR 对比数字** ← 本步最硬的证据，
+    之前 S0 的结论是 32.75% → 19%，请给出**生产库口径下**的实测值
+19. `tools/run_match.py` 在真实库上跑一批脸，给出三段式分布（auto/review/cluster）与耗时
+20. 修完后**全库重算质心**（`--all --recompute`），给出重算前后 `pb_person_centroid` 行数变化
+21. `photoDir` 零风险：全程文件数与总字节数不变
+22. 迁移/备份口径不变：`backup.py` 仍可整库拷贝（本步不得让 `photo\` 变成可写）
+
+## 六、硬约束
+- **原图绝对只读**：`d:\PhotoLib\photo` 一律只读
+- **业务层禁止裸 SQL**：一律经 `sqliteCommon`
+- **不要改成「匹配时实时算桶键」**（方案 B）：`CentroidSubset` 的 reduceat 优化会被推翻、
+  匹配侧要重写。用户已定方案 A
+- **不要用 `update_pb_face` 写 `shotBucket`**：它写不进 NULL/变化不可靠，走 upsert +
+  `forceColumns`（faceStore/assigner 文件头已有该纪律的记录）
+- **不要动 `pb_face` 的这些列**：`personCode` / `isConfirmed` / `isStranger` / `clusterCode` /
+  `embedding` / `bbox` / 各种 score。R2 **只动 `shotBucket` 一列**
+- 现有代码风格（文件头纪律说明、`_VERSION`、日志、`FACE_IDENTITY_COLUMNS` 等常量）保持一致
+- 不要顺手重构与本步无关的代码
+
+## 七、完成后必须输出
+1. 改动文件清单（新增 / 修改，逐个列路径）
+2. 验收结果（上面 22 条**逐条**给命令与实际输出 / 数值）
+3. **`auditBuckets()` 改前 vs 改后的完整报告**
+4. **内存两笔账分开列**：质心矩阵（MB）与人脸向量矩阵（MB）
+5. **`verify_bucket_gain.py` 的自适应 vs 等宽 FR 实测对比**
+6. 遗留问题与需要我决策的点
 ```
 
 ---
@@ -880,6 +1067,13 @@ thumbDir\   生成物，可随时重建
 - plan/UI/photo-browser UI 设计.md（页面需要哪些数据）
 
 ## 本步产出文件
+0. **code/src/database/queryCommon.py（落地时补，不在原清单里）**
+   生成层 `sqliteCommon.query_pb_*` 只能按「主键 + 4 个业务码等值 + IS NULL」过滤，
+   **表达不了区间比较 / 分组聚合 / COUNT(DISTINCT ...)**，而硬约束又写着
+   「业务层禁止裸 SQL」。没有这个出口，`/api/timeline` 的
+   `shotYear BETWEEN` 与 `GROUP BY` 就只能靠拼字符串实现（= 绕过纪律）。
+   本模块 = **手写但受约束的只读查询出口**：只允许 SELECT/WITH、
+   值一律 `%s` 占位、表名与列名对生成层白名单校验、聚合必须给别名。
 1. code/src/api/dto.py：统一响应结构
    - 分页统一 { page, size, total, items }；错误统一 { code, message }
 2. code/src/api/browse.py（P0）
@@ -908,12 +1102,44 @@ thumbDir\   生成物，可随时重建
    - GET  /api/review/log?faceCode=&photoCode=      操作历史（排障用）
    - GET  /api/review/revertible                   当前可撤销的操作列表
    > `fix` / `batch-fix` / `undo` **只做编排**：删旧 linkKey、写新 source=1、重算原人与新人全部桶、同步 faceCount、落 `pb_review_log` 全部交给步骤 6 的 `assigner`/`merger`/`centroid`，**api 层不重复实现这套逻辑**
-5. code/src/api/contacts.py（P1）
-   - POST /api/contacts/import/csv（multipart）
-   - GET /api/contacts（分页 + 按 category 筛选）
-   - GET /api/families、GET /api/places（供筛选与后续地图）
+5. code/src/api/contacts.py（P1 · 联系人维护，DR-17/18/19）
+   - GET  /api/contacts?page&size&category&familyGroupCode&keyword&delFlag
+         分页 + 筛选；每条返回 `photoCount` / `faceCount` / `confirmedFaceCount` / `birthday`
+   - POST /api/contacts                界面新建手工档案（source=0，vcardUid 空）
+   - PATCH /api/contacts/{personCode}   **部分字段**更新
+         · **检测 birthday 是否变更** → 变更则 `centroid.recomputePerson()`，响应带 `centroidRebuilt: true`
+         · 改 displayName 撞 UNIQUE → `409 + {"code":"DUPLICATE_DISPLAY_NAME",
+           "existing":{personCode, displayName, photoCount, faceCount}}`，**不写库**
+         · 改 familyGroupCode 要写进 pb_person；分类走 pb_person_category 增删
+   - GET  /api/contacts/{personCode}/impact
+         停用影响面预览 `{photoCount, faceCount, confirmedCount, centroidCount, pendingAfter}`
+   - POST /api/contacts/{personCode}/disable?confirm=true
+         **不带 confirm=true 只返回影响面、不写任何一行**（前端两段式）
+         执行顺序固定：① `centroid.dropPerson()` ② 人脸全部退回未归属
+         （`personCode=NULL, isConfirmed=0`）③ 关联行按纪律 ③ 存废
+         ④ 落 `pb_review_log`（`opType=DISABLE`）
+   - POST /api/contacts/{personCode}/enable    恢复 delFlag，响应带提示「需重新确认人脸」
+   - GET  /api/contacts/duplicates             同名/疑似同人合并候选
+   - POST /api/contacts/import/csv（multipart，`?dryRun=true` 只回计划不写库）
+   - GET/POST/PATCH /api/families[/{familyCode}]   家庭组维护（P2 可延后）
+   - GET  /api/places（供筛选与后续地图）
+   > ⚠️ **不提供任何导出接口**（DR-17：不做联系人 CSV / 聚类 CSV / vCard 导出）
+   > ⚠️ **不提供 DELETE**（DR-19：只允许停用。硬删会作废该人的全部确认工作）
+   > 写入一律复用 `contactCommon`（`makePersonCode` / `makeDisplayName` / `splitCategories` /
+   > `_syncCategories`）与 `assigner` / `centroid`，**api 层不另写一套写库路径**
 6. code/src/main/app.py：路由统一注册、静态资源、CORS 仅本机
-7. code/src/test/：关键接口冒烟测试 + 纠错接口副作用测试
+7. code/src/test/：关键接口冒烟测试 + 纠错接口副作用测试 + contacts CRUD 测试 + 地点字典测试
+8. **code/src/database/pb_place.txt + 重跑生成器（落地时补）**
+   `/api/places` 原来是一次全表 `GROUP BY placeName`（10 万张实测 p50 95ms，
+   且随库线性增长），且同一地点的多种写法无处收敛、地图要中心点得现算。
+   加 `pb_place` 地点字典表；派生逻辑落在 **code/src/processor/place/placeStore.py**
+   （`rebuildPlaces` 幂等全量复算 / `listPlaces` 纯读 / `liveAggregatePlaces` 降级）。
+   ⚠️ 加表要**同时**改生成器的 7 处（TABLE_ORDER / TABLE_CN / INDEX_SPEC /
+   EXPECTED_INDEX_NAMES / CONFLICT_COLUMNS / QUERY_FILTER_FIELDS / ORDER_FIELDS）
+   **和** `plan/数据库设计.md` §四、§五；改完**必须 diff 重生成的产物**，
+   确认只多了那一张表（生成器在表元数据过期时会重写整个 `#common` 区段，
+   不 diff 就不知道它有没有顺带改别的）。老库用 `tools/build_db.py` 补建
+   （幂等，只建缺的表：实测 `created=['pb_place']`，其余 9 张 `existed`）。
 
 ## 硬约束
 - 业务层**禁止裸 SQL**，全部经 sqliteCommon
@@ -924,6 +1150,10 @@ thumbDir\   生成物，可随时重建
 - 原图零风险：任何接口都不得写/删 photoDir
 - **改判必须重算原人 *与* 新人**的质心（只重算一边 = 越改越乱）
 - **每个写操作都要落 `pb_review_log`**，不允许静默改库
+- **联系人字段分两类**（DR-18）：`birthday` 改 → 必须 `recomputePerson()`；
+  其余（`displayName` / `familyName` / `familyGroupCode` / `relation` / `email` / `phone` / 分类）改了什么都不用做
+- **停用必须先删质心再退人脸**（DR-19）：只删质心留 `personCode` 会让脸变成
+  「人工确认但无质心」，既不在待确认也不在「我不同意」，**从所有队列里消失**
 
 ## 验收清单
 1. uvicorn 启动后访问 /docs 能看到全部接口且可试调
@@ -942,11 +1172,201 @@ thumbDir\   生成物，可随时重建
 14. `GET /api/review/pending/count` 返回 `{ pendingCount, disputedCount }` **两个数且不相等**（构造数据验证）
 15. 确认无接口修改 photoDir（代码走查 + 文件数/字节数前后比对）
 
+### contacts CRUD（DR-17/18/19）
+16. `GET /api/contacts` 分页与筛选（category / familyGroupCode / keyword / delFlag）都正确，每条带 photoCount / faceCount / confirmedFaceCount
+17. `POST /api/contacts` 新建成功后，`GET` 能查到，且 `source=0`、`vcardUid` 为空
+18. **`PATCH` 改 `email`（非 birthday）→ 响应 `centroidRebuilt` 为 false/absent，且该人 `pb_person_centroid` 的 `modifyYMDHMS` 完全没变**
+19. **`PATCH` 改 `birthday` → 响应 `centroidRebuilt=true`，且该人全部桶已重算**
+    （构造：改生日前后 `pb_face.shotBucket` 应随新桶键变化 —— ⚠️ 注意 `shotBucket` 存在脸表上，
+    改生日后**是否要重算脸的 `shotBucket`** 要给结论：要么同步刷 `pb_face.shotBucket`，
+    要么在质心侧按新 birthday 重新分桶。**当前 `centroid.recomputePerson` 是按脸表里已存的
+    `shotBucket` 分桶的，不重刷的话改生日等于没改** —— 这是本条最容易做漏的地方，
+    请核实并给出正确做法）
+
+    > **✅ 步骤 9 已给出结论（DR-18 补充）**：**必须刷 `pb_face.shotBucket`**，且是三步固定顺序
+    > ① 写 `birthday` ② `rebucket.rebucketPerson()` 刷桶 ③ `centroid.recomputePerson()`。
+    > 只做 ③ = 用旧桶键重算同样的样本 -> 质心与改前**逐位相同**。
+    > ⚠️ 挑构造用的生日要挑**真会挪桶**的：成年桶起点 = `出生年+18+k×10`，
+    > `1985` 与 `1965` 年生的人拍 2013 年照片**都**落在 `2003-2012`。
+    > 实测可用 `1985-03-07 -> 1970-01-01`（2013/2016 的样本全挪到 `2008-2017`）。
+    > ⚠️ `ALL` 兜底桶由确认样本集合决定，改生日不改变样本集合 -> 它**理应逐位不变**，
+    > 不能拿它当「已重算」的证据。
+20. **`PATCH` 改 `displayName` 撞已有的同名人员 → 返回 409 + `existing` 里带对方 personCode/照片数/脸数，且库里那行 `displayName` 未被改动**
+21. **`GET /{personCode}/impact` 返回的四个数字与实际一致**（用 SQL 逐个核对）
+22. **`POST /disable` 不带 `confirm=true` → 只返回影响面，`pb_person` / `pb_face` / `pb_person_centroid` / `pb_review_log` 四张表**行数全部不变**
+23. **`POST /disable?confirm=true` 执行后**：
+    - 该人 `pb_person_centroid` 行数 = 0
+    - 该人所有脸变成 `personCode IS NULL AND isConfirmed=0`（**进待确认队列**）
+    - **没有任何脸落在「既不在待确认、也不在「我不同意」、personCode 非空」的盲区**（写 SQL 验证）
+    - `pb_person.delFlag='1'`
+    - `pb_review_log` 新增一条 `opType='DISABLE'`
+    - `pb_photo_person` 无孤儿行（跑 `assigner.verifyLinks()`，`clean=True`）
+24. `POST /enable` 恢复后 `delFlag='0'`，响应带「需重新确认人脸才能自动匹配」的提示字段
+25. `GET /api/contacts/duplicates` 能报出疑似同人（**同一中国手机号的不同写法**）
+
+    > **⚠️ 原文「构造两个同名人员」按字面做不到，步骤 9 已改口径。**
+    > `pb_person.displayName` 上有 **UNIQUE 索引**（`idx_pb_person_displayName`），
+    > 而 `contactCommon.makeDisplayName()` 在导入时已在加 `(2)` 后缀避让 ——
+    > **任何两个 personCode 的 displayName 不可能字面相同**，写第二个直接
+    > `UNIQUE constraint failed`。所以 `duplicates` 的三类判据改为：
+    > | 判据 | 强度 | 说明 |
+    > |---|---|---|
+    > | `nameKey()` 归一后相同、**原文不同** | 最强 | 多空格 / 全角半角 / NFKC。真正会发生且危险的「重名」：一次手敲、一次导入 |
+    > | `email` 相同 | 强 | `email` 无唯一约束，可以重复 |
+    > | `phone` 归一后相同 | 中 | 见下面 phoneKey 口径 |
+    > 同一对可同时命中多个判据 -> 输出 `reason`（最强那个）+ `reasons`（全列表）。
+    >
+    > **`phoneKey` 的口径（用户确认）**：`-` 一律去掉；**不带 `+` 或 `00` 开头的默认是中国国内号（手机号 11 位）**。
+    > 实测 11 种写法归一到同一个键：`13800138000` / `138-0013-8000` / `138 0013 8000` /
+    > `+8613800138000` / `8613800138000` / `008613800138000` / `+86 138-0013-8000` / …
+    > ⚠️ **只归一前缀、不合并号段**：`+86285187018`（少一位的截断脏数据）与 `02885187018`
+    > 归一到**不同的键**，故意不配成对 —— 宁可漏一次合并提示，也不能把两个真人并成一个。
+    > ⚠️ 顺手修掉一个老 bug：旧实现只判「位数 > 11 且以 `86` 开头」，`0086...` 的 `00` 前缀没被吃掉，
+    > 于是 `008613800138000` 变成 `08613800138000`（14 位），**跟谁都配不上对且不报错**。
+26. `POST /api/contacts/import/csv?dryRun=true` 返回计划（新建/更新/跳过数 + 警告列表）且**不写任何一行**
+27. **走查确认：没有任何导出接口**（`/api/contacts/export` 之类一律不存在，返回 404 或 405）
+28. 走查确认：**没有 DELETE /api/contacts/{personCode}**（404 或 405）
+
 ## 输出格式
 1. 改动文件清单
-2. 验收结果（15 条逐条给命令与实际输出/数值）
-3. 遗留问题与需要我决策的点
-```
+2. 验收结果（上面 28 条逐条给命令与实际输出/数值）
+3. 遗留问题与需要我决策的点（**特别是第 19 条 birthday 与 `pb_face.shotBucket` 的关系**，务必给出结论）
+
+---
+
+## ⚠️ 步骤 9 收尾时**新增**的两类验收（原清单没有，实测发现问题后补的）
+
+### A. 扫描的可中断性（原清单只验了"计数推进"，没验"停止真的能停"）
+
+29. **`POST /api/scan/stop` 在**全树遍历阶段**就能中止，不必等遍历走完**
+    背景：`stopEvent` 原来只在**逐文件循环**里被检查，而那段循环在
+    `walker.listPhotoFiles()` **之后**才进入。10 万张库/慢盘上，遍历本身要 2~20s
+    —— 用户按了停止，界面十几秒没反应。现在 `walker.listPhotoFiles(shouldStop=...)`
+    每 64 个目录查一次，响应降到毫秒级。
+30. **遍历中止时游标与全部计数"一律不动"，且中止**必须抛异常**、绝不返回部分清单**
+    ⚠️ 部分清单会被 `runBatch` 当成全量真值：`totalCount = len(items)`（偏小 ->
+    进度永远到不了 100%）、`bisect_right(relPaths, lastCursor)` 落在错位置 ->
+    **续扫永久漏一段且不报错**。所以「中止」与「返回」必须互斥（`walker.WalkAborted`）。
+    对照：**批内**停止（已处理了一部分）则**必须**推进游标 —— 分界是「有没有开始处理文件」。
+
+### A′. 落地时还会踩到的四处（步骤 9 实测记录）
+
+35. **`GET|HEAD` 同函数注册会让 `/docs` 每次启动刷 3 条 `Duplicate Operation ID`**
+    三种写法只有第三种对（**踩过坑**）：
+      · `api_route(methods=["GET","HEAD"])` -> HEAD 可用，但两个方法共用一个
+        `operationId` -> 启动刷警告 + `/docs` 多 3 组无意义的 HEAD 条目；
+      · 只写 `@router.get(...)` -> **HEAD 直接 405**。⚠️ Starlette 1.7 的 `Route`
+        **不再**为 GET 自动补 HEAD（老版本会补，网上大量"只写 GET 就行"的说法
+        在这个版本上是错的）。**这条最坑：`/docs` 看着完全正常，只有真发 HEAD 才暴露。**
+      · **两个装饰器**（`@router.get(...)` + `@router.head(..., include_in_schema=False)`）
+        -> HEAD 可用 + OpenAPI 里只有 GET + 零警告。✅
+    必须留一条用例真发 HEAD 请求（判据：`!= 405` 且与 GET 状态码一致），
+    因为「OpenAPI 里没有 HEAD」这件事**查不出** HEAD 到底能不能用。
+
+36. **方法不匹配（405）不能落到 `PARAM_INVALID`(400) + 英文原文**
+    实测：把 `POST /api/places/rebuild` 发成 GET，拿到
+    `400 {"code":"PARAM_INVALID","message":"Method Not Allowed"}` ——
+    前端会按「你参数写错了」走表单校验分支，而真相是**调用姿势**错了。
+    修法：单独一个 `CODE_METHOD_NOT_ALLOWED`(405)，message 中文且**写出允许的方法**
+    （从 `Allow` 头取）；5xx 归 `INTERNAL` 而不是 `PARAM_INVALID`。
+
+37. **`insertID()` 经实测**不需要**为并发加锁（⚠️ 差点白改一轮）**
+    一度怀疑 `Cursor.lastrowid` 是连接级的（= 多线程下 A 会拿到 B 的 recID，
+    然后拿 B 的 id 去 update，静默改错行），并据此写了一版「锁内拍快照」的实现。
+    **实测否掉了这个怀疑**（CPython 3.13.14 / sqlite3 3.53.1）：
+      | 场景 | 行为 |
+      |---|---|
+      | 另一个游标在同一连接上 INSERT | **本游标的值不变** -> **游标级，无竞态** |
+      | commit / UPDATE / DELETE 之后 | 都不变 |
+      | **executemany 之后** | **`None`**（CPython 明确不更新） |
+    => 快照实现被**撤掉**（修的是一个不存在的问题，给共用 DB 层加投机代码更贵）。
+    保留两条**特征化钉子**（标注清楚它们不是"修了 bug 的证据"）：
+    钉「每个线程拿到自己的 id」（谁把它改成读共享状态就红 —— 实测 3/3 红）
+    与「非 INSERT 的写不影响上一次插入」。并把最后一行那个 `executemany` 的坑
+    写进 `insertID()` 的 docstring。
+
+38. **收尾顺序**（`main/app.py` 的 lifespan）：先 `resetScheduler()`（等后台扫描线程
+    退出）-> 再 `thumbMaker.shutdownPool(wait=True)`（等在途缩略图做完）->
+    最后 `closeDb()`。原先是 `wait=False`，等于让正在用连接的工作线程撞上 `close()`；
+    单线程测试看不出来，但退出时可能留半个写盘文件 / 半条记录。
+
+### B. `sqliteHandle` 的并发隔离（步骤 9 才第一次出现"后台线程 + 请求线程"并存）
+
+> ⚠️ **这里实际上是两个叠在一起的 bug。第一个修完，第二个才会露出来。**
+
+31. **bug ①：两个线程交替 `execute`/`fetch`，各自必须拿到自己的结果集**
+    背景：原实现 `execute` 持锁、`fetchAll/fetchMany/fetchOne/fetchValue` **不持锁**
+    且共用**同一个游标**。单线程下行为与"每线程游标"逐位相同，**所以旧的单线程测试
+    全绿也证明不了并发正确**。实测症状：`fetchall` 与 `execute` 并发作用于同一 cursor ->
+    **进程级 access violation**（Windows 直接杀进程，exit 0xC0000005，
+    traceback 只有 `runner.loadIndex <- query_pb_photo` 的片段，看不出根因）。
+    修法：游标跟着线程走（`threading.local()`）。
+
+32. **bug ②（更隐蔽）：CPython `sqlite3` 的 per-connection 预处理语句缓存**
+    「每线程一个游标」只解决了一半。同一连接上**文本相同的 SQL 会被缓存并复用
+    同一个 `sqlite3_stmt`**，于是两个游标共享同一个底层语句 ——
+    后 execute 的那个会 `sqlite3_reset` 掉共享语句，**把先 execute 的那个待取的行丢掉**：
+
+    ```
+    线程A: executeRead("SELECT COUNT(*) ... delFlag = ?")  -> 已 step 出 1 行
+    线程B: executeRead(同一段 SQL 文本)                     -> reset 掉共享语句
+    线程A: fetchValue()                                     -> None（静默！无任何报错）
+    ```
+
+    **实测证据**（`code/.probe_min.py`，已删）：
+    | 条件 | 结果 |
+    |---|---|
+    | 6 线程跑**同一段 SQL 文本** | **第 1 次尝试就复现**（`code=-1` 有结果集、`description` 非空、`rowcount=-1`、同游标两次 `fetchone()` 都 None、另起独立查询却正常、`lastErr=''`） |
+    | 每线程 SQL 文本各加几个空格（= 不同缓存键） | **60 次零失败** |
+
+    ⇒ 语句缓存是**连接级**的，所以 **只有"每线程一个连接"才治本**。
+    写路径**不用**开每线程连接：每条写语句都在 `_lock` 里一次做完
+    （bind + step 到底，不迭代取行），不存在"待取的行被别人 reset"；
+    且写受「单写入者」硬约束保护。
+    ⚠️ 代价必须核算：`PRAGMA cache_size = -64000`（≈64MB）是按"一条主连接"定的，
+    几十条线程连接 × 64MB = 上 GB。所以**每线程读连接单独设 `cache_size = -8000`（8MB）**
+    （常量 `sqliteHandle.THREAD_READ_CACHE_SIZE`）。
+    实测（10 万张，请求线程走 8MB 缓存）性能**反而更好**：
+    首屏 `/api/timeline` p50 **91.39ms -> 55.67ms**（少了跨线程锁竞争），
+    `/api/places` 176ms -> 95ms。
+
+    ⚠️ **证据要求（两个 bug 都要）**：必须有自己的用例，不能靠"跑了一遍别的用例没炸"；
+    且**用例本身要被验证过有效**：
+      · 把 `_readConn()` 改回共享 `dbR` -> 4/4 并发用例变红
+        （含直接回归钉 `test_sameSqlTextAcrossThreadsDoesNotLoseRows`）
+      · 把 `_readCursor()` 改回共享游标 -> 同样变红
+
+### C. 接口层的三个补丁
+
+32. **`POST /api/scan/start` 的 `rootPath` 只允许**精确等于 `paths.photo_dir()`**
+    （`ScanScheduler.createJob` 只判 `os.path.isdir`，于是 `{"rootPath": "C:\\"}`
+    会真的去遍历整个 C 盘，把库外图片按错误 `relPath` 写进 `pb_photo`。
+    它不碰 `photo\`（原图只读没破），但会把库搞脏。子目录也不行 ——
+    `makeRelPath` 相对于传入的 root，同一张照片在不同 root 下 `relPathHash` 不同
+    -> **判定成两张不同的照片，重复入库**。多盘照片库请改 `PHOTO_ROOT` 配置。）
+33. **`GET /api/timeline?unknown=1`**：让 `takenAt` 为空的照片（截图类）**有入口能翻到**。
+    原来只给 `unknownCount` 一个数字 —— 这批照片既不在年表里、也不在按年翻页的结果里，
+    等于在 UI 上**消失**。⚠️ **这不是边角数据**：本项目正式库实测
+    **2137 张里有 711 张读不出年月（33%）** —— 截图、微信图片、无 EXIF 的扫描件。
+    只给一个数字等于让三分之一的内容在时间线上不可达。
+    与 `year`/`month` 互斥；排序只能用 `recID`（`takenAt` 是 NULL，排不了时间）。
+34. **`GET /api/review/disputed` 必须给**两套**总数**：
+    `total`（人脸行数，= 验收第 11 条口径）+ `photoGroupTotal`（`COUNT(DISTINCT photoCode)`，
+    分页口径）。前端画分页器**只能用后者** —— 拿 `total` 算总页数会翻进空页
+    （37 张脸可能只分布在 5 张照片里），而这个错不报错、只表现为"最后一页是空的"。
+㉓ **`GET /api/places` 读 `pb_place` 字典表，且必须能降级**
+    · 字典有数据 -> `source="dictionary"`（只扫几十~几百行）；
+    · 字典空或表不存在 -> `source="lib"` 实时聚合（全表 GROUP BY，慢但拿得到数据），
+      响应里说明原因 + 提示调 `POST /api/places/rebuild`；
+    · **两条路径下同一地点的 `placeCode` 必须一致** ——
+      否则用户在地点下拉里选中的编码在 rebuild 之后失效，
+      已缓存的前端状态/URL 全部对不上，而接口不报错。
+    · ⚠️ `GET` 是**纯读**：`rebuild` 必须走显式的 POST
+      （在 GET 里顺手回填 = 让只读接口有副作用，代理缓存/客户端重试都会替用户写库）。
+㉔ **`POST /api/places/rebuild` 幂等 + 不清表**
+    第二次跑 `created=0 / updated=N`；`source=1` 的手工行**不能被复算打回 0**；
+    已从 `pb_photo` 消失的地点**行要留、`photoCount` 要归零**
+    （不归零就会在地图上留一个「0 张却显示 300 张」的幽灵点）。
 
 ---
 ---
@@ -1123,34 +1543,46 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 ## 前置
 步骤 11 已完成（主链路可用）。
 
+⚠️ **下面 4 个视图文件步骤 10/11 已经建好并且接上了真实接口，本步是「补齐交互与打磨」，不是从零新建。**
+动手前先读现有实现，再决定改哪里 —— 不要按「新建」的口径重写：
+- `views/PeopleView.vue` / `PersonDetailView.vue` / `ScanJobsView.vue` / `SettingsView.vue` / `OverviewView.vue` —— 已存在，已有筛选条与列表骨架
+- `components/common/PersonForm.vue` —— 已存在，`FixFaceDialog` 的「新建人物」在用（硬约束「不得有第二份表单」依然成立）
+- `utils/faceState.js` —— 步骤 11 产出，**四态语义（色/描边/图标/文字）的唯一口径出口**。本步 Tab2 的「人工确认 / 自动归属」两段必须调 `faceStateOf()`，不要另写一套配色
+- `components/photo/BucketTimeline.vue` —— 步骤 11 产出，人物时间轴直接复用
+- `api/request.js` 的 `paramsSerializer` 已根治空 query 参数（只丢 `undefined`/`null`/`''`，`0` 与 `false` 原样发出），**不必再逐个 store 查 `''`**
+
 ## 必须先读的项目文档
 - plan/UI/photo-browser UI 设计.md 第 4.2/4.5/4.7 节（概览、人物详情、扫描任务布局）、第 3.2 节页面树
 - plan/开发计划.md 步骤 12 行验收项、第八节里程碑
 
 ## 本步产出文件
-1. src/views/PeopleView.vue（人物库）
+1. src/views/PeopleView.vue（人物库）—— **补齐，不是新建**
    - 人物卡片网格：头像 + 姓名 + 照片数 + 年代跨度
    - 筛选：分类（family/friend/colleague 芯片）/ 家庭组
    - 空状态引导（先导入联系人再扫描）
-2. src/components/common/PersonCard.vue —— 圆形头像，hover 上浮，点击进详情；**识别质量徽标**（见硬约束）
-3. src/views/PersonDetailView.vue（人物详情）
+   - **质心健康度提示**（见硬约束）
+2. src/components/common/PersonCard.vue —— **本步唯一需要新建的组件**。圆形头像，hover 上浮，点击进详情；**识别质量徽标**（见硬约束）
+3. src/views/PersonDetailView.vue（人物详情）—— **补齐**
    - 头部：头像 + 姓名 + 家庭关系 + 分类 + 照片数
-   - Tab1 时间轴：**按年代桶分组**的该人照片（复用 BucketTimeline）
-   - Tab2 人脸样本：**分两段** —— 「人工确认 N」（实线）与「自动归属 M」（虚线，各带「✗ 移除」）；移除后该脸回到待确认队列
-   - 操作：合并到… / **撤销上次合并** / 改头像 / 编辑资料 / **操作历史**（查 `pb_review_log`，「这张脸当初怎么被认成这个人的」）
-4. src/views/ScanJobsView.vue（扫描任务）
+   - Tab1 时间轴：**按年代桶分组**的该人照片（复用 `BucketTimeline`）
+   - Tab2 人脸样本：**分两段** —— 「人工确认 N」（实线）与「自动归属 M」（虚线，各带「✗ 移除」）；移除后该脸回到待确认队列。描边样式与文案走 `utils/faceState.js`，与照片详情页的 `FaceBox` 保持一致
+   - 操作：合并到… / **撤销上次合并·拆分** / 改头像 / 编辑资料 / **操作历史**（查 `pb_review_log`，「这张脸当初怎么被认成这个人的」）
+   - ⚠️ **撤销按钮只需接 UI**：`GET /api/review/revertible` 与 `POST /api/review/undo` 后端已通并实测过
+     （能把 `pb_face` 归属 + `pb_photo_person` + 双方质心一起还原，`pb_review_log` 回填 `revertedByLogCode`）。
+     界面上**必须**写明「撤销只能回到合并/拆分前的归属，质心的原值回不来」
+4. src/views/ScanJobsView.vue（扫描任务）—— **补齐**
    - 新建扫描（选根目录 + 批大小，默认 100）
    - 任务列表：状态 / 本批进度（真实计数）/ 累计 / 操作
    - 状态色 + 图标 + 文字三重编码：RUNNING 蓝◐、PAUSED 橙⏸、DONE 绿✓、FAILED 红✕
    - 操作：开始 / **继续下一批** / 暂停 / 查看错误（展开原始 errMsg）
    - **显式展示「已暂停等待指示」**，不要假进度条
-5. src/views/SettingsView.vue（设置）
+5. src/views/SettingsView.vue（设置）—— **补齐**
    - 照片根目录（只读展示）
    - 识别参数：T_high / T_low / 分桶策略（改动提示「需重新生成质心」）
    - 数据：重新生成质心（可选「仅用已确认样本」）/ 备份 / 恢复 / 关于
 6. src/views/OverviewView.vue 补全（统计卡 + 最近入库缩略图行 + 扫描状态条 + 待确认入口 + **我不同意入口**）
 7. 后端补齐（后端为主、前端为壳）
-   - GET /api/places、GET /api/map（Leaflet + 离线瓦片，可选功能）
+   - GET /api/places（**已存在**）、GET /api/map（Leaflet + 离线瓦片，可选功能）
    - 重复照片对比接口
    - 备份脚本 code/src/tools/backup.py：停服务 → 拷贝 db\ + thumb\ → 输出备份路径；另提供 restore
 8. 重复照片视图（可选，若时间允许）
@@ -1194,6 +1626,7 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 
 | 步 | 主题 | 里程碑 | 状态 |
 | --- | --- | --- | --- |
+| **R2** | **分桶口径修复**（DR-20/21/22 自适应分桶从未生效） | — | ✅ **代码已落地**（`engine/match/rebucket.py` 的 `rebucketFace/rebucketPerson/rebucketAll`、DR-21 未归属脸候选桶放宽、DR-22「先刷桶再重算」顺序闸、`auditBuckets`；`test_rebucket.py` **36 用例全绿**）<br>⚠️ 但 **R2 的验收证据仍欠**：`auditBuckets` 改前/改后对照、`verify_bucket_gain.py` 的生产库 FR 实测、全库重算质心 —— 这三项报告没出 |
 | **R** | **返工修正 1–6（纠错闭环 DR-16）** | — | ✅ 已完成（已并入步骤 6 / 7，不单列） |
 | 1 | 工程基线与配置骨架 | — | ✅ 已完成 |
 | 2 | SQLite 运行层 + 生成器 + 建库 | — | ✅ 已完成 |
@@ -1203,10 +1636,10 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 | 6 | 分桶 + 质心 + 匹配 | — | ✅ 已完成 |
 | 7 | 聚类与待确认数据 | **M2**（识别复现 S0、确认闭环生效） | ✅ 已完成（聚类 + 两个队列已实测；**M2 的「确认闭环」仍待人工确认 3 张脸**） |
 | 8 | 联系人导入 | — | ✅ 已完成（CSV+vCard 双通道 + 家庭组 + 1012 张头像；**M2 待人工确认 3 张脸**） |
-| 9 | 后端 API 全量 | **M3**（接口全可用、扫描可后台跑） | ⬜ 未开始 |
-| 10 | 前端骨架 + 双主题 | — | ⬜ 未开始 |
-| 11 | 照片流 + 详情 + 待确认队列 | — | ⬜ 未开始 |
-| 12 | 人物库/详情 + 扫描台 + 设置 + 打磨 | **M4**（自己真正用一周） | ⬜ 未开始 |
+| 9 | 后端 API 全量 | **M3**（接口全可用、扫描可后台跑） | ✅ 已完成（`api/` 六个模块 + `database/queryCommon.py` 查询出口 + `processor/place/` 地点字典；**含 contacts CRUD**，DR-17/18/19。`pytest code/src/test` = **1153 passed / 0 failed**，`/docs` 可试调，扫描可后台跑）|
+| 10 | 前端骨架 + 双主题 | — | ✅ 已完成（Vue3 + Vite + Tailwind + Element Plus 按需引入；`tokens.css` 单一口径出双主题，浅/深/跟随系统三态；`check-style-order.mjs` 门禁防 EP 覆盖顺序） |
+| 11 | 照片流 + 详情 + 待确认队列 | — | ✅ 已完成（`PhotosView` / `PhotoDetailView` / `ReviewView` + 7 个新组件；**DR-16 纠错闭环全部落地**：`FaceBox` 三种描边样式 + 悬停「✗ 不是他」一次可达、`ReviewView` 双 Tab + 键盘 1/2/3/N/S/I + 批量确认、合并/拆分独立端点。`pytest` = **1175 passed / 0 failed**。⚠️ **撤销按钮的 UI 未接**，`/review/revertible` + `merger.undo` 后端已通） |
+| 12 | 人物库/详情 + 扫描台 + 设置 + 打磨 | **M4**（自己真正用一周） | ⬜ 未开始（**下一步**）。5 个视图已存在，**本步是补齐交互不是从零新建**；需新建的只有 `PersonCard.vue`（`PersonForm.vue` 步骤 10 已产出）。**待接：撤销上次合并·拆分的 UI**（后端已通）、质心健康度提示、备份脚本 `tools/backup.py`、`/api/map`（可选）、重复照片对比 |
 
 ## 附录 B · 每步固定的输出格式
 
@@ -1217,4 +1650,21 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 ```
 
 > 提醒：新对话里请**只粘贴当前步骤的提示语**，不要把多步一起粘过去，否则上下文会过长导致遗漏约束。
-> 当前应粘贴的是 **「修正步骤 R」**。
+> 当前应粘贴的是 **「步骤 12 · 人物库/详情 + 扫描台 + 设置 + 打磨」**（12 步里的最后一步）。
+>
+> **进入步骤 12 时要知道的现状**（都是步骤 10/11 实际做完后与本提示语原文有出入的地方）：
+> - 步骤 12 产出清单里的 `PeopleView.vue` / `PersonDetailView.vue` / `ScanJobsView.vue` / `SettingsView.vue`
+>   **步骤 10 已建好骨架、步骤 11 已接上真实接口**，本步是补齐交互与打磨，不是从零新建。
+> - `PersonForm.vue` **已存在**（步骤 10 产出，`FixFaceDialog` 的「新建人物」在用）。硬约束「不得有第二份表单」仍然成立。
+> - **撤销上次合并/拆分的 UI 还没做** —— 后端 `/review/revertible` 与 `merger.undo` 已通并实测（能把双方归属和质心一起还原），
+>   但 `ReviewView` / `PersonDetailView` 里没有按钮。本步要接上，并且**必须在界面上说明「撤销只能回到合并/拆分前的归属，质心的原值回不来」**。
+> - 照片级写操作（软删 / 恢复 / 标记重复）步骤 11 已加端点，语义是「只改库、不动磁盘、不删关联行、软删可恢复」。
+> - 空 query 参数（`hasFace=''` 之类）已在 `api/request.js` 的 `paramsSerializer` 根治：
+>   **只丢 `undefined`/`null`/`''`，`0` 与 `false` 原样发出**（`desc=0` 升序不能被当空值丢掉）。
+>
+> ⚠️ 与当前进度无关、但仍未补齐的一件事：**R2 的验收证据**。代码已落地并有 36 条用例兜着，
+> 但下面三项报告一直没出，而它们是 **M2「识别复现 S0」** 的前提
+> （桶口径说了算，不能只凭"代码写完了"就认为 S0 的结论能在生产库复现）：
+> `auditBuckets()` 改前/改后完整对照、`verify_bucket_gain.py` 的生产库 FR 实测、
+> 全库重算质心（`--all --recompute`）前后行数变化。
+> 要补就单独贴 **「修正步骤 R2」**。

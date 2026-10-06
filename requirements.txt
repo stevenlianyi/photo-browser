@@ -39,6 +39,10 @@ reverse_geocoder
 # ---- 测试 ----
 pytest
 pytest-cov
+# httpx：**fastapi.testclient.TestClient 的底层传输**（步骤 9 的 api 测试要用）。
+# ⚠️ 不装它 `from fastapi.testclient import TestClient` 会直接 ImportError，
+#   而 starlette 的报错只说「httpx 没装」，不说是干什么用的 —— 很容易卡在这。
+httpx
 
 # ============================================================
 # ⚠️ 安装后必做：清掉 opencv-python，只留 headless

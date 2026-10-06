@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <!-- 内联 SVG favicon：不额外发一次请求，也避免默认 /favicon.ico 的 404 污染控制台 -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235B8DEF'/%3E%3Ctext x='16' y='22' font-family='sans-serif' font-size='15' font-weight='600' fill='%23fff' text-anchor='middle'%3EPB%3C/text%3E%3C/svg%3E"
+    />
+    <title>photo-browser · 私人照片库</title>
+    <!--
+      首屏防闪白 / 防闪黑：这段内联脚本必须在 <head> 里同步执行，
+      早于 CSSOM 应用与首帧绘制，读 localStorage 后立刻给 <html> 打主题 class。
+      与 src/utils/theme.js 的 resolveDark() 保持同一套判定逻辑（改一处必须同步改两处）。
+      localStorage 不可用（隐私模式）时落到默认浅色。
+    -->
+    <script>
+      ;(function () {
+        var root = document.documentElement
+        var mode = 'light'
+        try {
+          mode = localStorage.getItem('pb-theme-mode') || 'light'
+        } catch (e) {
+          /* 隐私模式：忽略，用浅色 */
+        }
+        var dark =
+          mode === 'dark' ||
+          (mode === 'auto' &&
+            window.matchMedia &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches)
+        root.classList.toggle('dark', dark)
+        root.classList.toggle('light', !dark)
+        root.setAttribute('data-theme-mode', mode)
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <noscript>
+      <p style="padding: 24px; font-family: sans-serif">
+        photo-browser 需要启用 JavaScript 才能运行。
+      </p>
+    </noscript>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

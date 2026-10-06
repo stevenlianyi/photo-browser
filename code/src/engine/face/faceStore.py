@@ -5,10 +5,33 @@
 #
 # 职责
 # ----
-#   1. makeShotBucket()   shotYear -> 年代桶（步骤 6 会按自适应规则重算覆盖）
+#   1. makeShotBucket()   shotYear -> **等宽占位桶**（不重刷，见下面的说明）
 #   2. FaceStore          攒行 -> 批量写 pb_face -> 同步 pb_photo.faceCount / scanState
 #   3. writeFaceCrops()   子进程裁好的人脸图原子落盘到 thumb\faces\<xx>\<faceCode>.jpg
 #   4. loadPhotoRows()    给编排层/CLI 用的取数（分页，避免 10 万行一次全取）
+#
+# shotBucket 谁负责重刷（修正步骤 R2 / DR-20 落定，**别再改回「步骤 6 会覆盖」**）
+# ---------------------------------------------------------------------------
+#   本模块只写**占位桶**：提取那一刻还不知道这张脸是谁，
+#   没有年龄就定不了「童年3 年」还是「成年 10 年」，所以先落一个等宽 5 年桶。
+#
+#   ⚠️⚠️ 早期这里写的是「步骤 6 会用自适应规则重算覆盖」——
+#      **那个承诺从未兑现**：步骤 6 只在匹配侧读 shotBucket，从没有任何代码
+#      改写它。于是 bucket.py 的自适应分桶在生产里是死代码，
+#      而「质心按自适应桶建、匹配按等宽桶取」的两套口径互相错开
+#      （S0 的 FR 32.75%->19% 等于一直在跑对照组）。
+#
+#   现在的口径（**唯一正确的一份**，与 engine/match/rebucket.py 文件头一致）：
+#     · 提取落库（这里）        -> 等宽 5 年占位桶
+#     · 归属那一刻             -> assigner._setBelong按**新主人的生日**重刷
+#                                 （assigner.fix('unknown'/'stranger') 刷回等宽）
+#     · 合并 / 撤销            -> merger 按**目标人**的生日重刷
+#     · 拆成新建档案           -> 经 assigner.setBelong，生日为空则刷成等宽
+#     · 联系人导入后           -> 对本次新建/更新的人重刷 + 重算质心
+#     · 存量一次性刷干净       -> python code\src\tools\rebucket_cli.py --all
+#   换句话说：**归属变更的那一刻生日才确定，桶键在那时才刷**。
+#   本模块保持占位不动是有意的：重提取（replace模式）会把这些脸重写成新行，
+#   而它们此刻大多仍未归属，刷成自适应桶反而是无源之水。
 #
 # 写库口径
 # --------
@@ -70,15 +93,21 @@ PHOTO_IDENTITY_COLUMNS: tuple = ("photoCode", "relPath", "relPathHash", "fileHas
 # ============================================================
 
 def makeShotBucket(shotYear) -> str:
-    """pb_photo.shotYear -> pb_face.shotBucket（如 "1995-1999"）。
+    """pb_photo.shotYear -> pb_face.shotBucket 的**占位**桶（如 "1995-1999"）。
 
     拿不到年份（NULL / 截图 / 超出可信区间）-> 返回空串，**不参与跨年代比对**
     （basicSettings.SCREENSHOT_NAME_PREFIXES 的口径：截图的拍摄年份没有意义）。
 
-    ⚠️ 这是**占位口径**，步骤 6 会用自适应规则（0-18 岁 3 年 / 18+ 10 年）重算覆盖。
-       本步不做匹配、也不知道这张脸对应的人多大 —— 没有年龄就定不了 3 年还是 10 年，
-       所以先写一个等宽 5 年的粗桶。
-       为什么不干脆留 NULL：留 NULL 的话步骤 6 分不清
+    ⚠️ 这是**占位口径（等宽 5 年）**，不是最终口径。真正的分桶是自适应的
+       （0-18 岁每 3 年 / 18+ 每 10 年），而自适应需要「这张脸属于谁」+
+       「那个人的生日」—— **提取时这两样都还不知道**，所以这里定不了。
+       重刷由 `engine.match.rebucket` 负责，落点是**归属变更的那一刻**
+       （assigner._setBelong / fix('unknown'|'stranger') / merger.merge / undo /
+         联系人导入后），存量用 `tools/rebucket_cli.py --all` 刷。
+       详见文件头「shotBucket 谁负责重刷」——**不要**再在这里写
+       「步骤 6 会覆盖」这种已经失效的承诺（它就是 DR-20 那个 P0 缺口）。
+
+       为什么不干脆留 NULL：留 NULL 的话分不清
        「还没算过」与「这张照片没有拍摄年份（截图）」这两种情况。
     """
     if shotYear is None:

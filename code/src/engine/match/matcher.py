@@ -13,6 +13,25 @@
 #   T_LOW <= score < T_HIGH  -> 待人工确认，记 Top-5 候选
 #   score <  T_LOW           -> 未知人脸，进聚类（步骤 7）
 #
+# 候选桶按「这张脸**归不归属**」分两路（DR-21，修正步骤 R2）
+# ------------------------------------------------------
+#   已归属   -> 相邻三桶 ∪ {ALL}（精确，且省：候选行通常只有几百行）
+#   未归属   -> **全部已启用桶 ∪ {ALL}**（=CentroidIndex.allBucketKeys()）
+#   为什么未归属要放宽：它的 shotBucket 是**等宽 5 年**桶（提取时不知道
+#   这张脸是谁，没有年龄），而别人的质心是**自适应**桶（宽 3 / 宽 10）。
+#   两套键根本不对齐 —— 等宽 "2000-2004" 的邻居是 "1995-1999"/"2005-2009"，
+#   而自适应童年桶可能是 "1997-1999"，**永远不在等宽桶的邻居集合里**。
+#   ⇒ 按相邻三桶取，一张未归属脸**一把质心都取不到**，只能靠 ALL 兜底 ->
+#   等于退化成不分桶，而这恰恰是最需要匹配的阶段。
+#   入口只有一个：candidateBucketsOf()（match 与 matchMany 都走它，不许分叉）。
+#
+#   ⚠️ **方案 A 的纪律不许破**：`bucketKeyOfFace()` **只认 shotBucket 这一列**，
+#      不在匹配时用 shotYear 现场重算。质心是按落库的 shotBucket 建的，
+#      两边口径必须一致；而落库那一列由 rebucket.py 在**归属变更那一刻**
+#      刷好（见 rebucket.py 文件头「谁负责重刷」）。改成实时算就等于推翻
+#      CentroidSubset 的 np.maximum.reduceat 连续段优化并重写匹配侧 ——
+#      用户已定方案 A，不做。
+#
 # 为什么候选集合里必须有 ALL（DR-16③，这是本轮返工的一条硬修正）
 # ---------------------------------------------------------
 #   ① **shotBucket 为空的脸（截图 / EXIF 缺失）原来直接掉进聚类**。
@@ -81,7 +100,7 @@ from engine.face import engine as faceEngine                      # noqa: E402
 from engine.match import bucket as bucket                         # noqa: E402
 from engine.match import centroid as centroid                     # noqa: E402
 
-_VERSION = "20261005"
+_VERSION = "20261006"
 
 _LOG = misc.setLogNew("matcher", "matcher.log")
 
@@ -304,7 +323,7 @@ def bucketKeyOfFace(face: dict) -> str:
 
 
 def candidateBucketKeys(bucketKey: str, neighbor: int = None) -> list:
-    """这张脸的**候选桶集合**（升序、去重）：`[B0-1, B0, B0+1] ∪ {ALL}`。
+    """给定桶键时的**候选桶集合**（升序、去重）：`[B0-1, B0, B0+1] ∪ {ALL}`。
 
     DR-16③ 的唯一入口（match 与 matchMany 都走它，两处不许分叉）。
 
@@ -320,6 +339,54 @@ def candidateBucketKeys(bucketKey: str, neighbor: int = None) -> list:
     keys = set(bucket.neighborBucketKeys(bucketKey, neighbor))
     keys.add(bucket.ALL_BUCKET)
     return sorted(keys)
+
+
+#: MatchResult.candidateBuckets 里代表「**全部已启用桶 ∪ {ALL}**」的标记。
+#:
+#: 为什么不直接把那几千个桶键原样塞进每条结果
+#: ------------------------------------------
+#:   10 万张未归属脸 × 几千个桶键 = 每条结果一个 4KB 列表 -> 几百 MB，
+#:   而这些键对同一个人来说**完全相同**（同一个 index）——纯浪费。
+#:   要看具体是哪几个桶，调用方直接问 index.allBucketKeys()（一个列表，
+#:   全批共享）。这与「批量分组本来就按候选桶集合聚类」是一致的：
+#:   未归属脸在 matchMany 里全部落进**同一组**，本来就只算一次。
+BUCKETS_ALL_MARK: str = "*"
+
+
+def candidateBucketsOf(faceRow: dict, neighbor: int = None) -> object:
+    """**这张脸该用哪些候选桶**（DR-21）。返回 list，或 **None = 全部已启用桶**。
+
+    参数
+    ----
+      faceRow: pb_face 行 dict（要 personCode / shotBucket）
+      neighbor: 相邻桶数；None = basicSettings.MATCH_NEIGHBOR_BUCKETS
+
+    返回
+    ----
+      已归属 -> `[B0-1, B0, B0+1] ∪ {ALL}`（升序）
+      **未归属 -> None**（调用侧转成"index 里全部已启用的桶"）
+
+    为什么未归属脸要放宽到「全部桶」（DR-21，这是 DR-20 的连带问题）
+    --------------------------------------------------------
+      未归属脸的 shotBucket 是**等宽 5 年**桶 —— 提取那一刻还不知道这张脸是谁，
+      没有年龄就定不了 3 年还是 10 年。而别人的质心是**自适应**桶（宽 3 / 宽 10）。
+      两套键**根本不对齐**：
+
+          等宽桶的邻居      = ["1995-1999", "2000-2004", "2005-2009"]
+          别人的自适应桶    = ["1997-1999"(童年宽3), "1998-2007"(成年宽10)]
+
+      `"1997-1999"` 永远不在等宽桶的邻居集合里 -> 按「相邻三桶」取候选，
+      一张未归属脸**一把质心都取不到**，只能靠 ALL 兜底桶 ->
+      **等于退化成不分桶**，而这恰恰是最需要匹配的阶段（用户正要认他）。
+
+    已归属的脸**仍然走相邻三桶**：它有生日、桶键已经刷成自适应，
+      键是对齐的，相邻三桶既准又省（性能与准确性都更好）。
+      ⇒ 本函数只放宽「未归属」这一条路径，不动已归属的精度。
+    """
+    row = faceRow or {}
+    if not str(row.get("personCode") or ""):
+        return None                       # 未归属 -> 全部已启用桶（见上）
+    return candidateBucketKeys(bucketKeyOfFace(row), neighbor)
 
 
 def faceEmbedding(face):
@@ -462,22 +529,33 @@ def match(face, matrix=None, index=None, tLow: float = None, tHigh: float = None
     vec = faceEmbedding(face)
     if vec is None:
         return MatchResult(faceCode, photoCode, bucketKey,
-                           candidateBucketKeys(bucketKey, neighbor),
+                           (candidateBucketKeys(bucketKey, neighbor)
+                            if candidateBucketsOf(face, neighbor) is not None
+                            else [BUCKETS_ALL_MARK]),
                            DECISION_CLUSTER, REASON_NO_EMBEDDING, None, "", [],
                            low, high, presetName)
 
     if index is None:
         matrix, index = centroid.loadAllCentroids()
     mat = matrix if matrix is not None else index.matrix
-    candidates = candidateBucketKeys(bucketKey, neighbor)
-    subset = index.subset(candidates)
+    want = candidateBucketsOf(face, neighbor)
+    #候选为 None（未归属脸）-> 取**全部已启用桶**。index.subset() 接的是
+    # 任意桶键集合，并且按 (personCode, bucketKey) 升序取行号->
+    # **同一个人的候选行仍然连续**，CentroidSubset 的 np.maximum.reduceat
+    # 优化**完整保留，不用重写**。而且全部桶 = 全部行，subset() 走
+    # isWhole 分支直接返回原矩阵的视图（零拷贝、零额外内存）。
+    subset = (index.subset(index.allBucketKeys()) if want is None
+              else index.subset(want))
+    candidates = ([BUCKETS_ALL_MARK] if want is None else want)
     if subset.personCount == 0:
         # ⚠️ 原因码要区分「没有年代可比」与「有年代但库里没质心」：
         #    DR-16 之后无 shotBucket 的脸**仍会尝试**（候选桶 = {ALL}），
         #    只有连 ALL 都没有启用的质心时才真的无从比较 —— 这时 no_bucket 更贴切。
         return MatchResult(faceCode, photoCode, bucketKey, candidates,
                            DECISION_CLUSTER,
-                           REASON_NO_BUCKET if not bucketKey else REASON_NO_CENTROID,
+                           REASON_NO_CENTROID if want is None
+                           else (REASON_NO_BUCKET if not bucketKey
+                                 else REASON_NO_CENTROID),
                            None, "", [], low, high, presetName)
 
     simRow = np.asarray(subset.matrix, dtype=np.float32) @ vec.astype(np.float32)
@@ -527,8 +605,8 @@ def matchMany(faces: list, matrix=None, index=None, tLow: float = None,
         matrix, index = centroid.loadAllCentroids()
     mat = matrix if matrix is not None else index.matrix
 
-    # ---- 第 1 遍：解析每张脸，分组 ----
-    groups = {}                                   # 候选桶元组 -> [faceIndex, ...]
+    # ---- 第 1遍：解析每张脸，分组 ----
+    groups = {}                # 候选桶元组（None = 全部已启用桶）-> [faceIndex, ...]
     for i, one in enumerate(faceList):
         faceCode = str(one.get("faceCode") or "") if isinstance(one, dict) else ""
         photoCode = str(one.get("photoCode") or "") if isinstance(one, dict) else ""
@@ -537,24 +615,34 @@ def matchMany(faces: list, matrix=None, index=None, tLow: float = None,
         #    没有拍摄年份的脸候选桶就是 {ALL}（兜底桶），照样能比——
         #    原来在这个分支直接 return，等于让**所有截图里的人脸**永远认不出来。
         vec = faceEmbedding(one)
+        want = candidateBucketsOf(one, neighbor)
+        # 未归属脸 want is None -> 归到**同一组**（keys=None），
+        # 于是「全部已启用桶」这一组只做一次 subset + 一次矩阵乘，
+        # 与原来「相邻三桶」那种分组是同一个套路（按候选集合聚类）。
         if vec is None:
             results[i] = MatchResult(faceCode, photoCode, bucketKey,
-                                     candidateBucketKeys(bucketKey, neighbor),
-                                     DECISION_CLUSTER, REASON_NO_EMBEDDING, None, "",
-                                     [], low, high, presetName)
+                                     (want if want is not None
+                                      else [BUCKETS_ALL_MARK]),
+                                     DECISION_CLUSTER, REASON_NO_EMBEDDING, None,
+                                     "", [], low, high, presetName)
             continue
-        keys = tuple(candidateBucketKeys(bucketKey, neighbor))
-        groups.setdefault(keys, []).append((i, vec, faceCode, photoCode, bucketKey))
+        groups.setdefault(None if want is None else tuple(want), []).append(
+            (i, vec, faceCode, photoCode, bucketKey))
 
     # ---- 第 2 遍：每组一次 subset + 分片矩阵乘 ----
     for keys, items in groups.items():
-        subset = index.subset(list(keys))
+        # keys is None = DR-21 的「全部已启用桶」。allBucketKeys() 天然含ALL，
+        # 且取到的是全部行-> subset() 走 isWhole 分支，直接复用原矩阵（零拷贝）。
+        subset = (index.subset(index.allBucketKeys()) if keys is None
+                  else index.subset(list(keys)))
+        shown = [BUCKETS_ALL_MARK] if keys is None else list(keys)
         if subset.personCount == 0:
             for i, _vec, faceCode, photoCode, bk in items:
-                results[i] = MatchResult(faceCode, photoCode, bk, list(keys),
+                results[i] = MatchResult(faceCode, photoCode, bk, shown,
                                          DECISION_CLUSTER,
-                                         REASON_NO_BUCKET if not bk
-                                         else REASON_NO_CENTROID,
+                                         REASON_NO_CENTROID if keys is None
+                                         else (REASON_NO_BUCKET if not bk
+                                               else REASON_NO_CENTROID),
                                          None, "", [], low, high, presetName)
             continue
         for begin in range(0, len(items), step):
@@ -567,7 +655,7 @@ def matchMany(faces: list, matrix=None, index=None, tLow: float = None,
                 bestAt, bestScore, top = _topFromRowScores(sims[row], subset, limit)
                 decision, reason = decide(bestScore, low, high)
                 results[i] = MatchResult(
-                    faceCode, photoCode, bk, list(keys), decision, reason,
+                    faceCode, photoCode, bk, shown, decision, reason,
                     bestScore,
                     subset.personCodes[bestAt] if decision == DECISION_AUTO else "",
                     top, low, high, presetName)

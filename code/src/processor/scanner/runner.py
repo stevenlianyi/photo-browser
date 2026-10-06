@@ -370,6 +370,19 @@ class ScanRunner(object):
             self.counters[key] = int(job.get(key) or 0)
         return job
 
+    def _shouldStop(self) -> bool:
+        """「用户叫停了吗」的统一探针（给 walker 的中断回调用）。
+
+        为什么包成一个方法而不是直接在调用点读 `self.stopEvent`
+        --------------------------------------------------
+          `stopEvent` 可以是 None（CLI 与单测走的就是这条路径，没有调度层）。
+          散在各处写 `self.stopEvent is not None and self.stopEvent.is_set()`
+          早晚会漏一处 —— 而漏掉的那一处就是「停止按钮在某个阶段失灵」。
+          一个入口、一处判空，以后加新的检查点不会忘。
+        """
+        event = self.stopEvent
+        return bool(event is not None and event.is_set())
+
     def ensureIndex(self, force: bool = False) -> dict:
         """确保内存索引已建；已建且未 force 时直接返回（**跨批复用**）。
 
@@ -684,19 +697,48 @@ class ScanRunner(object):
         --------------
           done    : bool —— 本次是否把整个根目录走完了（可以置 DONE）
           paused  : bool —— 因batchSize 上限而停下（应置 PAUSED 等「继续」）
+          stopped : bool —— 因收到停止信号而停下（本批**一张都没处理**）
           counts  : dict —— 本批的 added/skipped/updated/duplicate/moved/missing
           cursor  : 本批结束时的 lastCursor
+
+        ⚠️ 「停止」的两级语义（步骤 9 接FastAPI 时补上的）
+          ① **批内停止**：逐文件循环里检查 stopEvent -> `stopped=True`，
+             已处理的文件照常落库并推进游标（不浪费）。
+          ② **遍历中止**：全树 stat 阶段也接上了 stopEvent
+             （`walker.listPhotoFiles(shouldStop=...)`）。大库/慢盘上这一段
+             本身就要 2~20s，不接的话「停止」的响应下限就是这段耗时。
+             中止时**本批一张都不处理、游标与计数一律不动**，
+             下次 `resume` 会重走一遍遍历 —— 宁可多花一次遍历时间，
+             也不能推进一个「其实没扫完」的游标（那会永久漏掉一段文件）。
         """
         startTime = time.time()
         self._syncFromJob()# 跨批复用时必须重新对齐游标/计数（见 _syncFromJob）
         self.runCounters = {"added": 0, "skipped": 0, "updated": 0, "duplicate": 0,
                             "moved": 0, "moveLinked": 0, "copied": 0,
-                            "missing": 0, "recovered": 0}
+                            "missing": 0, "recovered": 0,
+                            # 停止信号相关（本批是否因它而空跑，见函数头②）
+                            "stopped": 0, "walkAborted": 0}
         self.ensureIndex()
 
         # 一次廉价stat 全量收集：既是续扫的定位依据，也顺带修正 totalCount
         walkStart = time.time()
-        items = walker.listPhotoFiles(self.root)
+        try:
+            items = walker.listPhotoFiles(self.root, shouldStop=self._shouldStop)
+        except walker.WalkAborted as e:
+            # 遍历被叫停：游标/计数/totalCount **一律不动**（见函数头②）
+            _LOG.info("runBatch: 遍历被中止（%s），本批不处理任何文件", e)
+            self.runCounters["stopped"] = 1
+            self.runCounters["walkAborted"] = 1
+            # ⚠️ 键集合与正常返回**逐一对齐**（多一个 `processed=0`、少一个就
+            #    会让调用方 KeyError）。调用方不该去记"哪条路径有哪些键"。
+            return {"jobCode": self.jobCode, "root": self.root,
+                    "processed": 0, "totalCount": int(self.totalCount or 0),
+                    "startIndex": 0, "cursor": self.lastCursor,
+                    "done": False, "paused": False, "stopped": True,
+                    "walkAborted": True, "missingCount": 0, "walkCost": 0.0,
+                    "counts": dict(self.runCounters),
+                    "jobCounters": dict(self.counters),
+                    "elapsed": round(time.time() - startTime, 3)}
         walkCost = time.time() - walkStart
         totalCount = len(items)
         if totalCount != self.totalCount:
@@ -725,7 +767,9 @@ class ScanRunner(object):
 
         for index in range(startIndex, totalCount):
             relPath, absPath = items[index]
-            if self.stopEvent is not None and self.stopEvent.is_set():
+            # 批内停止（函数头①）：**已处理的文件照常落库、游标照常推进**，
+            # 下一个 resume 从游标往后接着走 —— 已经干完的活不白费。
+            if self._shouldStop():
                 walkDone = False
                 stopped = True
                 break
@@ -805,6 +849,10 @@ class ScanRunner(object):
             "done": bool(walkDone and not stopped),
             "paused": bool(not walkDone and not stopped),
             "stopped": bool(stopped),
+            # ⚠️ 中止路径与正常路径**必须返回同一个键集合**：
+            #    少了这个键，调用方写 result["walkAborted"] 会在正常批上 KeyError，
+            #    于是"只在异常路径才出现"的字段迟早被漏判（.get() 默认值会掩盖它）。
+            "walkAborted": False,
             "missingCount": missingCount,
             "walkCost": round(walkCost, 3),
             "counts": dict(self.runCounters),

@@ -75,7 +75,7 @@ from config import basicSettings as basicSettings
 from database.auto_generated import sqliteCommon as sqliteCommon
 from processor.media import thumbStore as thumbStore      # noqa: E402
 
-_VERSION = "20261005"
+_VERSION = "20261006"
 
 _LOG = misc.setLogNew("importContacts", "importcontacts.log")
 
@@ -843,6 +843,49 @@ def _report(planned: dict) -> dict:
             "noYear": len(noYear)}
 
 
+def _rebucketImported(result: dict) -> dict:
+    """落库之后：对**本次新建/更新的人**刷 shotBucket + 重算质心。
+
+    为什么这是必须的（DR-22 / R2）
+    --------------------------
+      本工具是「生日进库」的主入口（文件头的「生日口径」一节就是在说这件事），
+      而 pb_person.birthday 直接决定桶键：
+        有出生年 -> 自适应分桶（0~18 岁每 3 年 / 18+ 每 10 年）
+        无出生年 -> 等宽 5 年降级
+      生日到位的那一刻，就是这些人的脸该刷成自适应桶的时刻。漏掉的后果与
+      DR-20 同类（只是范围局限在本次导入的人）：脸表留等宽桶 -> 质心按等宽桶建
+      -> 这批人跨年代认不出来，**且不报错**。
+
+    只处理本次导入的人
+      全库刷桶是 `tools/rebucket_cli.py --all` 的活（改存量口径的一次性动作），
+      不该由一次导入顺带扫全库脸表。代价与导入规模成正比。
+
+    顺序：刷桶 -> 重算质心，不可颠倒（DR-22）
+    失败不炸导入：主目标是「把人建进来」，记 failed 让用户看见即可
+      （与上面 apply() 里头像写入失败的处置口径一致）。
+    """
+    out = {"persons": 0, "faces": 0, "changed": 0, "recomputed": 0, "failed": []}
+    codes = list(result.get("created") or ()) + list(result.get("updated") or ())
+    if not codes:
+        return out
+    from engine.match import centroid as centroid
+    from engine.match import rebucket as rebucket
+    for code in codes:
+        try:
+            info = rebucket.rebucketPerson(code)
+            if info.get("error"):
+                continue
+            out["persons"] += 1
+            out["faces"] += int(info.get("faces") or 0)
+            out["changed"] += int(info.get("changed") or 0)
+            stat = centroid.recomputePerson(code)
+            out["recomputed"] += len(stat.get("buckets") or ())
+        except (rebucket.BucketStaleError, RuntimeError, ValueError) as e:
+            out["failed"].append((code, str(e)))
+            _LOG.error("导入后刷桶/重算失败 %s：%s", code, e)
+    return out
+
+
 def main(argv=None) -> int:
     _fixConsole()
     p = argparse.ArgumentParser(description="通讯录（vCard）导入 pb_person")
@@ -875,6 +918,21 @@ def main(argv=None) -> int:
     print("\n实跑完成：新建 %d、更新 %d、失败 %d"
           % (len(result["created"]), len(result["updated"]),
              len(result["failed"])))
+    # ---- 生日到位 -> 刷桶 + 重算质心（DR-22 / R2）----
+    # ⚠️ 必须在落库**之后**：桶键取决于 pb_person.birthday，
+    #    而生日是上面 apply() 刚写进去的。顺序反了就是僵尸质心。
+    reb = _rebucketImported(result)
+    if reb["persons"]:
+        print("刷桶/重算    : %d 人、%d 张脸，其中 %d 张改桶，重算 %d 个桶质心"
+              % (reb["persons"], reb["faces"], reb["changed"],
+                 reb["recomputed"]))
+        if reb["changed"]:
+            print("              （桶键变了：这些人有生日，脸表已从等宽降级桶"
+                  "刷成自适应桶）")
+        else:
+            print("              （这些人的脸桶键已是对的，无需改动）")
+    for code, err in reb["failed"]:
+        print("  !刷桶/重算 %s -> %s" % (code, err))
     for code in result["created"]:
         print("  + %s" % code)
     for code in result["updated"]:

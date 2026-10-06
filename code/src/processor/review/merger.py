@@ -21,7 +21,7 @@
 #   pb_review_log               **每次合并/拆分落一条 isRevertible=1 的日志**
 #                               （没有它就回不去，见下）
 #
-# 四条容易做错、做错了还不报错的地方
+# 五条容易做错、做错了还不报错的地方
 # ----------------------------------
 #   ① **质心不能靠改 personCode 搬**。两个原因：
 #      (a) (personCode, bucketKey) 上有 UNIQUE，两人在同一个桶上就撞；
@@ -46,6 +46,15 @@
 #          与这张脸操作前的 isConfirmed）。
 #      成员日志不是为了好看：撤销时必须**精确知道哪些脸要搬回去**，
 #      而"合并前 from 有哪些脸"这个事实只存在于日志里。
+#   ⑤ **迁移 personCode 之后必须刷 shotBucket**（DR-22 / 修正步骤 R2）。
+#      桶键是「拍摄年 + **这个人**的出生年」算出来的，换了主人就得重算：
+#        · merge()  -> 按**目标人**的 birthday 刷全部迁移的脸
+#                      （源与目标的生日可能不同 -> 桶键体系不同）
+#        · undo()   -> 按**还原后的主人**刷（撤销合并就是把脸还给from，
+#                      from 的生日与 to 不同，所以刷的方向与合并时相反）
+#        · split()  -> 走 assigner.setBelong / unassign，由assigner 刷
+#                      （新建档案的生日可能为空 -> 刷成等宽降级桶）
+#      顺序固定：**搬 personCode -> 刷 shotBucket -> 重算质心**，不可颠倒。
 #
 # 事务纪律
 # --------
@@ -68,9 +77,10 @@ from common import miscCommon as misc                             # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
 from database.auto_generated import sqliteCommon                  # noqa: E402
 from engine.match import centroid as centroid                     # noqa: E402
+from engine.match import rebucket as rebucket                     # noqa: E402
 from processor.review import assigner as assigner                 # noqa: E402
 
-_VERSION = "20261005"
+_VERSION = "20261006"
 
 _LOG = misc.setLogNew("merger", "merger.log")
 
@@ -90,6 +100,26 @@ def _personByCode(personCode: str) -> dict:
     if not rows:
         raise MergeError("personCode=%s 在 pb_person 里不存在" % personCode)
     return rows[0]
+
+
+def _personMaybe(personCode: str) -> dict:
+    """同 _personByCode，但**查不到返回 None**（刷桶时"未归属"就是None）。
+
+    为什么不复用 _personByCode：撤销时fromPerson 可能为空（拆成未归属），
+    或者那个人已经被软删/硬删了 —— 这两种情况下刷等宽降级桶才是对的，
+    不该让整个撤销崩掉。
+    """
+    code = str(personCode or "")
+    if not code:
+        return None
+    # ⚠️ delFlag="*" 是必须的：撤销合并时 fromPerson **还处于软删状态**
+    #    （delFlag 的还原在后面那一步），而生成层的 query_* 默认只查
+    #    delFlag='0' —— 不加这个参数就会查不到人，于是刷桶退化成
+    #    「未归属 -> 等宽降级桶」，撤销合并后的桶键**刷不回去**。
+    for row in sqliteCommon.query_pb_person("pb_person", personCode=code,
+                                            mode="light", delFlag="*"):
+        return row
+    return None
 
 
 def _updatePerson(personCode: str, dataSet: dict) -> int:
@@ -267,6 +297,13 @@ def merge(fromPerson: str, toPerson: str, softDelete: bool = True) -> dict:
             if rtn == -2:                # sqliteHandle.RET_ERROR
                 raise MergeError("pb_face 迁移失败: %s"
                                  % sqliteCommon.dbHandle().lastErrMsg)
+            # ⚠️ ⑤ 迁移之后**立刻**按**目标人**的 birthday 重刷 shotBucket
+            #   （DR-22 / R2）。源与目标的生日可能不同 -> 桶键体系不同 ->
+            #   源按自己的生日算出的「1985-1994」到了目标人这里可能是
+            #   「1985-1997」。不刷的话这张脸在目标人的桶体系里是个孤儿，
+            #   而质心是按**脸表里的桶键**建的 —— 于是这张脸永远不进
+            #   目标人的任何一个桶，合并等于"合了但认不出来"。
+            rebucket.rebucketFace(row, toRow)
 
         # ---- ② 质心：先删干净（纪律 ①）----
         droppedCentroids = centroid.dropPerson(fromCode)
@@ -364,6 +401,9 @@ def merge(fromPerson: str, toPerson: str, softDelete: bool = True) -> dict:
         raise
 
     # ---- 事务外：① 按 to 现有的脸重算全部质心（纪律 ① 的另一半）----
+    # ⚠️ 必须**在刷桶之后**：事务里已经按 to 的 birthday 把迁移过来的脸
+    #    全部刷过一遍了（纪律 ⑤），这里重算出来的桶键才与脸表一致。
+    #    顺序反了就是 DR-22 说的僵尸质心。
     rebuilt = centroid.recomputePerson(toCode)
     # ---- 事务外：② 落可撤销的日志（纪律 ④）----
     # ⚠️ 必须在事务**外**写：日志走自己的 upsert 事务，
@@ -411,6 +451,18 @@ def split(faceCode: str, newPersonCode: str = "", displayName: str = "",
       名字给不出就用「未命名-xxx」占位（步骤 7 聚类也是这个命名口径）。
 
     返回 {faceCode, fromPerson, toPerson, created, logCode, ...assign.fix 的字段}
+
+    桶键（DR-22 /纪律 ⑤）
+    ------------------
+      本函数**自己不刷 shotBucket**，两条分支都交给 assigner：
+        · newPersonCode 为空 -> assigner.unassign -> fix('unknown')
+          -> 刷回**等宽降级桶**（生日不再属于任何人）
+        · newPersonCode 有值 -> assigner.setBelong -> _setBelong
+          -> 按**新主人**的 birthday 刷（新建档案的 birthday 可能为空，
+             此时自动落到等宽降级桶，这正是我们要的）
+      为什么不在这里再写一遍刷桶：刷桶规则只有 rebucket.py 一处实现，
+      两处各写一遍就等于两套规则迟早分叉；而setBelong 的签名与顺序
+      （personCode ->刷桶 -> 重算质心）已经由assigner 保证。
 
     日志（纪律 ④）
     ------------
@@ -603,6 +655,12 @@ def undo(logCode: str) -> dict:
             if rtn == -2:                # sqliteHandle.RET_ERROR
                 raise MergeError("pb_face 还原失败: %s"
                                  % sqliteCommon.dbHandle().lastErrMsg)
+            # ⚠️ 纪律 ⑤：还原 personCode 之后**立刻**按新主人重刷 shotBucket。
+            #   撤销合并 = 把脸还给 fromPerson，而 from 的生日与 to 可能不同 ->
+            #   刷的方向与合并时**相反**。不刷的话这些脸留在 to 的桶体系里，
+            #   而 from 的质心按 from 的桶键建 -> 这个人的匹配静默失准。
+            #   fromPerson 为空（撤销的是"拆成未归属"）-> 刷回等宽降级桶。
+            rebucket.rebucketFace(face, _personMaybe(fromPerson))
             restored += 1
         # ---- ② 反向恢复关联（纪律 ③ 的**双向**版本）----
         #只补 fromPerson 那一侧是不够的：撤销合并后 toPerson 在这些照片里

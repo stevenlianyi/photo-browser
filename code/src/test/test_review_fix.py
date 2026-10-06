@@ -41,14 +41,35 @@ def unit(seed: int):
     return faceEngine.l2normalize(rng.randn(1, basicSettings.EMBEDDING_DIM).ravel())
 
 
-def addPerson(code, name, birthday=None):
+# ⚠️⚠️ R2 之后 pb_face.shotBucket 不再是一个「随手写的字面量」（DR-20/DR-22）
+# --------------------------------------------------------------------------
+#   它是**派生值**：bucketKeyOf(照片 shotYear, 主人 birthday)。
+#   centroid.recompute/recomputePerson 执行前会做一致性前置检查
+#   （centroid._assertBucketOrder -> rebucket.assertFacesFresh），
+#   不等于「按当前主人的生日算出来」的那个就**直接抛错**。
+#   所以夹具数据必须**自洽**：默认生日 + 默认拍摄年选成落在童年段（宽 3 年）
+#   的一对，于是派生桶键恒为 FX_BKT（「2000-2002」）。字面量还在，
+#   但它的含义从「随便起个名」变成了「按规则算出来就是这个」——这正是 R2 要钉住的东西。
+#   成年段（宽 10 年）/ 降级等宽（宽 5 年）另有专门用例，见 test_rebucket.py。
+FX_BIRTH: str = "1982-05-05"          # 默认生日
+FX_SHOT: int = 2000                   # 默认拍摄年 -> 18 岁 -> 童年段
+FX_BKT: str = bucket.bucketKeyOf(FX_SHOT, FX_BIRTH)          # "2000-2002"
+FX_BKT_EQ: str = bucket.bucketKeyOf(FX_SHOT, None)            # "2000-2004" 降级等宽
+FX_BKT_NONE: str = bucket.bucketKeyOf(None, FX_BIRTH)         # "" 无拍摄年份
+#: 第二个人：生日 1985-06-01 + 拍摄年 2003 -> 18 岁 -> "2003-2005"
+FX_BIRTH2: str = "1985-06-01"
+FX_SHOT2: int = 2003
+FX_BKT2: str = bucket.bucketKeyOf(FX_SHOT2, FX_BIRTH2)
+
+
+def addPerson(code, name, birthday=FX_BIRTH):
     sqliteCommon.insertManyTableGeneral(
         "pb_person", [{"personCode": code, "displayName": name,
                        "birthday": birthday, "source": 0, "isConfirmed": 0}],
         conflictColumns=("personCode",), fillStandard=True)
 
 
-def addPhoto(code, shotYear=2013):
+def addPhoto(code, shotYear=FX_SHOT):
     sqliteCommon.insertManyTableGeneral(
         "pb_photo", [{"photoCode": code, "relPath": "%s.jpg" % code,
                       "relPathHash": code.ljust(64, "0")[:64],
@@ -57,7 +78,7 @@ def addPhoto(code, shotYear=2013):
         fillStandard=True)
 
 
-def addFace(code, photoCode, vec, bucketKey="2000-2002", person=None,
+def addFace(code, photoCode, vec, bucketKey=None, person=None,
             confirmed=0, stranger=0):
     """⚠️ isStranger 必须**显式**写 0。
 
@@ -65,13 +86,31 @@ def addFace(code, photoCode, vec, bucketKey="2000-2002", person=None,
     漏掉它等于「不写这一列」而不是「写 0」——
     于是下面按 isStranger 判四态的用例会读到 None。
     """
+    if bucketKey is None:
+        bucketKey = derivedBucket(photoCode, person)
     sqliteCommon.insertManyTableGeneral(
         "pb_face", [{"faceCode": code, "photoCode": photoCode,
                      "personCode": person, "isConfirmed": confirmed,
-                     "isStranger": stranger, "shotBucket": bucketKey,
+                     "isStranger": stranger,
+                     "shotBucket": (bucketKey or None),
                      "detScore": 0.9, "quality": 0.8,
                      "embedding": faceEngine.encodeEmbedding(vec)}],
         fillStandard=True)
+
+
+def derivedBucket(photoCode, personCode):
+    """(照片, 主人) -> 该脸**应该**的桶键。与生产同一个函数，不抄规则。"""
+    shotYear = None
+    for row in sqliteCommon.query_pb_photo("pb_photo", photoCode=photoCode,
+                                           mode="light"):
+        shotYear = row.get("shotYear")
+    birthday = None
+    if personCode:
+        for row in sqliteCommon.query_pb_person("pb_person",
+                                                personCode=personCode,
+                                                mode="light"):
+            birthday = row.get("birthday")
+    return bucket.bucketKeyOf(shotYear, birthday)
 
 
 def faceRow(faceCode):
@@ -176,13 +215,13 @@ class TestConfirmedOnlyCentroid:
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
         for i in range(2):
-            addFace("fc_c%d" % i, "PH_1", unit(100 + i), "2000-2002", "P01", 1)
-        addFace("fc_bad", "PH_1", unit(999), "2000-2002", "P01", 0)
-        got = centroid.recompute("P01", "2000-2002")
+            addFace("fc_c%d" % i, "PH_1", unit(100 + i), FX_BKT, "P01", 1)
+        addFace("fc_bad", "PH_1", unit(999), FX_BKT, "P01", 0)
+        got = centroid.recompute("P01", FX_BKT)
         assert got["sampleCount"] == 2, "自动样本进了质心"
         assert got["skipped"]["unconfirmed"] == 1, "被排除的样本必须计数上报"
         assert got["enabled"] is False
-        row = centroidRow("P01", "2000-2002")
+        row = centroidRow("P01", FX_BKT)
         assert row["sampleCount"] == 2 and row["centroid"] is None
 
     def test_centroid_bytes_identical_with_and_without_auto_face(self, lib,
@@ -195,16 +234,16 @@ class TestConfirmedOnlyCentroid:
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
         for i in range(3):
-            addFace("fc_c%d" % i, "PH_1", unit(200 + i), "2000-2002", "P01", 1)
+            addFace("fc_c%d" % i, "PH_1", unit(200 + i), FX_BKT, "P01", 1)
         centroid.recomputePerson("P01")
-        cleanRow = centroidRow("P01", "2000-2002")
+        cleanRow = centroidRow("P01", FX_BKT)
         cleanBytes = cleanRow["centroid"]
         assert cleanRow["sampleCount"] == 3 and cleanBytes is not None
         assert cleanBytes == meanBytesOf(["fc_c0", "fc_c1", "fc_c2"])
 
-        addFace("fc_bad", "PH_1", unit(998), "2000-2002", "P01", 0)
+        addFace("fc_bad", "PH_1", unit(998), FX_BKT, "P01", 0)
         centroid.recomputePerson("P01")
-        dirtyRow = centroidRow("P01", "2000-2002")
+        dirtyRow = centroidRow("P01", FX_BKT)
         assert dirtyRow["sampleCount"] == 3, \
             "确认 3 张 + 自动 1 张，sampleCount 必须仍是 3"
         assert dirtyRow["centroid"] == cleanBytes, \
@@ -216,10 +255,15 @@ class TestConfirmedOnlyCentroid:
 
     def test_all_bucket_ignores_bucket_split(self, lib, confirmedOnlyOn):
         """ALL 桶 = 该人**全部**确认样本，不分年代桶"""
-        addPerson("P01", "爸爸")
-        for key, seed in (("1990-1992", 300), ("2000-2002", 301),
-                          ("2010-2012", 302)):
-            addPhoto("PH_%d" % seed)
+        # 三个桶必须各自算得出（R2 之后 shotBucket 是派生值）：
+        #   生日 1987-06-01 → 拍摄年 1998 / 2001 / 2005 = 11 / 14 / 18 岁
+        #   → 童年段（宽 3 年）-> 三个不同桶键
+        born, years = "1987-06-01", (1998, 2001, 2005)
+        keys = tuple(bucket.bucketKeyOf(y, born) for y in years)
+        assert len(set(keys)) == 3, "夹具前提：三个拍摄年要落在三个桶里"
+        addPerson("P01", "爸爸", born)
+        for seed, (year, key) in zip((300, 301, 302), zip(years, keys)):
+            addPhoto("PH_%d" % seed, shotYear=year)
             addFace("fc_%d" % seed, "PH_%d" % seed, unit(seed), key, "P01", 1)
         info = centroid.recompute("P01", centroid.ALL_BUCKET)
         assert info["isAllBucket"] is True
@@ -233,11 +277,11 @@ class TestConfirmedOnlyCentroid:
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
         for i in range(2):
-            addFace("fc_c%d" % i, "PH_1", unit(400 + i), "2000-2002", "P01", 1)
-        addFace("fc_bad", "PH_1", unit(401), "2000-2002", "P01", 0)
-        assert centroid.recompute("P01", "2000-2002")["sampleCount"] == 2
+            addFace("fc_c%d" % i, "PH_1", unit(400 + i), FX_BKT, "P01", 1)
+        addFace("fc_bad", "PH_1", unit(401), FX_BKT, "P01", 0)
+        assert centroid.recompute("P01", FX_BKT)["sampleCount"] == 2
         monkeypatch.setattr(centroid, "CONFIRMED_ONLY", False)
-        got = centroid.recompute("P01", "2000-2002")
+        got = centroid.recompute("P01", FX_BKT)
         assert got["sampleCount"] == 3, "关掉开关就该用全部样本（旧口径）"
         assert got["confirmedOnly"] is False
         assert got["skipped"]["unconfirmed"] == 0
@@ -247,8 +291,8 @@ class TestConfirmedOnlyCentroid:
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
         for i in range(3):
-            addFace("fc_%d" % i, "PH_1", unit(500 + i), "2000-2002", "P01", 1)
-        assert centroid.listBucketsOf("P01") == ["2000-2002"]
+            addFace("fc_%d" % i, "PH_1", unit(500 + i), FX_BKT, "P01", 1)
+        assert centroid.listBucketsOf("P01") == [FX_BKT]
         assert centroid.ALL_BUCKET not in centroid.listBucketsOf("P01")
         # recomputePerson 会额外算 ALL —— 它不是「一个年代桶」，是兜底桶
         stat = centroid.recomputePerson("P01")
@@ -265,28 +309,33 @@ class TestAllFallbackBucket:
     def test_bucket_shortfall_falls_back_to_all(self, lib, confirmedOnlyOn):
         """**验收第 8 条**：某桶确认样本只 1 张、总确认样本 4 张
         -> 该桶不启用、**ALL 桶启用且 sampleCount=4**，且**能被匹配到**。"""
-        addPerson("P01", "爸爸", "1985-03-07")
+        # 两个桶都必须各自算得出：生日 1987-06-01
+        #   → 拍摄年 1998（14 岁）= BKT_A / 2001（16 岁）= BKT_B
+        born = "1987-06-01"
+        BKT_A, BKT_B = (bucket.bucketKeyOf(y, born) for y in (1998, 2001))
+        assert BKT_A != BKT_B, "夹具前提：两个拍摄年要落在不同桶里"
+        addPerson("P01", "爸爸", born)
         base = unit(600)
-        addPhoto("PH_0")
-        addFace("fc_b0", "PH_0", base, "1990-1992", "P01", 1)          # 本桶 1 张
+        addPhoto("PH_0", shotYear=1998)
+        addFace("fc_b0", "PH_0", base, BKT_A, "P01", 1)                # 本桶 1 张
         for i in range(3):
-            addPhoto("PH_o%d" % i)
+            addPhoto("PH_o%d" % i, shotYear=2001)
             addFace("fc_o%d" % i, "PH_o%d" % i,
                     faceEngine.l2normalize(base + 0.01 * unit(610 + i)),
-                    "2010-2012", "P01", 1)                              # 别的桶 3 张
+                    BKT_B, "P01", 1)                                  # 别的桶 3 张
         stat = centroid.recomputePerson("P01")
         rows = dict((r["bucketKey"], r) for r in stat["buckets"])
-        assert rows["1990-1992"]["sampleCount"] == 1
-        assert rows["1990-1992"]["enabled"] is False, "1 个样本的桶不该启用"
-        assert rows["2010-2012"]["enabled"] is True
+        assert rows[BKT_A]["sampleCount"] == 1
+        assert rows[BKT_A]["enabled"] is False, "1 个样本的桶不该启用"
+        assert rows[BKT_B]["enabled"] is True
         assert rows[centroid.ALL_BUCKET]["sampleCount"] == 4, \
             "ALL 桶必须汇总该人的全部确认样本"
         assert rows[centroid.ALL_BUCKET]["enabled"] is True
 
-        # 「该人能被匹配到」：一张落在 1990-1992 的新脸，候选桶含 ALL -> 认得出
-        addPhoto("PH_new", shotYear=1991)
+        # 「该人能被匹配到」：一张落在 BKT_A 的新脸，候选桶含 ALL -> 认得出
+        addPhoto("PH_new", shotYear=1998)
         addFace("fc_new", "PH_new", faceEngine.l2normalize(base + 0.02 * unit(699)),
-                "1990-1992")
+                BKT_A)
         _m, index = centroid.loadAllCentroids()
         got = matcher.match(faceRow("fc_new"), index=index)
         assert got.decision == matcher.DECISION_AUTO
@@ -301,7 +350,7 @@ class TestAllFallbackBucket:
         addPerson("P01", "样本不足")
         addPhoto("PH_1")
         for i in range(2):
-            addFace("fc_%d" % i, "PH_1", unit(700 + i), "2000-2002", "P01", 1)
+            addFace("fc_%d" % i, "PH_1", unit(700 + i), FX_BKT, "P01", 1)
         stat = centroid.recomputePerson("P01")
         assert stat["enabled"] == 0
         for row in stat["buckets"]:
@@ -309,7 +358,7 @@ class TestAllFallbackBucket:
             assert row["sampleCount"] < basicSettings.MIN_CENTROID_SAMPLES
         _m, index = centroid.loadAllCentroids()
         assert len(index) == 0
-        assert index.rowOf("P01", "2000-2002") == -1
+        assert index.rowOf("P01", FX_BKT) == -1
         assert index.rowOf("P01", centroid.ALL_BUCKET) == -1
 
     def test_all_bucket_downgrades_when_samples_disappear(self, lib,
@@ -318,7 +367,7 @@ class TestAllFallbackBucket:
         addPerson("P01", "会变的人")
         addPhoto("PH_1")
         for i in range(3):
-            addFace("fc_%d" % i, "PH_1", unit(800 + i), "2000-2002", "P01", 1)
+            addFace("fc_%d" % i, "PH_1", unit(800 + i), FX_BKT, "P01", 1)
         centroid.recomputePerson("P01")
         assert centroid.centroidOf("P01", centroid.ALL_BUCKET) is not None
         assigner.fix("fc_0", "unknown")
@@ -331,13 +380,17 @@ class TestAllFallbackBucket:
     def test_face_without_bucket_uses_all(self, lib, confirmedOnlyOn):
         """**验收第 10 条**：shotBucket 为空 -> 候选桶 = {ALL}，能拿到分数"""
         addPerson("P01", "爸爸")
-        addPhoto("PH_1", shotYear=2013)
+        addPhoto("PH_1")
         base = unit(900)
         for i in range(3):
-            addFace("fc_%d" % i, "PH_1", base, "2000-2002", "P01", 1)
+            addFace("fc_%d" % i, "PH_1", base, FX_BKT, "P01", 1)
         centroid.recomputePerson("P01")
         addPhoto("PH_shot", shotYear=None)
-        addFace("fc_shot", "PH_shot", base, None)
+        # ⚠️ 这张脸**已归属**且没有拍摄年（截图）。
+        #   已归属 → 候选桶 = 相邻三桶（空）∪ {ALL} = {ALL}。
+        #   若它**未归属**，DR-21 会把候选放宽成「全部已启用桶」，
+        #   那条路径由 test_rebucket.py 专门覆盖。
+        addFace("fc_shot", "PH_shot", base, None, "P01")
         assert faceRow("fc_shot")["shotBucket"] is None
         assert matcher.candidateBucketKeys("") == [centroid.ALL_BUCKET]
         _m, index = centroid.loadAllCentroids()
@@ -353,14 +406,16 @@ class TestAllFallbackBucket:
 
 class TestFixActions:
     def _twoPersonsThreeEach(self, seedBase=1000):
-        addPerson("P01", "爸爸", "1985-03-07")
-        addPerson("P02", "妈妈", "1987-06-01")
+        # 同生日 + 同拍摄年 -> 两人落在**同一个桶** FX_BKT
+        #（本文件的多个用例都断言两人共享桶键）
+        addPerson("P01", "爸爸", FX_BIRTH)
+        addPerson("P02", "妈妈", FX_BIRTH)
         for who in ("P01", "P02"):
             for i in range(3):
                 photo = "PH_%s%d" % (who, i)
                 addPhoto(photo)
                 addFace("fc_%s%d" % (who, i), photo,
-                        unit(seedBase + i), "2000-2002")
+                        unit(seedBase + i), FX_BKT)
         for i in range(3):
             assigner.confirm("fc_P01%d" % i, "P01")
         for i in range(3):
@@ -373,9 +428,9 @@ class TestFixActions:
         的旧值上，而且**不报错**。
         """
         self._twoPersonsThreeEach()
-        assert (centroidRow("P01", "2000-2002")["sampleCount"],
-                centroidRow("P02", "2000-2002")["sampleCount"]) == (3, 3)
-        p02Before = centroid.centroidOf("P02", "2000-2002").copy()
+        assert (centroidRow("P01", FX_BKT)["sampleCount"],
+                centroidRow("P02", FX_BKT)["sampleCount"]) == (3, 3)
+        p02Before = centroid.centroidOf("P02", FX_BKT).copy()
 
         out = assigner.fix("fc_P010", "assign", "P02")
         assert out["changed"] is True
@@ -385,14 +440,14 @@ class TestFixActions:
         assert int(face["isConfirmed"]) == 1, "改判 = 人工确认"
 
         # ① 原人：样本少一条，且必须**跌出启用线**
-        row01 = centroidRow("P01", "2000-2002")
+        row01 = centroidRow("P01", FX_BKT)
         assert row01["sampleCount"] == 2
         assert row01["centroid"] is None, "原人掉到 2 个样本，质心必须失效"
-        assert centroid.centroidOf("P01", "2000-2002") is None
+        assert centroid.centroidOf("P01", FX_BKT) is None
         # ② 新人：多一条，且内容确实变了
-        row02 = centroidRow("P02", "2000-2002")
+        row02 = centroidRow("P02", FX_BKT)
         assert row02["sampleCount"] == 4 and row02["centroid"] is not None
-        assert not np.array_equal(centroid.centroidOf("P02", "2000-2002"), p02Before)
+        assert not np.array_equal(centroid.centroidOf("P02", FX_BKT), p02Before)
         # ③ 旧 linkKey 已删、新行 source=1
         assert sorted(r["linkKey"] for r in linkRows("P01")) == \
             ["PH_P011:P01", "PH_P012:P01"]
@@ -414,7 +469,7 @@ class TestFixActions:
         # 关联行按纪律 ③ 删掉（这张照片里再没有脸属于 P01）
         assert sorted(r["linkKey"] for r in linkRows("P01")) == \
             ["PH_P011:P01", "PH_P012:P01"]
-        assert centroidRow("P01", "2000-2002")["sampleCount"] == 2
+        assert centroidRow("P01", FX_BKT)["sampleCount"] == 2
         assert assigner.verifyLinks()["clean"], assigner.verifyLinks()
 
     def test_fix_stranger_leaves_all_three_collections(self, lib, confirmedOnlyOn):
@@ -428,7 +483,7 @@ class TestFixActions:
         assert "fc_P010" not in [r["faceCode"] for r in pendingFaces()]
         assert "fc_P010" not in [r["faceCode"] for r in disputedFaces()]
         # 质心里也不能有它（否则陌生人会通过质心间接"参与"匹配）
-        assert centroidRow("P01", "2000-2002")["sampleCount"] == 2
+        assert centroidRow("P01", FX_BKT)["sampleCount"] == 2
         assert sorted(r["linkKey"] for r in linkRows("P01")) == \
             ["PH_P011:P01", "PH_P012:P01"]
         assert assigner.verifyLinks()["clean"], assigner.verifyLinks()
@@ -447,7 +502,7 @@ class TestFixActions:
         addPerson("P01", "爸爸")
         addPerson("P02", "妈妈")
         addPhoto("PH_1")
-        addFace("fc_1", "PH_1", unit(1100), "2000-2002")
+        addFace("fc_1", "PH_1", unit(1100), FX_BKT)
         assigner.fix("fc_1", "stranger")
         assert int(faceRow("fc_1")["isStranger"]) == 1
         assigner.fix("fc_1", "assign", "P02")
@@ -458,7 +513,7 @@ class TestFixActions:
     def test_fix_rejects_bad_arguments(self, lib):
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
-        addFace("fc_1", "PH_1", unit(1200), "2000-2002")
+        addFace("fc_1", "PH_1", unit(1200), FX_BKT)
         with pytest.raises(assigner.AssignerError):
             assigner.fix("fc_1", "delete_everything")
         with pytest.raises(assigner.AssignerError):
@@ -473,13 +528,13 @@ class TestFixActions:
         addPerson("P02", "妈妈")
         for i in range(4):
             addPhoto("PH_%d" % i)
-            addFace("fc_%d" % i, "PH_%d" % i, unit(1300 + i), "2000-2002")
+            addFace("fc_%d" % i, "PH_%d" % i, unit(1300 + i), FX_BKT)
         assigner.confirmPerson("P01", ["fc_0", "fc_1", "fc_2", "fc_3"])
         out = assigner.batchFix(["fc_0", "fc_1"], "assign", "P02")
         assert out["fixed"] == 2 and not out["failed"]
         assert faceRow("fc_0")["personCode"] == "P02"
-        assert centroidRow("P01", "2000-2002")["sampleCount"] == 2
-        assert centroidRow("P02", "2000-2002")["sampleCount"] == 2
+        assert centroidRow("P01", FX_BKT)["sampleCount"] == 2
+        assert centroidRow("P02", FX_BKT)["sampleCount"] == 2
         out2 = assigner.batchFix(["fc_2", "fc_missing"], "unknown")
         assert out2["fixed"] == 1 and len(out2["failed"]) == 1
         assert assigner.verifyLinks()["clean"], assigner.verifyLinks()
@@ -493,8 +548,8 @@ class TestFixActions:
         addPerson("P01", "爸爸")
         addPerson("P02", "妈妈")
         addPhoto("PH_1")
-        addFace("fc_a", "PH_1", unit(1400), "2000-2002")
-        addFace("fc_b", "PH_1", unit(1401), "2000-2002")
+        addFace("fc_a", "PH_1", unit(1400), FX_BKT)
+        addFace("fc_b", "PH_1", unit(1401), FX_BKT)
         assigner.confirm("fc_a", "P01")
         assigner.confirm("fc_b", "P01")
         assert len(linkRows("P01")) == 1
@@ -510,7 +565,7 @@ class TestFixActions:
         """unassign() 就是 fix('unknown') —— 不留两套语义"""
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
-        addFace("fc_1", "PH_1", unit(1500), "2000-2002")
+        addFace("fc_1", "PH_1", unit(1500), FX_BKT)
         assigner.confirm("fc_1", "P01")
         out = assigner.unassign("fc_1")
         assert out["action"] == "unknown"
@@ -527,7 +582,7 @@ class TestConfirmedSemanticsAndLog:
         """**根因那条**：自动归属必须写 isConfirmed=0，否则进不了「我不同意」"""
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
-        addFace("fc_1", "PH_1", unit(1600), "2000-2002")
+        addFace("fc_1", "PH_1", unit(1600), FX_BKT)
         info = assigner.autoAssign("fc_1", "P01", 0.77)
         assert info["isConfirmed"] == 0
         assert int(faceRow("fc_1")["isConfirmed"]) == 0
@@ -546,19 +601,19 @@ class TestConfirmedSemanticsAndLog:
         addPhoto("PH_1")
         base = unit(1700)
         for i in range(3):
-            addFace("fc_s%d" % i, "PH_1", base, "2000-2002")
+            addFace("fc_s%d" % i, "PH_1", base, FX_BKT)
         assigner.confirmPerson("P01", ["fc_s0", "fc_s1", "fc_s2"])
-        assert centroidRow("P01", "2000-2002")["sampleCount"] == 3
+        assert centroidRow("P01", FX_BKT)["sampleCount"] == 3
         addPhoto("PH_2")
         addFace("fc_new", "PH_2", faceEngine.l2normalize(base + 0.01 * unit(1701)),
-                "2000-2002")
+                FX_BKT)
         _m, index = centroid.loadAllCentroids()
         got = matcher.match(faceRow("fc_new"), index=index)
         assert got.decision == matcher.DECISION_AUTO
         assigner.applyAuto([got])
         assert int(faceRow("fc_new")["isConfirmed"]) == 0
         centroid.recomputePerson("P01")
-        assert centroidRow("P01", "2000-2002")["sampleCount"] == 3
+        assert centroidRow("P01", FX_BKT)["sampleCount"] == 3
         assert centroidRow("P01", centroid.ALL_BUCKET)["sampleCount"] == 3
         assert "fc_new" in [r["faceCode"] for r in disputedFaces()]
 
@@ -568,7 +623,7 @@ class TestConfirmedSemanticsAndLog:
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
         for name in ("fc_pending", "fc_auto", "fc_confirmed", "fc_stranger"):
-            addFace(name, "PH_1", unit(1800 + len(name)), "2000-2002")
+            addFace(name, "PH_1", unit(1800 + len(name)), FX_BKT)
         assigner.autoAssign("fc_auto", "P01", 0.61)
         assigner.confirm("fc_confirmed", "P01")
         assigner.fix("fc_stranger", "stranger")
@@ -583,7 +638,7 @@ class TestConfirmedSemanticsAndLog:
         addPerson("P02", "妈妈")
         addPhoto("PH_1")
         for i in range(3):
-            addFace("fc_%d" % i, "PH_1", unit(1900 + i), "2000-2002")
+            addFace("fc_%d" % i, "PH_1", unit(1900 + i), FX_BKT)
         assert len(logs()) == 0
 
         assigner.confirm("fc_0", "P01")
@@ -613,7 +668,7 @@ class TestConfirmedSemanticsAndLog:
         """**fromPersonCode 为空也必须真写成 NULL**（首次确认的常见情形）"""
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
-        addFace("fc_1", "PH_1", unit(2000), "2000-2002")
+        addFace("fc_1", "PH_1", unit(2000), FX_BKT)
         assigner.confirm("fc_1", "P01")
         row = logs(assigner.OP_ASSIGN)[0]
         assert row["fromPersonCode"] is None
@@ -627,7 +682,7 @@ class TestConfirmedSemanticsAndLog:
     def test_auto_log_records_similarity(self, lib):
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
-        addFace("fc_1", "PH_1", unit(2100), "2000-2002")
+        addFace("fc_1", "PH_1", unit(2100), FX_BKT)
         assigner.autoAssign("fc_1", "P01", 0.6123)
         row = logs(assigner.OP_ASSIGN)[0]
         assert float(row["similarity"]) == pytest.approx(0.6123, abs=1e-4)
@@ -636,7 +691,7 @@ class TestConfirmedSemanticsAndLog:
         """人工确认**不编造分数**（否则统计会把人工当成高置信自动匹配）"""
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
-        addFace("fc_1", "PH_1", unit(2200), "2000-2002")
+        addFace("fc_1", "PH_1", unit(2200), FX_BKT)
         assigner.confirm("fc_1", "P01")
         assert logs(assigner.OP_ASSIGN)[0]["similarity"] is None
 
@@ -644,7 +699,7 @@ class TestConfirmedSemanticsAndLog:
         addPerson("P01", "爸爸")
         for i in range(3):
             addPhoto("PH_%d" % i)
-            addFace("fc_%d" % i, "PH_%d" % i, unit(2300 + i), "2000-2002")
+            addFace("fc_%d" % i, "PH_%d" % i, unit(2300 + i), FX_BKT)
         assigner.confirmPerson("P01", ["fc_0", "fc_1", "fc_2"])
         batch = logs(assigner.OP_BATCH_ASSIGN)
         assert len(batch) == 1
@@ -662,13 +717,13 @@ class TestConfirmedSemanticsAndLog:
 
 class TestUndo:
     def _mergeFixture(self):
-        addPerson("P01", "爸爸", "1985-03-07")
-        addPerson("P02", "妈妈", "1987-06-01")
+        addPerson("P01", "爸爸", FX_BIRTH)
+        addPerson("P02", "妈妈", FX_BIRTH)
         for who, seed in (("P01", 2400), ("P02", 2500)):
             for i in range(3):
                 photo = "PH_%s%d" % (who, i)
                 addPhoto(photo)
-                addFace("fc_%s%d" % (who, i), photo, unit(seed + i), "2000-2002")
+                addFace("fc_%s%d" % (who, i), photo, unit(seed + i), FX_BKT)
         for i in range(3):
             assigner.confirm("fc_P01%d" % i, "P01")
         for i in range(3):
@@ -680,8 +735,8 @@ class TestUndo:
         """**验收第 15 条**：merge -> undo 完整还原
         （人脸归属 + pb_photo_person + 双方质心 + fromPerson 的 delFlag）"""
         self._mergeFixture()
-        p01Vec = centroid.centroidOf("P01", "2000-2002").copy()
-        p02Vec = centroid.centroidOf("P02", "2000-2002").copy()
+        p01Vec = centroid.centroidOf("P01", FX_BKT).copy()
+        p02Vec = centroid.centroidOf("P02", FX_BKT).copy()
         assert len(linkRows("P01")) == 3 and len(linkRows("P02")) == 3
 
         merged = merger.merge("P01", "P02")
@@ -704,9 +759,9 @@ class TestUndo:
         assert sorted(r["linkKey"] for r in linkRows("P01")) == \
             ["PH_P010:P01", "PH_P011:P01", "PH_P012:P01"]
         # ③ 双方质心重算，且**内容**回到合并前（不是只看行数）
-        assert centroidRow("P01", "2000-2002")["sampleCount"] == 3
-        assert np.allclose(centroid.centroidOf("P01", "2000-2002"), p01Vec, atol=1e-6)
-        assert np.allclose(centroid.centroidOf("P02", "2000-2002"), p02Vec, atol=1e-6)
+        assert centroidRow("P01", FX_BKT)["sampleCount"] == 3
+        assert np.allclose(centroid.centroidOf("P01", FX_BKT), p01Vec, atol=1e-6)
+        assert np.allclose(centroid.centroidOf("P02", FX_BKT), p02Vec, atol=1e-6)
         # ④ fromPerson 的软删被撤销，合并痕迹也清掉
         restored = sqliteCommon.query_pb_person("pb_person", personCode="P01",
                                                 delFlag="*")[0]
@@ -732,10 +787,10 @@ class TestUndo:
         assert face["personCode"] == "P01", "撤销要还原成拆分**之前**的归属人"
         assert int(face["isConfirmed"]) == 1
         assert "PH_P010:P01" in [r["linkKey"] for r in linkRows("P01")]
-        assert centroidRow("P01", "2000-2002")["sampleCount"] == 3
+        assert centroidRow("P01", FX_BKT)["sampleCount"] == 3
         # P09 撤销后**一张脸都没有了** -> 它的年代桶质心必须被清掉
         #（不清的话那条向量会继续参与匹配，而它代表的分布已经不存在了）
-        assert centroidRow("P09", "2000-2002") is None
+        assert centroidRow("P09", FX_BKT) is None
         assert centroid.centroidOf("P09", centroid.ALL_BUCKET) is None
         assert assigner.verifyLinks()["clean"], assigner.verifyLinks()
 
@@ -743,7 +798,7 @@ class TestUndo:
         """拆成「未归属」再撤销 -> personCode 回到原主"""
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
-        addFace("fc_1", "PH_1", unit(2600), "2000-2002")
+        addFace("fc_1", "PH_1", unit(2600), FX_BKT)
         assigner.confirm("fc_1", "P01")
         out = merger.split("fc_1")
         assert faceRow("fc_1")["personCode"] is None
@@ -755,7 +810,7 @@ class TestUndo:
         """**验收第 16 条**：对普通确认（isRevertible=0）必须报错拒绝"""
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
-        addFace("fc_1", "PH_1", unit(2700), "2000-2002")
+        addFace("fc_1", "PH_1", unit(2700), FX_BKT)
         assigner.confirm("fc_1", "P01")
         logCode = logs(assigner.OP_ASSIGN)[0]["logCode"]
         with pytest.raises(merger.MergeError) as err:
@@ -769,7 +824,7 @@ class TestUndo:
         addPerson("P01", "爸爸")
         addPerson("P02", "妈妈")
         addPhoto("PH_1")
-        addFace("fc_1", "PH_1", unit(2800), "2000-2002")
+        addFace("fc_1", "PH_1", unit(2800), FX_BKT)
         assigner.confirm("fc_1", "P01")
         out = merger.split("fc_1", "P02")
         merger.undo(out["logCode"])
@@ -787,8 +842,8 @@ class TestUndo:
         addPerson("P01", "爸爸")
         addPerson("P02", "妈妈")
         addPhoto("PH_1")
-        addFace("fc_1", "PH_1", unit(2900), "2000-2002")
-        addFace("fc_2", "PH_1", unit(2901), "2000-2002")
+        addFace("fc_1", "PH_1", unit(2900), FX_BKT)
+        addFace("fc_2", "PH_1", unit(2901), FX_BKT)
         assigner.confirm("fc_1", "P01")
         assert merger.revertibleList() == [], "普通确认不可撤销，不该进候选集"
         out = merger.split("fc_2", "P02")
@@ -824,7 +879,7 @@ class TestVerifyAfterFix:
         addPerson("P02", "妈妈")
         addPhoto("PH_1")
         for i in range(4):
-            addFace("fc_%d" % i, "PH_1", unit(3000 + i), "2000-2002")
+            addFace("fc_%d" % i, "PH_1", unit(3000 + i), FX_BKT)
         for i in range(4):
             assigner.confirm("fc_%d" % i, "P01")
         assigner.syncLinks()
@@ -842,8 +897,8 @@ class TestVerifyAfterFix:
         from tools import run_match as runMatch
         addPerson("P01", "爸爸")
         addPhoto("PH_1")
-        addFace("fc_1", "PH_1", unit(3100), "2000-2002")
-        addFace("fc_2", "PH_1", unit(3101), "2000-2002")
+        addFace("fc_1", "PH_1", unit(3100), FX_BKT)
+        addFace("fc_2", "PH_1", unit(3101), FX_BKT)
         assigner.fix("fc_2", "stranger")
         codes = [r["faceCode"] for r in runMatch.loadPendingFaces()]
         assert codes == ["fc_1"]

@@ -239,8 +239,26 @@ def _notFound(detail: str) -> HTTPException:
 # 三、GET /api/thumb/{photoCode}
 # ============================================================
 
-@router.api_route("/thumb/{photoCode}", methods=["GET", "HEAD"],
-                  summary="缩略图（按需生成 + ETag + 304）")
+# ⚠️⚠️ GET 与 HEAD 的注册方式（步骤 9 修，**踩过一次坑**）
+# ------------------------------------------------------------
+#   正确写法是**两个装饰器**：GET 进 OpenAPI，HEAD **不进**（include_in_schema=False）。
+#
+#   三种写法都试过，只有第三种对：
+#     ① `@router.api_route(..., methods=["GET","HEAD"])`
+#        -> HEAD 可用，但 FastAPI 为两个方法生成**同一个 operationId**
+#          （`generate_unique_id` 从 `route.methods` 集合里取一个方法名，
+#           两次都取到 `get`），于是每次启动刷 3 条
+#          `Duplicate Operation ID` 警告，`/docs` 里还多 3 组无意义的 HEAD 条目。
+#     ② `@router.get(...)` 只写一个装饰器
+#        -> **HEAD 直接 405**。实测：Starlette 1.7 的 `Route` **不再**
+#          为 GET 自动补 HEAD（老版本会补，所以网上很多"只写 GET 就行"的说法）。
+#          这条最坑 —— `/docs` 看着完全正常，只有真发 HEAD 请求才暴露。
+#          本仓库的 `test_headStillWorksOnStaticRoutes` 就是那次踩坑留下的钉子。
+#     ③ 两个装饰器（当前实现）-> HEAD 可用 + OpenAPI 里只有 GET。
+#        `include_in_schema=False` 的路由**不会**进 openapi 生成流程，
+#        所以不会产生 operationId，也就没有重复警告。
+@router.get("/thumb/{photoCode}", summary="缩略图（按需生成 + ETag + 304）")
+@router.head("/thumb/{photoCode}", include_in_schema=False)
 def getThumb(photoCode: str, request: Request, size: int = thumbStore.THUMB_DEFAULT_SIZE):
     """返回缩略图 WebP。
 
@@ -327,8 +345,8 @@ def getThumb(photoCode: str, request: Request, size: int = thumbStore.THUMB_DEFA
 # 四、GET /api/original/{photoCode}
 # ============================================================
 
-@router.api_route("/original/{photoCode}", methods=["GET", "HEAD"],
-                  summary="原图（支持 Range）")
+@router.get("/original/{photoCode}", summary="原图（支持 Range）")
+@router.head("/original/{photoCode}", include_in_schema=False)
 def getOriginal(photoCode: str, request: Request):
     """返回原图。**支持 HTTP Range**（206/416/Accept-Ranges）。
 
@@ -418,8 +436,8 @@ def getOriginal(photoCode: str, request: Request):
 # 五、GET /api/face/{faceCode}
 # ============================================================
 
-@router.api_route("/face/{faceCode}", methods=["GET", "HEAD"],
-                  summary="人脸裁剪图（160px JPEG）")
+@router.get("/face/{faceCode}", summary="人脸裁剪图（160px JPEG）")
+@router.head("/face/{faceCode}", include_in_schema=False)
 def getFace(faceCode: str, request: Request):
     """按 faceCode 返回人脸裁剪图。
 

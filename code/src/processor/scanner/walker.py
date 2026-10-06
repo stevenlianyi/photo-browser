@@ -124,7 +124,32 @@ def calcFileHash(absPath: str, chunkSize: int = None) -> str:
 # 三、遍历
 # ============================================================
 
-def listPhotoFiles(root: str, excludedDirs=None) -> list:
+class WalkAborted(Exception):
+    """遍历被 `shouldStop` 中途中止（**不是错误，是「用户叫停」**）。
+
+    ⚠️ 为什么是**抛异常**而不是「返回部分清单」
+    ---------------------------------------------
+      `listPhotoFiles` 的返回值被 `runBatch` 当作**全量真值**用：
+        · `totalCount = len(items)`
+        · `relPaths` 排序后用 `bisect_right(relPaths, lastCursor)` 定位续扫起点
+      如果中止时返回**部分**清单（哪怕调用方自觉），后果是
+        · `totalCount` 变成一个偏小的数 -> 进度条永远到不了 100%
+        · `relPaths` 只覆盖了一部分 -> `bisect_right` 落在错误的位置
+          -> **续扫会漏掉整段文件，且不报错**
+      而这两条都属于「静默丢数据」，比「明确失败」贵得多。
+      所以这里让中止**必须**被显式处理：调用方要么当无事发生（游标不动，
+      下次重走一遍遍历），要么自己报错。
+    """
+
+
+#: 每处理多少个目录查一次 shouldStop。
+#: ⚠️ 不是每个目录都查：回调本身有代价（读 threading.Event），
+#:    而目录数在 10 万张库里是几千量级 —— 每 64 个查一次，
+#:    中止的响应延迟仍在**毫秒级**，代价可以忽略。
+_STOP_CHECK_EVERY: int = 64
+
+
+def listPhotoFiles(root: str, excludedDirs=None, shouldStop=None) -> list:
     """递归收集 photo 根下所有「受支持的照片文件」，按 relPath 字典序返回。
 
     参数
@@ -132,10 +157,15 @@ def listPhotoFiles(root: str, excludedDirs=None) -> list:
     root         : 扫描根（= photo 目录）。不存在 / 不是目录直接返回空列表并记 error
     excludedDirs : 目录名黑名单，缺省用 basicSettings.EXCLUDED_DIR_NAMES
                    （@eaDir / .thumbnails / thumbs / faces / $RECYCLE.BIN ...）
+    shouldStop   : 可调用的**中止探针**。返回真值就抛 `WalkAborted`。
+                   缺省 None = 不可中断（老行为，CLI 与单测不受影响）。
 
     返回
     ----
     list[tuple[str, str]] —— [(relPath, absPath), ...]，已按 relPath 升序
+
+    ⚠️ **只有拿到完整清单，调用方才能安全地续扫**（见 WalkAborted 的说明），
+       所以中止一律抛异常，绝不返回部分清单。
 
     说明
     ----
@@ -156,7 +186,14 @@ def listPhotoFiles(root: str, excludedDirs=None) -> list:
     # 显式栈做迭代式 DFS（不用 os.walk：os.walk 遇到不可读目录会静默跳过、
     # 且不便于统一控制「不跟随符号链接」）
     stack = [rootAbs]
+    visited = 0
     while stack:
+        if shouldStop is not None:
+            visited += 1
+            if visited % _STOP_CHECK_EVERY == 0 and shouldStop():
+                _LOG.info("listPhotoFiles: 收到停止信号，已遍历 %d 个目录后中止"
+                          % visited)
+                raise WalkAborted("遍历在第 %d 个目录处被中止" % visited)
         dirPath = stack.pop()
         try:
             with os.scandir(dirPath) as scanner:
@@ -187,13 +224,20 @@ def listPhotoFiles(root: str, excludedDirs=None) -> list:
             absPath = os.path.abspath(entry.path)
             result.append((makeRelPath(rootAbs, absPath), absPath))
 
+    if shouldStop is not None and shouldStop():
+        # 恰好在最后一个目录之后叫停：清单其实是完整的，但**统一按中止处理**。
+        # 理由：调用方无法区分「刚好扫完」与「差一点点」，
+        # 而两种情况下把它当成功都会让 stop 失去意义。
+        _LOG.info("listPhotoFiles: 收到停止信号，清单不予交付（已遍历 %d 个目录）"
+                  % visited)
+        raise WalkAborted("遍历完成瞬间收到停止信号")
     result.sort(key=lambda item: item[0])
     return result
 
 
-def countPhotoFiles(root: str, excludedDirs=None) -> int:
+def countPhotoFiles(root: str, excludedDirs=None, shouldStop=None) -> int:
     """只数个数（不 hash、不读内容）—— 建扫描任务时用来填 totalCount。"""
-    return len(listPhotoFiles(root, excludedDirs=excludedDirs))
+    return len(listPhotoFiles(root, excludedDirs=excludedDirs, shouldStop=shouldStop))
 
 
 def makeEntry(absPath: str, relPath: str = None, root: str = None,
@@ -234,7 +278,8 @@ def makeEntry(absPath: str, relPath: str = None, root: str = None,
 
 
 def iterPhotoFiles(root: str, afterCursor: str = "", hashContent: bool = True,
-                   excludedDirs=None, chunkSize: int = None) -> object:
+                   excludedDirs=None, chunkSize: int = None,
+                   shouldStop=None) -> object:
     """逐条产出 FileEntry（生成器：先廉价收集全量清单，再边走边算 hash）。
 
     参数
@@ -246,15 +291,24 @@ def iterPhotoFiles(root: str, afterCursor: str = "", hashContent: bool = True,
     hashContent : False 时不读文件内容（fileHash=None，fileSize/mtime 仍取）。
                   供「只想看看有多少张」的轻量统计用。
     excludedDirs / chunkSize : 同 listPhotoFiles / calcFileHash
+    shouldStop  : 中止探针（抛 WalkAborted，见 listPhotoFiles）。
 
     产出
     ----
     FileEntry，按 relPath 升序
+
+    ⚠️ `shouldStop` 在**两个地方**都生效：清单收集阶段（walk 级）与逐条产出
+       阶段（hash 级）。少了后者，「停止」在大文件库上仍然要等很久 ——
+       一张 RAW 的 sha256 可能要几百毫秒，那才是真正耗时的地方。
     """
     cursor = "" if not afterCursor else str(afterCursor)
-    for relPath, absPath in listPhotoFiles(root, excludedDirs=excludedDirs):
+    for relPath, absPath in listPhotoFiles(root, excludedDirs=excludedDirs,
+                                           shouldStop=shouldStop):
         if cursor and relPath <= cursor:
             continue
+        if shouldStop is not None and shouldStop():
+            _LOG.info("iterPhotoFiles: 收到停止信号，产出中止于 %s" % relPath)
+            raise WalkAborted("产出中止于 %s" % relPath)
         entry = makeEntry(absPath, relPath=relPath, hashContent=hashContent,
                           chunkSize=chunkSize)
         if entry is not None:
@@ -262,10 +316,12 @@ def iterPhotoFiles(root: str, afterCursor: str = "", hashContent: bool = True,
 
 
 def walkPhotos(root: str, afterCursor: str = "", hashContent: bool = True,
-               excludedDirs=None, chunkSize: int = None) -> list:
+               excludedDirs=None, chunkSize: int = None,
+               shouldStop=None) -> list:
     """iterPhotoFiles 的列表版（一次性物化）。3 万张约 3MB，CLI/测试用。"""
     return list(iterPhotoFiles(root, afterCursor=afterCursor, hashContent=hashContent,
-                              excludedDirs=excludedDirs, chunkSize=chunkSize))
+                               excludedDirs=excludedDirs, chunkSize=chunkSize,
+                               shouldStop=shouldStop))
 
 
 if __name__ == "__main__":

@@ -117,6 +117,7 @@ TABLE_ORDER = (
     "pb_family",
     "pb_person",
     "pb_person_category",
+    "pb_place",
     "pb_photo",
     "pb_face",
     "pb_person_centroid",
@@ -129,6 +130,7 @@ TABLE_CN = {
     "pb_family": "家庭组",
     "pb_person": "人员",
     "pb_person_category": "人员分类",
+    "pb_place": "地点字典",
     "pb_photo": "照片",
     "pb_face": "人脸",
     "pb_person_centroid": "人员年代桶质心",
@@ -185,6 +187,13 @@ INDEX_SPEC = {
         ("idx_pb_review_log_isRevertible", ("isRevertible",), False,
          "isRevertible=1 AND revertedByLogCode IS NULL"),
     ),
+    # 步骤 9 加：地点字典（`GET /api/places` 不再全表 GROUP BY）
+    "pb_place": (
+        # 按地点名精确查（rebuildPlaces 回填时按 placeName 认人）
+        ("idx_pb_place_placeName", ("placeName",), False, None),
+        # 「足迹」/地图按热度排序（photoCount DESC）—— 不加索引就是全表扫 + 排序
+        ("idx_pb_place_photoCount", ("photoCount",), False, None),
+    ),
 }
 
 # §五 的**期望索引名全集**（自检用：索引清单与文档漂移了就报错）
@@ -205,6 +214,9 @@ EXPECTED_INDEX_NAMES = {
                         "idx_pb_photo_person_photoCode"),
     "pb_review_log": ("idx_pb_review_log_logCode", "idx_pb_review_log_faceCode",
                       "idx_pb_review_log_opType", "idx_pb_review_log_isRevertible"),
+    # 步骤 9 加：placeCode 来自 .txt 的 UNIQUE，另两条来自 INDEX_SPEC
+    "pb_place": ("idx_pb_place_placeCode", "idx_pb_place_placeName",
+                 "idx_pb_place_photoCount"),
 }
 
 # 各表默认的 upsert 冲突键（业务幂等键；调用方可覆盖）
@@ -213,6 +225,7 @@ CONFLICT_COLUMNS = {
     "pb_person": ("personCode",),
     "pb_person_category": (),          # 唯一性由业务保证 (personCode, category)
     "pb_photo": ("photoCode",),
+    "pb_place": ("placeCode",),
     "pb_face": ("faceCode",),
     "pb_person_centroid": ("personCode", "bucketKey"),
     "pb_photo_person": ("linkKey",),
@@ -226,6 +239,7 @@ QUERY_FILTER_FIELDS = {
     "pb_person": ("personCode", "displayName", "vcardUid", "familyGroupCode"),
     "pb_person_category": ("personCode", "category"),
     "pb_photo": ("photoCode", "relPathHash", "fileHash", "dupOfPhotoCode"),
+    "pb_place": ("placeCode", "placeName"),
     "pb_face": ("faceCode", "photoCode", "personCode"),
     "pb_person_centroid": ("personCode", "bucketKey"),
     "pb_photo_person": ("linkKey", "photoCode", "personCode"),
@@ -244,6 +258,7 @@ ORDER_FIELDS = {
     "pb_person": ("recID", "personCode", "displayName"),
     "pb_person_category": ("recID", "personCode", "category"),
     "pb_photo": ("recID", "shotYear", "takenAt", "fileSize", "scannedYMDHMS"),
+    "pb_place": ("recID", "photoCount", "placeName", "placeCode", "lastShotYear"),
     "pb_face": ("recID", "shotBucket", "quality", "faceCode"),
     "pb_person_centroid": ("recID", "personCode", "bucketKey", "sampleCount"),
     "pb_photo_person": ("recID", "photoCode", "personCode", "confidence"),

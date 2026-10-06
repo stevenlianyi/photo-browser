@@ -1,0 +1,298 @@
+/* ============================================================
+ * Element Plus 主题桥接 —— 把 EP 的 --el-* 变量接到我们的 --pb-* 上
+ * ============================================================
+ * 加载顺序（src/main.js 里不可颠倒）：
+ *   tokens.css                                → 定义 --pb-*
+ *   element-plus/dist/index.css               → EP 默认（:root 上定义 --el-*）
+ *   element-plus/theme-chalk/dark/css-vars.css→ EP 官方深色（html.dark 上定义 --el-*）
+ *   element-theme.css（本文件）               → 覆盖两者
+ *   main.css
+ *
+ * 为什么必须写两遍（:root / html.dark）：
+ *   · :root 与 EP 的 :root 特异度相同 (0,1,0)，靠**加载顺序**取胜（本文件在后）。
+ *   · EP 官方深色是 html.dark (0,1,1)，比我们的 :root (0,1,0) 更强 —— 所以深色下
+ *     必须再用 html.dark 覆盖一次，否则会退回 EP 自带的 #141414 暗色灰，
+ *     与我们的 #14161A / #1E2128 体系脱节。
+ *   · 深色下自动跟随系统时，theme.js 会给 <html> 加 .dark，走的就是下面第二段；
+ *     EP 官方深色本来就只认 html.dark，所以这里不需要 @media 版本。
+ * ============================================================ */
+
+:root {
+  /* ---- 主色（light-3/5/7/8/9 与 dark-2 由 #5B8DEF 按 EP 的 mix 比例算出，
+   *      EP 的 hover / disabled / plain 态都依赖这一组，缺一个就掉色）---- */
+  --el-color-primary: #5b8def;
+  --el-color-primary-light-3: #8caff4;
+  --el-color-primary-light-5: #adc6f7;
+  --el-color-primary-light-7: #ceddfa;
+  --el-color-primary-light-8: #dee8fc;
+  --el-color-primary-light-9: #eff4fd;
+  --el-color-primary-dark-2: #4971bf;
+
+  --el-color-success: #2e9e6b;
+  --el-color-success-light-3: #6dbb97;
+  --el-color-success-light-5: #96cfb5;
+  --el-color-success-light-7: #c0e2d3;
+  --el-color-success-light-8: #d5ece1;
+  --el-color-success-light-9: #eaf5f0;
+  --el-color-success-dark-2: #257e56;
+
+  --el-color-warning: #e8a33d;
+  --el-color-warning-light-3: #efbf77;
+  --el-color-warning-light-5: #f4d19e;
+  --el-color-warning-light-7: #f8e3c5;
+  --el-color-warning-light-8: #faedd8;
+  --el-color-warning-light-9: #fdf6ec;
+  --el-color-warning-dark-2: #ba8231;
+
+  --el-color-danger: #e05a5a;
+  --el-color-danger-light-3: #e98c8c;
+  --el-color-danger-light-5: #f0adad;
+  --el-color-danger-light-7: #f6cece;
+  --el-color-danger-light-8: #f9dede;
+  --el-color-danger-light-9: #fcefef;
+  --el-color-danger-dark-2: #b34848;
+
+  --el-color-error: var(--el-color-danger);
+  --el-color-error-light-3: var(--el-color-danger-light-3);
+  --el-color-error-light-5: var(--el-color-danger-light-5);
+  --el-color-error-light-7: var(--el-color-danger-light-7);
+  --el-color-error-light-8: var(--el-color-danger-light-8);
+  --el-color-error-light-9: var(--el-color-danger-light-9);
+  --el-color-error-dark-2: var(--el-color-danger-dark-2);
+
+  /* EP 的 info 语义在设计稿里是「次文本灰」而不是品牌蓝：
+   * 通知类提示用蓝会和「运行中」状态撞色，灰色更贴合低饱和界面 */
+  --el-color-info: #5a6274;
+  --el-color-info-light-3: #8b91a0;
+  --el-color-info-light-5: #a9aeb8;
+  --el-color-info-light-7: #c8cbd2;
+  --el-color-info-light-8: #d7d9de;
+  --el-color-info-light-9: #ebecef;
+  --el-color-info-dark-2: #484e5d;
+
+  /* ---- 背景 / 文本 / 边框 ---- */
+  --el-bg-color: var(--pb-card);
+  --el-bg-color-page: var(--pb-bg);
+  --el-bg-color-overlay: var(--pb-card);
+  --el-text-color-primary: var(--pb-text);
+  --el-text-color-regular: var(--pb-text-sub);
+  --el-text-color-secondary: var(--pb-text-weak);
+  --el-text-color-placeholder: var(--pb-text-weak);
+  --el-text-color-disabled: var(--pb-text-weak);
+  --el-border-color: var(--pb-border-strong);
+  --el-border-color-light: var(--pb-border);
+  --el-border-color-lighter: var(--pb-border);
+  --el-border-color-extra-light: var(--pb-border);
+  --el-border-color-dark: var(--pb-border-strong);
+  --el-border-color-darker: var(--pb-border-strong);
+  --el-border-color-hover: var(--pb-primary);
+
+  /* ---- 填充 / 遮罩 ---- */
+  --el-fill-color: var(--pb-surface);
+  --el-fill-color-light: var(--pb-surface);
+  --el-fill-color-lighter: var(--pb-bg);
+  --el-fill-color-extra-light: var(--pb-bg);
+  --el-fill-color-dark: var(--pb-border);
+  --el-fill-color-darker: var(--pb-border-strong);
+  --el-fill-color-blank: var(--pb-card);
+  --el-mask-color: rgba(20, 22, 26, 0.8);
+  --el-mask-color-extra-light: rgba(20, 22, 26, 0.35);
+
+  /* ---- 禁用态（EP 默认太浅，深色下会隐形）---- */
+  --el-disabled-bg-color: var(--pb-surface);
+  --el-disabled-text-color: var(--pb-text-weak);
+  --el-disabled-border-color: var(--pb-border);
+
+  /* ---- 圆角 / 阴影 / 字号（对齐设计稿：按钮 8、极轻阴影、正文 14）---- */
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-border-radius-round: 8px;
+  --el-font-size-base: 14px;
+  --el-font-size-small: 12px;
+  --el-font-size-extra-small: 12px;
+  --el-font-size-medium: 14px;
+  --el-font-size-large: 16px;
+  --el-box-shadow: var(--pb-shadow-pop);
+  --el-box-shadow-light: var(--pb-shadow-card);
+  --el-box-shadow-lighter: var(--pb-shadow-card);
+  --el-box-shadow-dark: var(--pb-shadow-pop);
+}
+
+/* ============================================================
+ * 深色：html.dark（手动深色 + 跟随系统命中深色，两种入口都落到这里）
+ * ============================================================ */
+html.dark {
+  --el-color-primary: #7ba6f5;
+  --el-color-primary-light-3: #a3c1f8;
+  --el-color-primary-light-5: #bdd3fa;
+  --el-color-primary-light-7: #d7e4fc;
+  --el-color-primary-light-8: #e5edfd;
+  --el-color-primary-light-9: #f2f6fe;
+  --el-color-primary-dark-2: #6285c4;
+
+  --el-color-success: #4fbe8a;
+  --el-color-success-light-3: #84d2ad;
+  --el-color-success-light-5: #a7dfc5;
+  --el-color-success-light-7: #caecdc;
+  --el-color-success-light-8: #dcf2e8;
+  --el-color-success-light-9: #edf9f3;
+  --el-color-success-dark-2: #3f986e;
+
+  --el-color-warning: #f0b45f;
+  --el-color-warning-light-3: #f5cb8f;
+  --el-color-warning-light-5: #f8daaf;
+  --el-color-warning-light-7: #fbe9cf;
+  --el-color-warning-light-8: #fcf0df;
+  --el-color-warning-light-9: #fef8ef;
+  --el-color-warning-dark-2: #c0904c;
+
+  --el-color-danger: #f07a7a;
+  --el-color-danger-light-3: #f5a2a2;
+  --el-color-danger-light-5: #f8bdbd;
+  --el-color-danger-light-7: #fbd7d7;
+  --el-color-danger-light-8: #fce4e4;
+  --el-color-danger-light-9: #fef1f1;
+  --el-color-danger-dark-2: #c06262;
+
+  --el-color-error: var(--el-color-danger);
+  --el-color-error-light-3: var(--el-color-danger-light-3);
+  --el-color-error-light-5: var(--el-color-danger-light-5);
+  --el-color-error-light-7: var(--el-color-danger-light-7);
+  --el-color-error-light-8: var(--el-color-danger-light-8);
+  --el-color-error-light-9: var(--el-color-danger-light-9);
+  --el-color-error-dark-2: var(--el-color-danger-dark-2);
+
+  --el-color-info: #a8b0c0;
+  --el-color-info-light-3: #c2c8d2;
+  --el-color-info-light-5: #d2d6dc;
+  --el-color-info-light-7: #e2e4e8;
+  --el-color-info-light-8: #ebecef;
+  --el-color-info-light-9: #f5f6f7;
+  --el-color-info-dark-2: #87909f;
+
+  --el-bg-color: var(--pb-card);
+  --el-bg-color-page: var(--pb-bg);
+  --el-bg-color-overlay: var(--pb-card);
+  --el-text-color-primary: var(--pb-text);
+  --el-text-color-regular: var(--pb-text-sub);
+  --el-text-color-secondary: var(--pb-text-weak);
+  --el-text-color-placeholder: var(--pb-text-weak);
+  --el-text-color-disabled: #6b7280;
+  --el-border-color: var(--pb-border-strong);
+  --el-border-color-light: var(--pb-border);
+  --el-border-color-lighter: var(--pb-border);
+  --el-border-color-extra-light: var(--pb-border);
+  --el-border-color-dark: var(--pb-border-strong);
+  --el-border-color-darker: var(--pb-border-strong);
+  --el-border-color-hover: var(--pb-primary);
+
+  --el-fill-color: var(--pb-surface);
+  --el-fill-color-light: var(--pb-surface);
+  --el-fill-color-lighter: var(--pb-bg);
+  --el-fill-color-extra-light: var(--pb-bg);
+  --el-fill-color-dark: var(--pb-border);
+  --el-fill-color-darker: var(--pb-border-strong);
+  --el-fill-color-blank: var(--pb-card);
+  --el-mask-color: rgba(0, 0, 0, 0.7);
+  --el-mask-color-extra-light: rgba(0, 0, 0, 0.4);
+
+  --el-disabled-bg-color: var(--pb-surface);
+  --el-disabled-text-color: #6b7280;
+  --el-disabled-border-color: var(--pb-border);
+}
+
+/* ============================================================
+ * 组件级微调：只做「两套主题下都可读」的兜底，不重画 EP 的视觉
+ * ============================================================ */
+
+/* 深色下主色是**浅蓝**，白字压在上面只有 2.44:1（远低于 AA 的 4.5:1）——
+   品牌色不动，只把实心按钮上的字换成深墨色（6.60:1）。
+   这是深色主题的常规做法：浅色强调块 + 深色文字。
+   ⚠️ 浅色主题不做同样处理：白字压 #5B8DEF 是 3.23:1，属于设计稿指定的
+   品牌色与 AA 的冲突，取舍见步骤 10 报告「需要决策的点」。 */
+html.dark .el-button--primary:not(.is-text):not(.is-link),
+html.dark .el-button--success:not(.is-text):not(.is-link) {
+  --el-button-text-color: #14161a;
+  --el-button-hover-text-color: #14161a;
+  --el-button-active-text-color: #14161a;
+}
+
+/* 表头：设计稿用次级底色而不是加粗；10 万行时更安静 */
+.el-table th.el-table__cell {
+  background-color: var(--pb-surface) !important;
+  color: var(--pb-text-sub);
+  font-weight: 600;
+}
+.el-table tr:hover > td.el-table__cell {
+  background-color: var(--pb-surface) !important;
+}
+.el-table td.el-table__cell,
+.el-table th.el-table__cell.is-leaf {
+  border-bottom-color: var(--pb-border);
+}
+
+/* 空状态文案：EP 默认色在深色下偏暗 */
+.el-table__empty-text,
+.el-empty__description p {
+  color: var(--pb-text-weak);
+}
+
+/* Input / Select：placeholder 在深色下最容易「隐形」，显式给足对比度 */
+.el-input__inner,
+.el-textarea__inner,
+.el-select__placeholder {
+  color: var(--pb-text);
+}
+.el-input__inner::placeholder,
+.el-textarea__inner::placeholder {
+  color: var(--pb-text-weak);
+}
+
+/* Dialog / Drawer / MessageBox */
+.el-dialog__title,
+.el-drawer__header,
+.el-message-box__title {
+  color: var(--pb-text);
+  font-weight: 600;
+}
+.el-dialog__body,
+.el-drawer__body {
+  color: var(--pb-text-sub);
+}
+
+/* Tabs */
+.el-tabs__item {
+  color: var(--pb-text-sub);
+}
+.el-tabs__item.is-active {
+  color: var(--pb-primary-ink);
+}
+
+/* Toast / Message */
+.el-message {
+  background-color: var(--el-bg-color-overlay);
+  border-color: var(--pb-border);
+}
+.el-message__content {
+  color: var(--pb-text) !important;
+}
+
+/* Pagination */
+.el-pagination button,
+.el-pagination .el-pager li {
+  background-color: transparent !important;
+  color: var(--pb-text-sub);
+}
+.el-pagination .el-pager li.is-active {
+  color: var(--pb-primary-ink);
+}
+
+/* 焦点可见：EP 自己清掉了 outline，这里补回键盘焦点环 */
+.el-button:focus-visible,
+.el-input__wrapper:focus-within,
+.el-select__wrapper:focus-within,
+.el-tabs__item:focus-visible,
+.el-pagination button:focus-visible {
+  outline: 2px solid var(--pb-focus);
+  outline-offset: 2px;
+}

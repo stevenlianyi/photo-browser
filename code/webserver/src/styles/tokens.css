@@ -1,0 +1,197 @@
+/* ============================================================
+ * photo-browser 设计 Token —— 双套 CSS 变量（浅色默认 + 跟随系统）
+ * ============================================================
+ * 主题体系（plan/UI/photo-browser UI 设计.md §7.4）
+ * ------------------------------------------------------------
+ *   1) :root                       浅色（**默认**，不跟随系统）
+ *   2) @media prefers-color-scheme: dark + :root:not(.light)
+ *                                  系统深色且用户未强制浅色
+ *   3) html.dark                   手动深色（优先级最高）
+ *   4) html.light                  手动浅色（在系统深色下强制浅色；
+ *                                  色值本身由 :root 提供，这里只固定 color-scheme）
+ *
+ * class 的挂载由 src/utils/theme.js 负责，index.html 的内联脚本负责首屏防闪。
+ * ⚠️ 深色色板在 (2) 与 (3) 各写了一遍 —— 这是「CSS 变量不支持引用组」的固有限制，
+ *    两处必须同步修改；改完用验收第 3/4 条验证两个入口都生效。
+ *
+ * 语义色为什么有 -ink / -soft / -line 三个变体
+ * ------------------------------------------------------------
+ * WCAG AA 对**正文文字**要求 4.5:1、对**图形/描边**要求 3:1。实测（WCAG 相对亮度公式）：
+ *   浅色底 #FFFFFF                        深色底 #1E2128
+ *   success #2E9E6B  3.37:1  图形 ✓ 文字 ✗ │ #4FBE8A  7.02:1  ✓
+ *   info    #5B8DEF  3.22:1  图形 ✓ 文字 ✗ │ #7BA6F5  6.60:1  ✓
+ *   danger  #E05A5A  3.63:1  图形 ✓ 文字 ✗ │ #F07A7A  5.96:1  ✓
+ *   warning #E8A33D  2.16:1  图形 ✗ 文字 ✗ │ #F0B45F  8.74:1  ✓
+ *   text-sub #5A6274 6.05:1 ✓               │ #A8B0C0 7.39:1 ✓
+ *   ⚠️ 浅色 warning 连 3:1 的图形阈值都不到 —— 所以它只做「填充 / 徽标底」，
+ *      描边与圆点改用 --pb-warning-line（3.60:1），文字用 --pb-warning-ink（5.92:1）。
+ *   ⇒ 用法约定：
+ *      徽标/标签   bg-*-soft + text-*-ink      （实测 4.72 / 5.39 / 4.57 / 4.78，全部 ≥4.5）
+ *      人脸框描边   border-2 + 语义图形色         （≥3:1）
+ *      状态文字     text-*-ink
+ *
+ * ⚠️ 与设计稿的差异（刻意为之，为满足验收第 9 条 AA，改动已记入步骤 10 报告）：
+ *   · --pb-text-weak：设计稿 #8A93A6(3.09:1) / #79818F(4.06:1) 均不足 4.5，
+ *     已加深为 #6E7788(4.52:1) / #838B99(4.69:1)。
+ *   · 新增 --pb-primary-ink #3E63C8 / #A9C6FA（5.44:1 / 9.31:1），用于链接与
+ *     需要 4.5:1 的强调文字；品牌主色 #5B8DEF 仍用于按钮底与选中态。
+ * ============================================================ */
+
+:root {
+  color-scheme: light;
+
+  /* ---- 中性面 ---- */
+  --pb-bg: #f7f8fa;
+  --pb-surface: #eef1f6;
+  --pb-card: #ffffff;
+  --pb-border: #e8ebf0;
+  --pb-border-strong: #d8dde6;
+
+  /* ---- 品牌 ---- */
+  --pb-primary: #5b8def;
+  --pb-primary-strong: #4a76d8;
+  --pb-primary-soft: #eaf1fe;
+  --pb-primary-ink: #3e63c8;
+
+  /* ---- 文本 ---- */
+  --pb-text: #1f2430;
+  --pb-text-sub: #5a6274;
+  /* 弱文本：设计稿 #8A93A6 只有 3.09:1，连 4.5 都不到；这里按 AA 取 #656d7e
+     （vs 卡片 5.13:1 / vs 页面底 4.82:1 / vs 次级底 4.53:1） */
+  --pb-text-weak: #656d7e;
+  --pb-text-invert: #ffffff;
+
+  /* ---- 语义色（图形 / 填充）---- */
+  --pb-success: #2e9e6b;
+  --pb-warning: #e8a33d;
+  --pb-danger: #e05a5a;
+  --pb-info: #5b8def;
+  --pb-accent: #f4a7b9;
+
+  /* ---- 语义色（文字安全版，≥4.5:1）---- */
+  --pb-success-ink: #1f7a50;
+  --pb-warning-ink: #8a5a12;
+  --pb-danger-ink: #c23b3b;
+  --pb-info-ink: #3e63c8;
+
+  /* ---- 语义色（浅底，配 -ink 文字）---- */
+  --pb-success-soft: #e7f5ee;
+  --pb-warning-soft: #fdf3e3;
+  --pb-danger-soft: #fcebeb;
+  --pb-info-soft: #eaf1fe;
+  --pb-accent-soft: #fdeff3;
+
+  /* ---- 语义色（描边专用，≥3:1；浅色 warning 图形阈值不足，用它）---- */
+  --pb-warning-line: #b87a16;
+
+  /* ---- 阴影：极轻；深色下改为「无阴影 + 边框」---- */
+  --pb-shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04);
+  --pb-shadow-pop: 0 8px 24px rgba(16, 24, 40, 0.1);
+
+  /* ---- 焦点环 / 骨架屏 / 照片占位底 ---- */
+  --pb-focus: #5b8def;
+  --pb-skeleton: #eef1f6;
+  --pb-photo-bg: #eff1f5;
+}
+
+/* ---- 深色：跟随系统（用户未强制浅色时生效）---- */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    color-scheme: dark;
+
+    --pb-bg: #14161a;
+    --pb-surface: #191c22;
+    --pb-card: #1e2128;
+    --pb-border: #2b2f38;
+    --pb-border-strong: #363b45;
+
+    --pb-primary: #7ba6f5;
+    --pb-primary-strong: #5f8be8;
+    --pb-primary-soft: #1c2a44;
+    --pb-primary-ink: #a9c6fa;
+
+    --pb-text: #e8eaf0;
+    --pb-text-sub: #a8b0c0;
+    --pb-text-weak: #8b93a1;
+    --pb-text-invert: #14161a;
+
+    --pb-success: #4fbe8a;
+    --pb-warning: #f0b45f;
+    --pb-danger: #f07a7a;
+    --pb-info: #7ba6f5;
+    --pb-accent: #e08fa5;
+
+    --pb-success-ink: #7fd9ae;
+    --pb-warning-ink: #f3c583;
+    --pb-danger-ink: #f5a9a9;
+    --pb-info-ink: #a9c6fa;
+
+    --pb-success-soft: #16342a;
+    --pb-warning-soft: #3a2e17;
+    --pb-danger-soft: #3a2020;
+    --pb-info-soft: #1c2a44;
+    --pb-accent-soft: #3a2530;
+
+    --pb-warning-line: #f0b45f;
+
+    /* 深色不用阴影，靠边框区分层次 */
+    --pb-shadow-card: none;
+    --pb-shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+    --pb-focus: #7ba6f5;
+    --pb-skeleton: #23262e;
+    --pb-photo-bg: #17191e;
+  }
+}
+
+/* ---- 深色：手动强制 ---- */
+html.dark {
+  color-scheme: dark;
+
+  --pb-bg: #14161a;
+  --pb-surface: #191c22;
+  --pb-card: #1e2128;
+  --pb-border: #2b2f38;
+  --pb-border-strong: #363b45;
+
+  --pb-primary: #7ba6f5;
+  --pb-primary-strong: #5f8be8;
+  --pb-primary-soft: #1c2a44;
+  --pb-primary-ink: #a9c6fa;
+
+  --pb-text: #e8eaf0;
+  --pb-text-sub: #a8b0c0;
+  --pb-text-weak: #8b93a1;
+  --pb-text-invert: #14161a;
+
+  --pb-success: #4fbe8a;
+  --pb-warning: #f0b45f;
+  --pb-danger: #f07a7a;
+  --pb-info: #7ba6f5;
+  --pb-accent: #e08fa5;
+
+  --pb-success-ink: #7fd9ae;
+  --pb-warning-ink: #f3c583;
+  --pb-danger-ink: #f5a9a9;
+  --pb-info-ink: #a9c6fa;
+
+  --pb-success-soft: #16342a;
+  --pb-warning-soft: #3a2e17;
+  --pb-danger-soft: #3a2020;
+  --pb-info-soft: #1c2a44;
+  --pb-accent-soft: #3a2530;
+
+  --pb-warning-line: #f0b45f;
+
+  --pb-shadow-card: none;
+  --pb-shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+  --pb-focus: #7ba6f5;
+  --pb-skeleton: #23262e;
+  --pb-photo-bg: #17191e;
+}
+
+/* 手动浅色：色值沿用 :root，这里只把系统深色下的原生控件（滚动条、表单）拉回浅色 */
+html.light {
+  color-scheme: light;
+}
