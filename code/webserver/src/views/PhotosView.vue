@@ -18,18 +18,61 @@
 -->
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
-import { LayoutGrid, RotateCw, Rows3, Search } from 'lucide-vue-next'
+import { RouterLink, useRoute } from 'vue-router'
+import { Columns2, LayoutGrid, RotateCw, Rows3, Search } from 'lucide-vue-next'
 import PhotoThumb from '@/components/photo/PhotoThumb.vue'
+import DuplicateCompare from '@/components/photo/DuplicateCompare.vue'
 import { usePhotosStore } from '@/store/photos'
 import { useSettingsStore } from '@/store/settings'
+import { placeDisplayName, placeRawName } from '@/api/place'
 import { formatCount } from '@/utils/format'
+// 进照片详情要**声明来源**：详情页的「返回」才知道该回哪（见 utils/photoReturn.js）
+import { currentSource, photoDetailLink } from '@/utils/photoReturn'
 
+const route = useRoute()
+/**
+ * 进照片详情的来源声明：`fullPath` 带上当前筛选 ——
+ * 从筛选结果里点开一张、再点「返回」，看到的是同一批照片，而不是被清空的全库。
+ * `name` 用页面名（「照片流」），详情页的返回按钮照它显示文案。
+ */
+const photoSource = computed(() => currentSource(route, '照片流'))
 const photos = usePhotosStore()
 const settings = useSettingsStore()
 
 const viewMode = computed(() => settings.photoViewMode)
 const filters = photos.filters
+
+/**
+ * 把 URL 上的筛选带进 store（R5）。
+ *
+ * ⚠️ 为什么必须有这一步：人物详情页的「去过的地方」跳过来的是
+ *    `/photos?personCode=X&placeName=纽约`（**人物 + 地点双条件**）。
+ *    照片流的状态原本只活在 store 里 —— 不读 query 的话，那个链接会跳到
+ *    一个**完全没有筛选**的照片流（「共 663 张照片」），
+ *    而页面上没有任何报错：用户只会觉得「点了个地点，结果什么都没筛」。
+ *
+ * ⚠️ 用 `Object.assign` 原地改（不能换对象）：与 `resetFilters()` 同一个理由 ——
+ *    本文件里的 `filters` 持有的是**当时那个对象**，换新对象后这里手上的还是旧的。
+ * 返回 true 表示确实改了（调用方据此决定要不要重取）。
+ */
+function applyQuery() {
+  const query = route.query || {}
+  const next = {
+    keyword: String(query.keyword || ''),
+    personCode: String(query.personCode || ''),
+    placeName: String(query.placeName || ''),
+    shotYearFrom: query.shotYearFrom ? Number(query.shotYearFrom) : '',
+    shotYearTo: query.shotYearTo ? Number(query.shotYearTo) : '',
+  }
+  const changed = Object.keys(next)
+    .some((key) => String(filters[key] ?? '') !== String(next[key] ?? ''))
+  if (changed) Object.assign(filters, next)
+  return changed
+}
+
+/** 重复照片对比抽屉（可选功能，但「重复照片」筛选已经在上面摆着了，
+ *  给一个只能看不能比的筛选入口等于半成品） */
+const dupVisible = ref(false)
 
 /** 年份下拉的数据源：从时间轴年表反推（库里有哪些年就有哪些选项） */
 const yearOptions = computed(() =>
@@ -38,6 +81,48 @@ const yearOptions = computed(() =>
     .filter(Boolean)
     .sort((a, b) => b - a),
 )
+
+/**
+ * 地点下拉的选项（R5：**给中文名**）。
+ *
+ * 两条刻意的做法
+ * -------------
+ * ① **label 用 `placeDisplayName()`**（中文优先）。原来直接渲染 `placeName`，
+ *    于是 GPS 地点在筛选框里永远是 `CN, Beijing, Datun` 这种英文串。
+ *    英文原名放进 `title`（排障要看「这个中文名是从哪个键算出来的」）。
+ * ② **同名去重**（DR-36）：`pb_place` 里有 3 组「两个 placeCode 同一个中文名」
+ *    （大屯/望京 都是「北京市 · 朝阳区」）。不归并的话下拉里会出现两条**一模一样**
+ *    的选项，用户选哪条都觉得自己可能选错了。
+ *    归并后 value 取**显示名**，而 `/api/photos?placeName=` 两套都收
+ *    （`placeStore.resolvePlaceFilter` 会用 `IN` 把同名的多个英文键一起命中的）
+ *    —— 所以「一个选项筛出两处的照片」这件事在后端已经是对的。
+ */
+const placeOptions = computed(() => {
+  const buckets = new Map()
+  for (const place of photos.placeOptions || []) {
+    const label = placeDisplayName(place)
+    const found = buckets.get(label)
+    if (found) {
+      found.photoCount += Number(place.photoCount) || 0
+      found.placeCodes.push(place.placeCode)
+      continue
+    }
+    buckets.set(label, {
+      label,
+      raw: placeRawName(place),
+      photoCount: Number(place.photoCount) || 0,
+      placeCodes: [place.placeCode],
+      source: place,
+    })
+  }
+  return [...buckets.values()]
+})
+
+/** 列表项底部那行小字：有地点给**中文名**，没有才回退机型 */
+function captionOf(photo) {
+  if (photo?.placeName || photo?.placeZh) return placeDisplayName(photo)
+  return photo?.cameraModel || ''
+}
 
 async function reload() {
   if (viewMode.value === 'timeline') {
@@ -89,12 +174,21 @@ function setupObserver() {
 }
 
 onMounted(async () => {
+  // ⚠️ 顺序：**先**把 URL 上的筛选灌进 store，再取数据 ——
+  //    反过来的话首屏会先按「无筛选」拉一页（663 张），再被筛选后的结果替换，
+  //    用户会看到列表闪一下全库照片。
+  applyQuery()
   photos.loadFilterOptions()
   // 年份下拉的数据源来自时间轴年表，所以**首屏就要取**
   // （只在切到时间轴视图时才取的话，网格视图的「年份」下拉会永远是空的 ——
   //  看着像坏了，而它其实是筛选条件之一，必须任何视图下都能用）
   await Promise.all([reload(), photos.fetchTimelineYears()])
   setupObserver()
+})
+
+// 同页再点另一个「去过的地方」链接（路由参数变了但组件没重建）也要生效
+watch(() => route.query, () => {
+  if (applyQuery()) reload()
 })
 
 onBeforeUnmount(() => {
@@ -223,16 +317,35 @@ function isEager(index) {
             filterable
           >
             <el-option
-              v-for="place in photos.placeOptions"
-              :key="place.placeCode || place.placeName"
-              :label="place.placeName"
-              :value="place.placeName"
-            />
+              v-for="place in placeOptions"
+              :key="place.placeCodes[0] || place.label"
+              :label="place.label"
+              :value="place.label"
+            >
+              <span class="flex items-center justify-between gap-2" :title="place.raw">
+                <span class="truncate">{{ place.label }}</span>
+                <span class="shrink-0 text-caption tabular-nums text-ink-weak">
+                  {{ formatCount(place.photoCount) }}
+                  <template v-if="place.placeCodes.length > 1">
+                    · {{ place.placeCodes.length }} 处
+                  </template>
+                </span>
+              </span>
+            </el-option>
           </el-select>
         </div>
 
         <el-checkbox v-model="photos.onlyWithFace">仅含人脸</el-checkbox>
         <el-checkbox v-model="photos.onlyDuplicate">重复照片</el-checkbox>
+        <el-tooltip
+          v-if="photos.onlyDuplicate"
+          placement="bottom"
+          content="按内容指纹分组并排对比：文件名/尺寸会变，但 fileHash 相同就是同一份内容"
+        >
+          <el-button size="small" @click="dupVisible = true">
+            <Columns2 class="mr-1 h-3.5 w-3.5" aria-hidden="true" />对比
+          </el-button>
+        </el-tooltip>
 
         <div class="ml-auto flex items-center gap-2">
           <label class="pb-hint" for="ph-sort">排序</label>
@@ -292,13 +405,17 @@ function isEager(index) {
           style="contain-intrinsic-size: auto 190px"
         >
           <RouterLink
-            :to="`/photos/${photo.photoCode}`"
+            :to="photoDetailLink(photo.photoCode, photoSource)"
             class="block"
             :aria-label="`打开照片详情：${photo.relPath || photo.photoCode}`"
           >
             <PhotoThumb :photo="photo" :eager="isEager(index)" thumb-size="200" />
-            <span class="mt-1 block truncate text-caption text-ink-weak">
-              {{ photo.placeName || photo.cameraModel || '' }}
+            <!-- 有地点给**中文名**（R5）；没有才回退机型。英文原名进 tooltip -->
+            <span
+              class="mt-1 block truncate text-caption text-ink-weak"
+              :title="placeRawName(photo) || undefined"
+            >
+              {{ captionOf(photo) }}
             </span>
           </RouterLink>
         </li>
@@ -374,7 +491,7 @@ function isEager(index) {
                   class="w-20"
                 >
                   <RouterLink
-                    :to="`/photos/${photo.photoCode}`"
+                    :to="photoDetailLink(photo.photoCode, photoSource)"
                     class="block"
                     :aria-label="`打开照片详情：${photo.relPath || photo.photoCode}`"
                   >
@@ -401,5 +518,8 @@ function isEager(index) {
         @current-change="onPageChange"
       />
     </footer>
+
+    <!-- 重复照片对比（可选功能） -->
+    <DuplicateCompare v-model="dupVisible" />
   </div>
 </template>

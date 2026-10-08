@@ -123,10 +123,15 @@ OP_UNDO: str = "UNDO"                    # 回滚一条 SPLIT/MERGE
 #   就会出现「有一半的日志 fromPersonCode 是 NULL」。
 OP_DISABLE: str = "DISABLE"              # 人员停用（DR-19；不可撤销）
 OP_ENABLE: str = "ENABLE"                # 人员恢复（DR-19；不可撤销）
+# ⚠️ BUCKET_FIX 是 DR-42（照片年代修正）加进来的：它**不搬动任何人脸归属**，
+#    改的是 pb_photo.shotYearOverride，然后重刷这张照片全部人脸的 shotBucket。
+#    之所以登记进这张表而不是另开一张：它是**可撤销的人工纠错**，
+#    沿用同一个「操作历史 + 撤销」入口，用户不必学第二套心智模型。
+OP_BUCKET_FIX: str = "BUCKET_FIX"        # 照片年代修正（DR-42；可撤销）
 
 OP_TYPES: tuple = (OP_ASSIGN, OP_FIX, OP_UNKNOWN, OP_STRANGER,
                    OP_BATCH_ASSIGN, OP_SPLIT, OP_MERGE, OP_UNDO,
-                   OP_DISABLE, OP_ENABLE)
+                   OP_DISABLE, OP_ENABLE, OP_BUCKET_FIX)
 
 #: fix() 的三个动作 -> (opType, 落 pb_face 的方式)
 FIX_ACTIONS: dict = {

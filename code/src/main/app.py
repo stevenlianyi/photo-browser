@@ -53,9 +53,13 @@ from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
 from api import browse as browseApi                               # noqa: E402
 from api import contacts as contactsApi                           # noqa: E402
 from api import dto as dto                                        # noqa: E402
+from api import face as faceApi                                   # noqa: E402
+from api import match as matchApi                                 # noqa: E402
 from api import photoAction as photoActionApi                     # noqa: E402
+from api import place as placeApi                                 # noqa: E402
 from api import review as reviewApi                               # noqa: E402
 from api import scan as scanApi                                   # noqa: E402
+from api import settings as settingsApi                           # noqa: E402
 from api import static as staticApi                               # noqa: E402
 
 from fastapi import FastAPI                                      # noqa: E402
@@ -184,11 +188,21 @@ def createApp(dbFile: str = None, photoRoot: str = None, thumbRoot: str = None,
         # lifespan 是官方推荐写法，也少一条 DeprecationWarning。
         appState["config"] = _startup(dbFile, photoRoot, thumbRoot)
         cfg = appState["config"]
+        # 地点中文名的地理数据**在这里预热**（DR-29）。
+        # 为什么不在第一次 /api/places 时才加载：那次要解压 5.7MB gzip
+        # 并建 2834 个多边形 + 两棵 STRtree，实测约 1.4 秒。落在请求路径上，
+        # 用户看到的是「点开地点页先卡一下」，而这个服务绑回环、单人本机用，
+        # 启动时多花这点时间完全可接受。详见 placeNameZh.warmUp 的说明。
+        # ⚠️ 预热失败**绝不影响启动**：它只会让 nameZh 为 NULL、界面回退英文。
+        from processor.place import placeNameZh as placeNameZh
+        zhState = placeNameZh.warmUp()
+        appState["placeZh"] = zhState
         print("==== photo-browser 服务启动 ====")
         print("  photo    : %s（**只读**）" % cfg["photo"])
         print("  thumb    : %s（生成物，可随时重建）" % cfg["thumb"])
         print("  database : %s" % cfg["database"])
         print("  pb_photo : %s" % ("就绪" if cfg["photoTable"] else "缺失，先跑 build_db/scan"))
+        print("  地点中文名: %s" % zhState.get("text", "?"))
         print("  CORS     : %s（仅回环来源）" % ("开" if cors else "关"))
         print("  监听     : http://%s:%d（仅回环）"
               % (basicSettings.SERVER_HOST, basicSettings.SERVER_PORT))
@@ -203,6 +217,14 @@ def createApp(dbFile: str = None, photoRoot: str = None, thumbRoot: str = None,
         #    出现在**另一个线程**，主线程只会看到「日志里莫名其妙多了一堆错」。
         from api import scan as scanApi
         scanApi.resetScheduler()
+        #
+        # ①之二 人脸识别调度器：**同样必须排在关库之前**，理由逐条同上。
+        #      它与人脸提取的**进程池**是两层东西：resetScheduler 等的是
+        #      后台线程，而那个线程里还套着 engine.face.pool 的
+        #      ProcessPoolExecutor（子进程各自持一份模型权重，
+        #      收尾要等它们把手上那批算完，否则 faceStore 的事务会落在半路）。
+        from api import face as faceApi
+        faceApi.resetScheduler()
         #
         # ② 缩略图线程池：`wait=True` —— 等**在途**的生成任务做完。
         #    ⚠️ 原来是 `wait=False`（不等待），这里改掉的原因：
@@ -232,12 +254,24 @@ def createApp(dbFile: str = None, photoRoot: str = None, thumbRoot: str = None,
     # ⚠️ 顺序 = 「具体 -> 泛化」。FastAPI 按注册顺序匹配；虽然我们的路径
     #   互不歧义（/review/pending 与 /review/{faceCode}/assign 段数不同），
     #   但保持这个顺序能让人读代码时不必再想这件事。
+    # ⚠️ `placeApi` **必须排在 `browseApi` 之前**（R5）：`/api/places*` 整个
+    #   命名空间只在 place.py 一处注册，而它内部有 `{placeCode}` 通配段与
+    #   静态段 `/places/rebuild` 的先后要求 —— 同模块内靠声明顺序保证。
+    #   两个模块各注册一条 `/api/places` 时，后注册的那条会被**静默遮蔽**。
     application.include_router(staticApi.router, prefix="/api")
     application.include_router(scanApi.router, prefix="/api")
+    application.include_router(faceApi.router, prefix="/api")
+    # 人脸匹配（步骤 6 的 Web 入口）：把「待确认队列」里的脸自动归属给某人。
+    # ⚠️ 它**不是** pb_scan_job 里的任务（无 jobCode/无批次），前缀必须自成一个
+    #   命名空间 /api/match/**：/api/face/** 已经被 static.py 的 {faceCode}
+    #   裁剪图路由占着，任何静态段都可能被它接走并 404（见 api/face.py 文件头）。
+    application.include_router(matchApi.router, prefix="/api")
+    application.include_router(placeApi.router, prefix="/api")
     application.include_router(browseApi.router, prefix="/api")
     application.include_router(photoActionApi.router, prefix="/api")
     application.include_router(reviewApi.router, prefix="/api")
     application.include_router(contactsApi.router, prefix="/api")
+    application.include_router(settingsApi.router, prefix="/api")
 
     # ---- 统一错误体 { code, message }（含 404 / 422 / 未处理异常）----
     # ⚠️ 必须**在路由注册之后**装：FastAPI 的 exception_handler 与
@@ -252,7 +286,11 @@ def createApp(dbFile: str = None, photoRoot: str = None, thumbRoot: str = None,
     @application.get("/api/health", tags=["meta"], summary="健康检查")
     def health() -> JSONResponse:
         return JSONResponse({"ok": True, "version": _VERSION,
-                             "paths": appState["config"] or paths.all_paths()})
+                             "paths": appState["config"] or paths.all_paths(),
+                             # ⚠️ 地点中文名数据源状态放在 /api/health 里而不是新建端点：
+                             #   「界面全是英文」的第一诊断动作就是看健康检查，
+                             #   多一个端点就多一处「排障时忘了看」的可能。
+                             "placeZh": appState.get("placeZh") or {}})
 
     # ---- 静态资源（前端构建产物；步骤 10 之前目录不存在，属正常）----
     #挂载必须放在所有 /api 路由**之后**：挂在 "/" 上的兜底路由会吞掉根路径下的
@@ -305,7 +343,8 @@ def createApp(dbFile: str = None, photoRoot: str = None, thumbRoot: str = None,
             return JSONResponse({
                 "ok": True, "name": "photo-browser", "version": _VERSION,
                 "docs": "/docs",
-                "routers": ["static", "scan", "browse", "review", "contacts"],
+                "routers": ["static", "scan", "browse", "review",
+                                          "contacts", "settings"],
             })
 
     return application

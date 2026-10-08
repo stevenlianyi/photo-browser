@@ -80,7 +80,7 @@ from config import basicSettings as basicSettings                 # noqa: E402
 from database.auto_generated import sqliteCommon                  # noqa: E402
 from engine.match import bucket as bucket                         # noqa: E402
 
-_VERSION = "20261006"
+_VERSION = "20261008"
 
 _LOG = misc.setLogNew("rebucket", "rebucket.log")
 
@@ -197,12 +197,38 @@ def expectedBucketOf(faceRow: dict, personRow: dict = None, shotYear=None) -> st
     return shotBucketFor(shotYear, birthday)
 
 
+def effectiveShotYear(photoRow) -> object:
+    """照片的**有效拍摄年**：人工修正优先于机器读到的年份（DR-42）。
+
+    `pb_photo.shotYear` 来自 EXIF -> 文件名 -> mtime 三条兜底链，而老相册的
+    翻拍件/扫描件给的都是"翻拍那一刻"；用户手工填的 `shotYearOverride`
+    才是这张照片真正的年代。
+
+    ⚠️ 只做「有值就用、没值才回落到 shotYear」这一条判断，**不做区间校验**：
+       override 写库时已经过 bucket.validShotYear（见 processor/photoTimeFix），
+       这里再卡一次区间只会让"库里有一条越界值"这件事从分桶结果里消失。
+       越界值继续走 bucketKeyAdaptive 的 validShotYear -> 返回空桶键（=不进跨桶比对），
+       是**可见**的，比静默按某个合法年份分桶安全。
+    ⚠️ 空串也当"未修正"：SQLite 里该列应为 NULL，但手工改过库的行可能是 ''。
+    """
+    row = photoRow or {}
+    override = row.get("shotYearOverride")
+    if override is None or str(override).strip() == "":
+        return row.get("shotYear")
+    return override
+
+
 def shotYearOf(photoCode: str, cache: dict = None) -> object:
-    """pb_photo.photoCode -> shotYear（取不到返回 None）。
+    """pb_photo.photoCode -> **有效拍摄年**（取不到返回 None）。
 
     cache 可选：传一个 dict 就在里面复用结果。全库刷桶时同一个 photoCode
     会被反复用到（一张照片里多张脸、以及 scanYear 为空的照片），
     缓存能把 N 次查询压成 1 次。
+
+    ⚠️ 返回的是 effectiveShotYear（人工修正优先），不是裸 shotYear —— DR-42 之后
+       「照片是哪一年的」全项目只有这一个答案。这是本模块唯一一处读 pb_photo
+       的地方，改在这里就覆盖了 rebucketFace / rebucketPhoto / rebucketPerson /
+       rebucketAll 全部刷桶路径（它们都经 expectedBucketOf -> 本函数）。
     """
     code = str(photoCode or "")
     if not code:
@@ -211,7 +237,7 @@ def shotYearOf(photoCode: str, cache: dict = None) -> object:
         return cache[code]
     year = None
     for row in sqliteCommon.query_pb_photo("pb_photo", photoCode=code, mode="light"):
-        year = row.get("shotYear")
+        year = effectiveShotYear(row)
         break
     if cache is not None:
         cache[code] = year

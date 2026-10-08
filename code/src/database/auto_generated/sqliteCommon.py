@@ -7,10 +7,10 @@
 #   改表 = 改 pb_*.txt + 重跑生成器；直接改这里会在下次生成时被覆盖，
 #   且 .txt 与本文件会静默不一致（字段/索引/长度全部对不上）。
 #
-#   生成时间 : 2026-10-06 17:03:12
+#   生成时间 : 2026-10-08 17:29:30
 #   生成器   : database/sqliteCodeGenerator.py v20261005
 #   数据源   : pb_family.txt, pb_person.txt, pb_person_category.txt, pb_place.txt, pb_photo.txt, pb_face.txt, pb_person_centroid.txt, pb_photo_person.txt, pb_scan_job.txt, pb_review_log.txt
-#   表数量   : 10 张，字段 181 个，索引 26 个
+#   表数量   : 10 张，字段 186 个，索引 27 个
 #
 #   上层：processor / engine / api —— **业务层禁止裸 SQL，一律调本文件**（数据库设计.md §1.2）
 #   下层：common/sqliteHandle.py（读写双连接 + PRAGMA + %s->? 占位符转换）
@@ -184,6 +184,10 @@ TABLE_COLUMNS = {
             "sqliteType": 'TEXT', "length": 200, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
             "autoIncrement": False, "default": None, "comment": '通讯录头像 相对thumbRoot的路径 vcards/xx/sha1(personCode).jpg'},
+        {"name": 'displayNamePinyin', "type": 'VARCHAR(512)',
+            "sqliteType": 'TEXT', "length": 512, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '姓名拼音检索串 空格分隔的全拼+首字母 由common/pinyin.personPinyin生成 只读派生列 供persons/contacts的keyword搜索 不对外暴露也不接受前端写入 注意:必须放在标准七字段之前 因为SQLite的ALTER TABLE ADD COLUMN只能追加到末尾'},
         {"name": 'source', "type": 'TINYINT',
             "sqliteType": 'INTEGER', "length": None, "scale": None,
             "notNull": True, "unique": False, "primaryKey": False,
@@ -279,7 +283,7 @@ TABLE_COLUMNS = {
         {"name": 'placeName', "type": 'VARCHAR(256)',
             "sqliteType": 'TEXT', "length": 256, "scale": None,
             "notNull": True, "unique": False, "primaryKey": False,
-            "autoIncrement": False, "default": None, "comment": '地点显示名 与 pb_photo.placeName 同值'},
+            "autoIncrement": False, "default": None, "comment": '聚合键兼显示名 来源=目录名(优先)或GPS逆地理 目录名地点已是中文故nameZh可空'},
         {"name": 'source', "type": 'TINYINT',
             "sqliteType": 'INTEGER', "length": None, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
@@ -304,6 +308,10 @@ TABLE_COLUMNS = {
             "sqliteType": 'NUMERIC', "length": 10, "scale": 7,
             "notNull": False, "unique": False, "primaryKey": False,
             "autoIncrement": False, "default": None, "comment": '中心经度 步骤12地图用'},
+        {"name": 'nameZh', "type": 'VARCHAR(128)',
+            "sqliteType": 'TEXT', "length": 128, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '地点中文名 境内区县级 境外为空回退placeName 非派生列rebuild绝不覆盖'},
         {"name": 'label', "type": 'VARCHAR(32)',
             "sqliteType": 'TEXT', "length": 32, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
@@ -382,6 +390,10 @@ TABLE_COLUMNS = {
             "sqliteType": 'INTEGER', "length": None, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
             "autoIncrement": False, "default": None, "comment": '拍摄年份 分桶键'},
+        {"name": 'shotYearOverride', "type": 'SMALLINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '人工修正拍摄年 分桶优先 空=未修正(DR-42)'},
         {"name": 'lat', "type": 'DECIMAL(10,7)',
             "sqliteType": 'NUMERIC', "length": 10, "scale": 7,
             "notNull": False, "unique": False, "primaryKey": False,
@@ -394,6 +406,10 @@ TABLE_COLUMNS = {
             "sqliteType": 'TEXT', "length": 256, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
             "autoIncrement": False, "default": None, "comment": '逆地理地点'},
+        {"name": 'placeNameDir', "type": 'VARCHAR(128)',
+            "sqliteType": 'TEXT', "length": 128, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '目录名解析出的地点名 非派生列 扫描与rebuild均只填空不覆盖'},
         {"name": 'cameraModel', "type": 'VARCHAR(128)',
             "sqliteType": 'TEXT', "length": 128, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
@@ -697,15 +713,19 @@ TABLE_COLUMNS = {
         {"name": 'pendingCount', "type": 'INT',
             "sqliteType": 'INTEGER', "length": None, "scale": None,
             "notNull": True, "unique": False, "primaryKey": False,
-            "autoIncrement": False, "default": '0', "comment": '待人工确认数'},
+            "autoIncrement": False, "default": '0', "comment": '待确认张数 人脸识别任务=新提取的脸条数 扫描任务=疑似移动待确认张数'},
         {"name": 'lastCursor', "type": 'VARCHAR(1024)',
             "sqliteType": 'TEXT', "length": 1024, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
-            "autoIncrement": False, "default": None, "comment": '断点游标 最后处理文件相对路径'},
+            "autoIncrement": False, "default": None, "comment": '断点游标 扫描=最后处理文件相对路径 人脸识别=最后处理的photoCode'},
         {"name": 'jobStatus', "type": 'VARCHAR(24)',
             "sqliteType": 'TEXT', "length": 24, "scale": None,
             "notNull": True, "unique": False, "primaryKey": False,
             "autoIncrement": False, "default": "'IDLE'", "comment": 'IDLE或RUNNING或PAUSED或DONE或FAILED'},
+        {"name": 'jobType', "type": 'TINYINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": '0照片扫描 1人脸识别'},
         {"name": 'startedYMDHMS', "type": 'VARCHAR(16)',
             "sqliteType": 'TEXT', "length": 16, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
@@ -877,6 +897,7 @@ TABLE_INDEXES = {
     ),
     'pb_scan_job': (
         {"name": 'idx_pb_scan_job_jobCode', "columns": ('jobCode',), "unique": True, "where": None},
+        {"name": 'idx_pb_scan_job_jobType', "columns": ('jobType',), "unique": False, "where": None},
     ),
     'pb_review_log': (
         {"name": 'idx_pb_review_log_logCode', "columns": ('logCode',), "unique": True, "where": None},
@@ -906,21 +927,21 @@ QUERY_FILTER_FIELDS = {
     'pb_person': ('personCode', 'displayName', 'vcardUid', 'familyGroupCode'),
     'pb_person_category': ('personCode', 'category'),
     'pb_place': ('placeCode', 'placeName'),
-    'pb_photo': ('photoCode', 'relPathHash', 'fileHash', 'dupOfPhotoCode'),
+    'pb_photo': ('photoCode', 'relPathHash', 'fileHash', 'dupOfPhotoCode', 'scanState'),
     'pb_face': ('faceCode', 'photoCode', 'personCode'),
     'pb_person_centroid': ('personCode', 'bucketKey'),
     'pb_photo_person': ('linkKey', 'photoCode', 'personCode'),
-    'pb_scan_job': ('jobCode', 'jobStatus'),
+    'pb_scan_job': ('jobCode', 'jobStatus', 'jobType'),
     'pb_review_log': ('logCode', 'opType', 'faceCode', 'photoCode', 'fromPersonCode', 'toPersonCode'),
 }
 
 # 表名 -> 允许为 NULL 的字段（query 的 nullFields 参数白名单：待确认队列等）
 NULLABLE_FIELDS = {
     'pb_family': ('notes', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
-    'pb_person': ('familyName', 'familyGroupCode', 'relation', 'email', 'phone', 'birthday', 'vcardUid', 'avatarFaceCode', 'avatarFile', 'ownerID', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
+    'pb_person': ('familyName', 'familyGroupCode', 'relation', 'email', 'phone', 'birthday', 'vcardUid', 'avatarFaceCode', 'avatarFile', 'displayNamePinyin', 'ownerID', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_person_category': ('label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
-    'pb_place': ('source', 'photoCount', 'firstShotYear', 'lastShotYear', 'centerLat', 'centerLon', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
-    'pb_photo': ('mimeType', 'width', 'height', 'orientation', 'takenAt', 'shotYear', 'lat', 'lon', 'placeName', 'cameraModel', 'dupOfPhotoCode', 'movedToPhotoCode', 'scannedYMDHMS', 'ownerID', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
+    'pb_place': ('source', 'photoCount', 'firstShotYear', 'lastShotYear', 'centerLat', 'centerLon', 'nameZh', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
+    'pb_photo': ('mimeType', 'width', 'height', 'orientation', 'takenAt', 'shotYear', 'shotYearOverride', 'lat', 'lon', 'placeName', 'placeNameDir', 'cameraModel', 'dupOfPhotoCode', 'movedToPhotoCode', 'scannedYMDHMS', 'ownerID', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_face': ('personCode', 'clusterCode', 'bbox', 'detScore', 'poseYaw', 'posePitch', 'quality', 'embedding', 'shotBucket', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_person_centroid': ('centroid', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_photo_person': ('faceCode', 'confidence', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
@@ -1690,6 +1711,7 @@ def createTableSQL_pb_person(tableName):
         "vcardUid TEXT,"
         "avatarFaceCode TEXT,"
         "avatarFile TEXT,"
+        "displayNamePinyin TEXT,"
         "source INTEGER NOT NULL DEFAULT 0,"
         "isConfirmed INTEGER NOT NULL DEFAULT 0,"
         "ownerID TEXT,"
@@ -2174,6 +2196,7 @@ def createTableSQL_pb_place(tableName):
         "lastShotYear INTEGER,"
         "centerLat NUMERIC,"
         "centerLon NUMERIC,"
+        "nameZh TEXT,"
         "label TEXT,"
         "memo TEXT,"
         "regID TEXT,"
@@ -2421,9 +2444,11 @@ def createTableSQL_pb_photo(tableName):
         "orientation INTEGER,"
         "takenAt TEXT,"
         "shotYear INTEGER,"
+        "shotYearOverride INTEGER,"
         "lat NUMERIC,"
         "lon NUMERIC,"
         "placeName TEXT,"
+        "placeNameDir TEXT,"
         "cameraModel TEXT,"
         "faceCount INTEGER NOT NULL DEFAULT 0,"
         "isDuplicate INTEGER NOT NULL DEFAULT 0,"
@@ -2462,8 +2487,9 @@ def indexSqlList_pb_photo():
 
 # pb_photo 查询记录
 def query_pb_photo(tableName, recID = 0, photoCode = "", relPathHash = "", fileHash = "",
-        dupOfPhotoCode = "", nullFields = (), delFlag = "0", mode = "full",
-        orderBy = "recID", descFlag = False, limitNum = 0, offsetNum = 0):
+        dupOfPhotoCode = "", scanState = "", nullFields = (), delFlag = "0",
+        mode = "full", orderBy = "recID", descFlag = False, limitNum = 0,
+        offsetNum = 0):
     """查 pb_photo。
 
     参数
@@ -2473,6 +2499,7 @@ def query_pb_photo(tableName, recID = 0, photoCode = "", relPathHash = "", fileH
     relPathHash  : str  —— 非空时等值过滤
     fileHash     : str  —— 非空时等值过滤
     dupOfPhotoCode: str  —— 非空时等值过滤
+    scanState    : str  —— 非空时等值过滤
     nullFields   : tuple  —— 追加 'field IS NULL' 条件，字段必须在 NULLABLE_FIELDS 白名单内
     delFlag      : str  —— "0" 只看未删（默认）；"1" 只看已删；"" / "*" 不限
     mode         : str  —— "full" 全部列；"light" 剔除 BLOB 列（人脸向量等），列表页用它省内存
@@ -2500,7 +2527,7 @@ def query_pb_photo(tableName, recID = 0, photoCode = "", relPathHash = "", fileH
             whereList.append("recID = %s")
             valuesList.append(recID)
 
-        for fieldName, fieldValue in (('photoCode', photoCode), ('relPathHash', relPathHash), ('fileHash', fileHash), ('dupOfPhotoCode', dupOfPhotoCode)):
+        for fieldName, fieldValue in (('photoCode', photoCode), ('relPathHash', relPathHash), ('fileHash', fileHash), ('dupOfPhotoCode', dupOfPhotoCode), ('scanState', scanState)):
             if fieldValue is not None and fieldValue != "":
                 whereList.append(fieldName + " = %s")
                 valuesList.append(fieldValue)
@@ -3420,6 +3447,7 @@ def createTableSQL_pb_scan_job(tableName):
         "pendingCount INTEGER NOT NULL DEFAULT 0,"
         "lastCursor TEXT,"
         "jobStatus TEXT NOT NULL DEFAULT 'IDLE',"
+        "jobType INTEGER NOT NULL DEFAULT 0,"
         "startedYMDHMS TEXT,"
         "finishedYMDHMS TEXT,"
         "errMsg TEXT,"
@@ -3440,15 +3468,16 @@ def indexSqlList_pb_scan_job():
     """pb_scan_job 的索引 DDL（清单见 数据库设计.md §五，全部 IF NOT EXISTS 故幂等）。"""
     sqlList = [
         'CREATE UNIQUE INDEX IF NOT EXISTS idx_pb_scan_job_jobCode ON pb_scan_job(jobCode);',   # txt-UNIQUE
+        'CREATE INDEX IF NOT EXISTS idx_pb_scan_job_jobType ON pb_scan_job(jobType);',   # INDEX_SPEC
     ]
     return sqlList
 
 
 
 # pb_scan_job 查询记录
-def query_pb_scan_job(tableName, recID = 0, jobCode = "", jobStatus = "", nullFields = (),
-        delFlag = "0", mode = "full", orderBy = "recID", descFlag = False,
-        limitNum = 0, offsetNum = 0):
+def query_pb_scan_job(tableName, recID = 0, jobCode = "", jobStatus = "", jobType = "",
+        nullFields = (), delFlag = "0", mode = "full", orderBy = "recID",
+        descFlag = False, limitNum = 0, offsetNum = 0):
     """查 pb_scan_job。
 
     参数
@@ -3456,6 +3485,7 @@ def query_pb_scan_job(tableName, recID = 0, jobCode = "", jobStatus = "", nullFi
     recID        : int  —— 主键精确查，>0 时生效
     jobCode      : str  —— 非空时等值过滤
     jobStatus    : str  —— 非空时等值过滤
+    jobType      : str  —— 非空时等值过滤
     nullFields   : tuple  —— 追加 'field IS NULL' 条件，字段必须在 NULLABLE_FIELDS 白名单内
     delFlag      : str  —— "0" 只看未删（默认）；"1" 只看已删；"" / "*" 不限
     mode         : str  —— "full" 全部列；"light" 剔除 BLOB 列（人脸向量等），列表页用它省内存
@@ -3483,7 +3513,7 @@ def query_pb_scan_job(tableName, recID = 0, jobCode = "", jobStatus = "", nullFi
             whereList.append("recID = %s")
             valuesList.append(recID)
 
-        for fieldName, fieldValue in (('jobCode', jobCode), ('jobStatus', jobStatus)):
+        for fieldName, fieldValue in (('jobCode', jobCode), ('jobStatus', jobStatus), ('jobType', jobType)):
             if fieldValue is not None and fieldValue != "":
                 whereList.append(fieldName + " = %s")
                 valuesList.append(fieldValue)

@@ -54,6 +54,23 @@ export const useReviewStore = defineStore('review', () => {
   /** 正在提交哪一条（禁用重复点击） */
   const busyFaceCode = ref('')
 
+  /**
+   * 本会话「跳过」过的 faceCode —— **跳过 = 排到队列最后**，不是"不再看"。
+   * ---------------------------------------------------------------
+   * 旧实现只把游标往前挪一格、**一个字都不写库**，于是：
+   *   队列每次重取（改判 fix / 批量确认 / 离开页面再回来都会
+   *   `fetchPending({reset:true})`）都会回到 page 1，而跳过的脸 quality
+   *   没变、仍按 quality DESC 排在最前面 ⇒ 刚跳过它马上又被问到，
+   *   表现正是「很快又要选用一次」。
+   * 这里记住跳过的 faceCode，并把它们稳定地重排到**已加载列表的最后**：
+   * 只要队列里还有没跳过的脸，跳过的就不会再被摆到眼前。
+   * ⚠️ 会话级（不写库、不进 localStorage）：刷新页面即恢复原序 ——
+   *    这是有意的，跳过是"这一轮先放一放"，不是永久决定（永久排除是陌生人）。
+   */
+  const deferredCodes = ref([])
+  const deferredSet = computed(() => new Set(deferredCodes.value))
+  const deferredCount = computed(() => deferredCodes.value.length)
+
   // ---- Tab2 我不同意 ----
   const disputedGroups = ref([])
   const disputedTotal = ref(0)
@@ -110,9 +127,59 @@ export const useReviewStore = defineStore('review', () => {
       const list = data?.items ?? []
       pendingItems.value = reset ? list : [...pendingItems.value, ...list]
       pendingTotal.value = data?.total ?? 0
+      applyDeferOrder()
+      // 重取后 page 1 的头几条可能正是"跳过的" —— 先把后续页拉进来，
+      // 保证游标处出现的永远是"没跳过"的脸（否则改判一次就又看到它）
+      if (reset) await loadUntilFresh()
       return data
     } finally {
       pendingLoading.value = false
+    }
+  }
+
+  /**
+   * 把「已跳过」的条目稳定地挪到**已加载列表的最后**。
+   *
+   * ⚠️ 必须**稳定**（同组内相对顺序不变）：服务器页是按 quality DESC 分页的，
+   *    打乱同组顺序 = "翻页时条目在眼前挪位"，那是分页最忌讳的
+   *    （见 processor/review/queue.py 里 pendingQueue 的设计约束）。
+   * ⚠️ 只能**重排**、不能**过滤**：`pendingItems.length < pendingTotal`
+   *    是"服务器还有下一页"的判据；一旦把跳过的条目从数组里删掉，
+   *    这个判据就失真（会提前停止翻页 / 漏掉没跳过的脸）。
+   */
+  function applyDeferOrder() {
+    if (!deferredSet.value.size) return
+    const fresh = []
+    const deferred = []
+    for (const item of pendingItems.value) {
+      (deferredSet.value.has(item.faceCode) ? deferred : fresh).push(item)
+    }
+    pendingItems.value = [...fresh, ...deferred]
+  }
+
+  /**
+   * 保证游标处是一条「没跳过」的脸；否则把服务器后续页拉进来。
+   *
+   * 服务器也拉完了就收尾：若游标处剩下的确实只有"跳过的"，
+   * 把游标推到末尾（视为本轮清空）—— 否则按一次「跳过」会立刻又看到它，
+   * 那正是要修的问题。收尾后 UI 会给出「重新显示已跳过的 N 条」入口。
+   */
+  async function loadUntilFresh() {
+    for (;;) {
+      const at = pendingItems.value[cursor.value]
+      if (at && !deferredSet.value.has(at.faceCode)) return
+      if (pendingItems.value.length >= pendingTotal.value) {
+        if (at) cursor.value = pendingItems.value.length
+        return
+      }
+      const before = pendingItems.value.length
+      pendingPage.value += 1
+      await fetchPending()
+      if (pendingItems.value.length <= before) {
+        // 防御：页面没长进就别死循环（例如 total 与实际行数不一致）
+        if (at) cursor.value = pendingItems.value.length
+        return
+      }
     }
   }
 
@@ -163,13 +230,47 @@ export const useReviewStore = defineStore('review', () => {
     return map
   }
 
+  /**
+   * 全库人物模糊搜索 —— 改判/确认浮层那个搜索框走这里。
+   *
+   * 为什么不复用候选（topCandidates）：
+   *   候选只有 topN=5 条**相似度最高**的人，而用户搜的往往是
+   *   「我知道他是谁，但机器没把这条脸排进前 5」（表弟、外婆、 seldom 出现的同事）。
+   *   在那 5 条里 filter 一个名字，结果几乎永远是空 —— 表现就是「搜索完全没起作用」。
+   *   服务端 /persons?keyword= 是对**全库**做 LIKE（displayName / familyName / email / phone）。
+   *
+   * ⚠️ 相似度必须留 null：搜索结果不是「比对出来的候选」，
+   *    硬凑一个数字比不给更坏（FixFaceDialog 会把 null 渲染成「—」而不是百分比）。
+   */
+  async function searchPersons(keyword, { size = 20 } = {}) {
+    const text = String(keyword || '').trim()
+    if (!text) return []
+    const data = await listPersons({
+      page: 1,
+      size,
+      keyword: text,
+      orderBy: 'displayName',
+      desc: 0,
+    })
+    return (data?.items ?? []).map((one) => ({
+      ...one,
+      similarity: null,
+      relation: one.relation || personDirectory.value[one.personCode]?.relation || '',
+    }))
+  }
+
   /** 给候选补上关系提示（后端 topCandidates 不带 relation） */
   function decorateCandidates(candidates) {
     return (candidates || []).map((candidate) => {
       const person = personDirectory.value[candidate.personCode]
       return {
         ...candidate,
-        displayName: candidate.displayName || person?.displayName || candidate.personCode,
+        // 姓名以人物目录（/api/persons，直读 pb_person.displayName）为准：
+        // 候选里的 displayName 是后端 scorer 顺手带上的，它对空姓名会用
+        // personCode 兜底（'CS_BaoRui_Zhang' 这种），而前端把 personCode
+        // 显示成人名是最糟的一种错 —— 用户只看到一串编码。
+        // 目录是分页快照（只加载前 N 个），所以留两级兜底。
+        displayName: person?.displayName || candidate.displayName || candidate.personCode,
         avatarFaceCode: candidate.avatarFaceCode || person?.avatarFaceCode || null,
         relation: person?.relation || '',
       }
@@ -182,14 +283,7 @@ export const useReviewStore = defineStore('review', () => {
   async function advance() {
     cursor.value += 1
     doneCount.value += 1
-    if (
-      cursor.value >= pendingItems.value.length &&
-      pendingItems.value.length < pendingTotal.value
-    ) {
-      pendingPage.value += 1
-      await fetchPending()
-      cursor.value = Math.min(cursor.value, Math.max(0, pendingItems.value.length - 1))
-    }
+    await loadUntilFresh()
   }
 
   /**
@@ -213,19 +307,28 @@ export const useReviewStore = defineStore('review', () => {
     }
   }
 
-  /** 跳过：只是不看这一条，**不写库**（下次进来它还在队列里） */
+  /**
+   * 跳过：**把这一条排到队列最后**（不是"不看了"——它仍在待确认里，
+   * 只是排到所有没跳过的脸之后）。只改前端会话状态，**不写库**。
+   *
+   * 与旧实现的差别：旧的就是"游标 +1"，队列一重取（改判 / 批量确认 /
+   * 离开再回来）跳过的脸又会冒到最前面。现在每次重排后游标不动 =
+   * 自动落到下一条，被跳过的已沉到已加载列表末尾。
+   */
   async function skip() {
-    if (cursor.value < pendingItems.value.length - 1) {
-      cursor.value += 1
-      return null
+    const face = current.value
+    if (face?.faceCode) {
+      if (!deferredSet.value.has(face.faceCode)) deferredCodes.value.push(face.faceCode)
+      applyDeferOrder()
     }
-    if (pendingItems.value.length < pendingTotal.value) {
-      pendingPage.value += 1
-      await fetchPending()
-      return null
-    }
-    cursor.value = pendingItems.value.length
+    await loadUntilFresh()
     return null
+  }
+
+  /** 「重新显示已跳过的 N 条」：清空本会话的跳过记录，回到队首重来。 */
+  async function showDeferred() {
+    deferredCodes.value = []
+    await fetchPending({ reset: true })
   }
 
   /** 忽略此人脸 = 标记为陌生人（**永久排除**，入口处必须有二次确认） */
@@ -368,6 +471,8 @@ export const useReviewStore = defineStore('review', () => {
     cursor,
     pendingLoading,
     busyFaceCode,
+    deferredCodes,
+    deferredCount,
     disputedGroups,
     disputedTotal,
     disputedPhotoTotal,
@@ -392,10 +497,12 @@ export const useReviewStore = defineStore('review', () => {
     fetchDisputed,
     ensurePhoto,
     ensurePersonDirectory,
+    searchPersons,
     decorateCandidates,
     advance,
     confirmCandidate,
     skip,
+    showDeferred,
     ignoreCurrent,
     fix,
     fixWholePhoto,

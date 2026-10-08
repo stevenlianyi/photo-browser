@@ -10,6 +10,7 @@
 #   C. 文件名识别：mmexport 13 位毫秒 / 8 位日期 / 非法日期 / mtime-only
 #   D. EXIF 解析：方向 / 机型 / 拍摄时间 / GPS（含南纬西经）
 #   E. 降级纪律：解不开的图、逆地理依赖缺失，都**只降级不抛错**
+#   F. 占位坐标：(0,0) / 近零 / 非有限数 一律不查地点名（DR-25）
 #
 # 硬约束：只在 tmp_path 下造图，绝不碰真实照片库。
 
@@ -334,3 +335,80 @@ class TestReverseGeocode:
         assert len(meta._composePlaceName({"name": "x" * 400})) == 256
         assert meta._composePlaceName({}) is None
         assert meta._composePlaceName(None) is None
+
+    def test_placeholder_zero_returns_none(self, monkeypatch):
+        """(0,0) 占位坐标 -> None（改前会查出加纳 Takoradi，见 DR-25）。
+
+        依赖不可用时也返回 None，所以这里额外断言「判据在依赖之前就短路了」——
+        即便真装了 reverse_geocoder，(0,0) 也永远问不到它。
+        """
+        monkeypatch.setattr(meta, "_RG_CACHE", {})
+        assert meta.isRealCoordinate(0, 0) is False
+        assert meta.reverseGeocode(0, 0) is None
+        assert meta.reverseGeocode(0.0, 0.0) is None
+        # 占位坐标不该进缓存（否则真坐标来查会命中一条 None）
+        assert meta._RG_CACHE == {}
+
+
+class TestIsRealCoordinate:
+    """(0,0) 占位判据单测（DR-25）。判据必须是**独立函数**才能测这一层。"""
+
+    @pytest.mark.parametrize("lat,lon,expected", [
+        (0, 0, False),                # ← 本步要修的就是这一条
+        (0.0, 0.0, False),
+        (-0.0, 0.0, False),           # 负零 == 零，同样是占位
+        (1e-5, 1e-5, False),          # 近零抖动也算占位（阈值 1e-4≈11m）
+        (0.0, 116.4, False),          # 只有 lat 是零 -> 同样不信
+        (39.9, 0.0, False),           # 只有 lon 是零 -> 同样不信
+        (None, 120, False),           # 缺一半 -> 无从谈起
+        (120, None, False),
+        (None, None, False),
+        ("abc", 120, False),          # 解析不了 -> False，不抛错
+        ("", 120, False),
+        (float("nan"), 120, False),   # 非有限数
+        (120, float("inf"), False),
+        (91.0, 120, False),           # 越界
+        (39.9, 181.0, False),
+        (39.9, 116.4, True),          # 正常坐标不能被误伤
+        (-33.8688, 151.2093, True),   # 南纬西经
+        ("39.9", "116.4", True),      # 数字字符串（库/JSON 取出来常是这种）
+    ])
+    def test_judgement(self, lat, lon, expected):
+        assert meta.isRealCoordinate(lat, lon) is expected
+
+    def test_eps_boundary(self):
+        """阈值是「严格小于」：恰好等于 1e-4 的坐标算真实（别把边界判死）"""
+        assert meta.isRealCoordinate(meta.PLACEHOLDER_EPS, 116.4) is True
+        assert meta.isRealCoordinate(meta.PLACEHOLDER_EPS / 2, 116.4) is False
+
+    def test_eps_value(self):
+        """阈值写死成 1e-4，改它得有人记得改单测"""
+        assert meta.PLACEHOLDER_EPS == 1e-4
+
+    def test_exif_keeps_placeholder_but_does_not_geocode(self, tmp_path):
+        """端到端口径：EXIF 里的 (0,0) **照旧落进 lat/lon**（原始事实），
+        但 readMeta() **不拿它去查地点名** —— placeName 必须是 None。
+
+        这是本步的完整口径，两条一起断言，防止以后有人「顺手」把
+        parseExifObject 里的 (0,0) 也抹掉（那会销毁原始信息）。
+        """
+        from PIL import Image
+        from PIL.TiffImagePlugin import IFDRational
+        path = tmp_path / "zero.jpg"
+        exif = Image.Exif()
+        gpsIfd = exif.get_ifd(meta.IFD_GPS)
+        gpsIfd[meta.TAG_GPS_LAT_REF] = b"N"
+        gpsIfd[meta.TAG_GPS_LAT] = (IFDRational(0, 1), IFDRational(0, 1),
+                                   IFDRational(0, 1))
+        gpsIfd[meta.TAG_GPS_LON_REF] = b"E"
+        gpsIfd[meta.TAG_GPS_LON] = (IFDRational(0, 1), IFDRational(0, 1),
+                                   IFDRational(0, 1))
+        Image.new("RGB", (8, 8), "red").save(path, exif=exif)
+
+        parsed = meta.parseExifObject(Image.open(path).getexif())
+        assert parsed["lat"] == 0.0 and parsed["lon"] == 0.0    # 原始事实保留
+        assert meta.isRealCoordinate(parsed["lat"], parsed["lon"]) is False
+
+        got = meta.readMeta(str(path))
+        assert got["lat"] == 0.0 and got["lon"] == 0.0          # 仍然保留
+        assert got["placeName"] is None# 但绝不查出一个城市来

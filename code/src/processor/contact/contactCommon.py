@@ -45,6 +45,7 @@ if _SRC_DIR not in sys.path:
 from common import globalDefinition as comGD                # noqa: E402
 from common import miscCommon as misc                        # noqa: E402
 from common import paths as paths                            # noqa: E402
+from common import pinyin as pinyin                          # noqa: E402
 from common import sqliteHandle as sqliteHandle              # noqa: E402
 from config import basicSettings as basicSettings            # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon   # noqa: E402
@@ -530,6 +531,11 @@ def planContact(contact: dict, index: dict, prefix: str,
         memo = _memoOf(contact, isCreate=True)
         if memo:
             row["memo"] = memo
+        # 拼音检索串：**服务端派生**（pinyin.personPinyin 是唯一算法）。
+        # 必须在 familyName 落到 row **之后**算 —— 很多 vCard 把姓写在
+        # familyName 里，少算它的话输「wang」搜不到「王小雨」。
+        row["displayNamePinyin"] = pinyin.personPinyin(
+            displayName, row.get("familyName")) or None
         op = "create"
     else:
         personCode = str(existing.get("personCode") or "")
@@ -557,6 +563,12 @@ def planContact(contact: dict, index: dict, prefix: str,
             memo = _memoOf(contact, isCreate=False)
             if memo:
                 row["memo"] = memo
+        # 拼音是**派生值**：名字没变（沿用库里的），但只要这次补了姓氏，
+        # token 就得多一个 —— 否则用户改完姓再搜「wang」零结果。
+        # familyName 取「本次要写的，否则库里原来的」——existing 是完整 DB 行，
+        # 所以这里能拿到真值，不用猜。
+        row["displayNamePinyin"] = pinyin.personPinyin(
+            displayName, row.get("familyName") or existing.get("familyName")) or None
         op = "update"
         if hit == "displayName" and uid and not str(existing.get("vcardUid") or ""):
             warnings.append(

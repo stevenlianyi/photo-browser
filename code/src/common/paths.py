@@ -49,6 +49,16 @@ DB_DIR_NAME: str = "db"
 DB_FILE_NAME: str = "photolib.db"
 IMPORTS_DIR_NAME: str = "imports"
 EXPORTS_DIR_NAME: str = "exports"
+#: 备份根目录名（<PHOTO_ROOT>\backup，步骤 12）
+#:
+#: ⚠️ **备份不放进 db\ 或 thumb\**：备份是「另一份完整的库」，
+#:  放进被备份的目录里会让「拷什么」变成一个自指的判断，
+#:  而 restore 时又要先把旧的挪走 —— 挪走的过程中断电就两头不落。
+BACKUP_DIR_NAME: str = "backup"
+#: 备份子目录前缀（pb_<yyyymmddHHMMSS>）
+BACKUP_PREFIX: str = "pb_"
+#: 每次备份里的清单文件名（备份.py 写、api/settings.py 读）
+BACKUP_MANIFEST_NAME: str = "manifest.json"
 
 
 class PathLayoutError(Exception):
@@ -250,6 +260,20 @@ def imports_dir() -> str:
 def exports_dir() -> str:
     """导出产物目录 <dbDir>\\exports"""
     return _abs(os.path.join(db_dir(), EXPORTS_DIR_NAME))
+
+
+def backup_root() -> str:
+    """**备份根目录** <PHOTO_ROOT>\\backup（步骤 12）。
+
+    为什么备份根也跟随 `setRootOverride(photo=...)`
+    ----------------------------------------------
+      单测与实验都要指到临时库（DR-14）。如果备份根写死成
+      `local_settings.PHOTO_ROOT\backup`，那么 `--root 临时库` 的那一次实验
+      仍会把备份写到**正式库旁边** —— 而 backup 的语义是「覆盖式还原」，
+      误写到正式库旁边的一次恢复演练就足以把正式库换掉。
+      ⇒ 跟photo 走，而不是跟配置走。
+    """
+    return _abs(os.path.join(os.path.dirname(photo_dir()), BACKUP_DIR_NAME))
 
 
 def writable_dirs() -> list:

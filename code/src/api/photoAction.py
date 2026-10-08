@@ -2,7 +2,7 @@
 #encoding: utf-8
 
 #Filename: photoAction.py
-#Description: photo-browser 照片级写接口（步骤 11）—— 影响面 / 软删 / 恢复 / 标记重复
+#Description: photo-browser 照片级写接口（步骤 11）—— 影响面 / 软删 / 恢复 / 标记重复 / 年代修正
 #
 # 为什么不并进 api/browse.py
 # ------------------------------------------------
@@ -19,6 +19,16 @@
 #      「这张照片里的 3 张待确认人脸会一起离开队列」。
 #   ② **原图零风险**：这三个动作全部只改数据库。磁盘上的 photo\ 目录
 #      一个字节都不动。UI 也不提供任何编辑 / 覆盖 / 删除原图的入口。
+#
+# 年代修正（DR-42，`/photos/{photoCode}/shot-year-fix`）与上面三个的差别
+# --------------------------------------------------------------------
+#   · 它同样走**两段式**（不带 confirm=1 只返回影响面）：写入的是**照片级**年份，
+#     而年代档是 f(有效拍摄年, 各人出生年) 现算的 —— 一张合影里三个不同生日的人
+#     会朝三个方向变，必须先让用户看见这个清单（`persons[]`）。
+#   · 它会**重算质心**，因此是这三个之外**唯一**落 pb_review_log 的照片级动作
+#     （opType=BUCKET_FIX，可撤销）。理由：它改变了「这张脸属于哪个年代档」，
+#     那是归属排障链上的事实；而软删 / 标记重复不影响归属也不影响划分年代档，
+#     仍然一条日志都不落。写库逻辑在 processor/photoTimeFix.py。
 
 import os
 import sys
@@ -31,6 +41,7 @@ if _SRC_DIR not in sys.path:
 from api import dto                                               # noqa: E402
 from common import miscCommon as misc                             # noqa: E402
 from processor import photoAction as photoAct                    # noqa: E402
+from processor import photoTimeFix                                # noqa: E402
 
 from fastapi import APIRouter, Query                              # noqa: E402
 
@@ -148,5 +159,65 @@ def unmarkDuplicate(photoCode: str) -> dict:
     try:
         result = photoAct.unmarkDuplicate(code)
     except photoAct.PhotoActionError as e:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
+    return dto.okBody(executed=True, **result)
+
+
+# ============================================================
+# 四、年代修正（DR-42）—— 老相册翻拍件 / 扫描件的「拍摄年代」
+# ============================================================
+
+@router.get("/photos/{photoCode}/shot-year-fix",
+            summary="年代修正影响面（纯读；不给 shotYear = 预览「恢复自动」）")
+def shotYearFixImpact(photoCode: str,
+                      shotYear: int = Query(default=None,
+                                            description="目标年份；省略 = 预览「恢复自动」")):
+    """这张照片按新年代重新划分年代档之后会变成什么样。**一行都不写**。
+
+    为什么要先看影响面：改的是**照片级**年份，而年代档是
+    f(有效拍摄年, 各人出生年) 现算的 —— 同一张合影里三个不同生日的人
+    会朝三个方向变。`persons[]` 就是「这次修正会牵动谁」的完整清单。
+    """
+    _require(photoCode)
+    try:
+        preview = photoTimeFix.previewFix(str(photoCode), shotYear)
+    except photoTimeFix.PhotoTimeFixError as e:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
+    preview["executed"] = False
+    preview["confirmRequired"] = True
+    return dto.okBody(**preview)
+
+
+@router.post("/photos/{photoCode}/shot-year-fix",
+             summary="修正照片年代（不带 confirm=1 只返回影响面）")
+def fixShotYear(photoCode: str, body: dto.ShotYearFixBody = None,
+                confirm: int = Query(default=0,
+                                     description="**1 才执行**；不给/0 只返回影响面")):
+    """把这张照片的年代改成 `shotYear`（**传 null = 恢复自动**）。
+
+    落库后按 DR-22 的硬顺序联动（顺序不可颠倒）：
+      ① 写 `pb_photo.shotYearOverride`
+      ② `rebucket.rebucketPhoto` —— 重刷这张照片全部人脸的 shotBucket
+      ③ `centroid.recomputePerson` —— 按新年代档键重建涉及人物的质心
+    日志 opType=BUCKET_FIX（可撤销，入口仍是 `POST /api/review/undo`）。
+
+    ⚠️ `shotYear` **必须显式给**（哪怕给 null）：不传是参数漏了（400），
+       传 null 才是「恢复自动」。两者在 JSON 里都是缺失值/None，
+       靠 `exclude_unset` 区分 —— 混在一起会让"前端漏传"变成
+       "静默把用户填的修正清掉"。
+    """
+    code = _require(photoCode)
+    given = body.model_dump(exclude_unset=True) if body is not None else {}
+    if "shotYear" not in given:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID,
+                           "必须给 shotYear（传 null 表示恢复自动）")
+    shotYear = given.get("shotYear")
+    if not int(confirm):
+        preview = shotYearFixImpact(code, shotYear)
+        preview["confirmRequired"] = True
+        return preview
+    try:
+        result = photoTimeFix.applyFix(code, shotYear)
+    except photoTimeFix.PhotoTimeFixError as e:
         raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
     return dto.okBody(executed=True, **result)

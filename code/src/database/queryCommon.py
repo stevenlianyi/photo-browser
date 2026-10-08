@@ -139,6 +139,13 @@ _SQL_KEYWORDS = frozenset({
 _SQL_FUNCTIONS = frozenset({
     "COUNT", "SUM", "AVG", "MIN", "MAX", "TOTAL", "GROUP_CONCAT", "LENGTH",
     "SUBSTR", "TRIM", "UPPER", "LOWER", "ROUND", "ABS", "IF",
+    # ⚠️ `NULLIF` 是 SQLite 的标准函数，但白名单是**手写枚举**、不会自动跟上 ——
+    #    不登记它的后果是 `checkColumns` 把 `NULLIF` 当「未知标识符」，
+    #    直接抛 QuerySqlError。R4b 的聚合键
+    #    `COALESCE(NULLIF(placeNameDir,''), placeName)` 用的就是它，
+    #    整条查询会当场报错（地点列表与 rebuild 全挂），而报错信息
+    #    只会说「未知标识符 NULLIF」—— 与地点这个业务毫无字面关联。
+    "NULLIF",
 })
 
 

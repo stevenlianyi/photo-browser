@@ -28,6 +28,8 @@ import { Layers, Split, X } from 'lucide-vue-next'
 import { RouterLink } from 'vue-router'
 import { faceUrl, thumbUrl } from '@/api/static'
 import { similarityText } from '@/utils/faceState'
+// 进照片详情要**声明来源**：详情页的「返回」才知道该回哪（见 utils/photoReturn.js）
+import { photoDetailLink } from '@/utils/photoReturn'
 
 defineProps({
   /** /api/review/disputed 的 items（groupByPhoto=1 的分组结构） */
@@ -85,7 +87,7 @@ function ownerName(group) {
     <article v-for="group in groups" :key="group.photoCode" class="pb-card p-3">
       <div class="flex flex-wrap items-start gap-3">
         <RouterLink
-          :to="`/photos/${group.photoCode}`"
+          :to="photoDetailLink(group.photoCode, { path: '/review', name: '待确认' })"
           class="shrink-0"
           :aria-label="`打开照片 ${photoLabel(group)}`"
         >
@@ -101,7 +103,7 @@ function ownerName(group) {
         <div class="min-w-0 flex-1">
           <p class="flex flex-wrap items-center gap-x-2 text-body text-ink">
             <RouterLink
-              :to="`/photos/${group.photoCode}`"
+              :to="photoDetailLink(group.photoCode, { path: '/review', name: '待确认' })"
               class="truncate font-mono text-caption hover:underline"
               >{{ photoLabel(group) }}</RouterLink
             >

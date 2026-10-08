@@ -487,11 +487,17 @@ def test_scanStartStatusJobsFlow(api_env):
     #    线程还没跑到 runBatch。若只等「!= RUNNING」，会在 IDLE 上立刻退出，
     #    用例结束时后台线程还在读库 -> 收尾 closeDb() 撞上未释放的句柄
     #    -> **进程级 access violation**（不是 Python 异常，整个测试会话崩）。
+    # ⚠️ 还要等 `running` 变回 False（步骤 R4b 起）：任务置 DONE 之后，
+    #    扫描线程还会做一段**地点侧收尾**（填 placeNameDir + 重建字典），
+    #    那期间单写入者门闩仍被持有（`isRunning()` 为 True，这是刻意的）——
+    #    此刻再 POST /scan/start 会被 "已有扫描任务在跑" 挡下，而这是**正确行为**。
+    #    所以下面的「重复 start」必须等收尾真的结束。
     deadline = time.time() + 20.0
     status = {}
     while time.time() < deadline:
         status = client.get("/api/scan/status/%s" % jobCode).json()
-        if status["jobStatus"] in ("PAUSED", "DONE", "FAILED"):
+        if status["jobStatus"] in ("PAUSED", "DONE", "FAILED") \
+                and not status.get("running"):
             break
         time.sleep(0.02)
     assert status.get("jobStatus") in ("PAUSED", "DONE"), status

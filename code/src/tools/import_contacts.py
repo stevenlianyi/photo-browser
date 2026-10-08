@@ -71,6 +71,7 @@ if _SRC_DIR not in sys.path:
 
 from common import globalDefinition as comGD                            # noqa: E402
 from common import miscCommon as misc                                  # noqa: E402
+from common import pinyin as pinyin                                    # noqa: E402
 from config import basicSettings as basicSettings
 from database.auto_generated import sqliteCommon as sqliteCommon
 from processor.media import thumbStore as thumbStore      # noqa: E402
@@ -690,8 +691,12 @@ def _rowOfCreate(contact: dict, avatarFile: str = "") -> tuple:
            "modifyYMDHMS": misc.getTime()}
     if avatarFile:
         row["avatarFile"] = avatarFile
+    # 拼音检索串（服务端派生，pinyin.personPinyin 是唯一算法）
+    row["displayNamePinyin"] = pinyin.personPinyin(
+        contact["name"], contact.get("familyName")) or None
     return row, ("displayName", "familyName", "phone", "email", "birthday",
-                 "vcardUid", "source", "memo", "avatarFile", "modifyYMDHMS")
+                 "displayNamePinyin", "vcardUid", "source", "memo",
+                 "avatarFile", "modifyYMDHMS")
 
 
 def _rowOfUpdate(contact: dict, item: dict, avatarFile: str = "") -> tuple:
@@ -737,6 +742,13 @@ def _rowOfUpdate(contact: dict, item: dict, avatarFile: str = "") -> tuple:
         field = _FILL_FIELD.get(label)
         if field and contact.get(field):
             row[field] = contact[field]
+    # ⚠️ 只有**这次真的要补姓氏**才重算拼音：
+    #    名字沿用库里的（见上面 displayName 的注释），拼音也就原样正确；
+    #    而这里拿不到库里那一份 familyName（index 里的行未必带这列），
+    #    硬算就会把库里已有的姓 token 抹掉 —— 那是**把对的改成错的**。
+    if row.get("familyName"):
+        row["displayNamePinyin"] = pinyin.personPinyin(
+            contact["name"], row["familyName"]) or None
     if avatarFile:
         row["avatarFile"] = avatarFile
     columns = tuple(k for k in row if k != "personCode")

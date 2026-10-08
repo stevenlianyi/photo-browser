@@ -13,7 +13,7 @@
 #   local_settings.py  ← 跟本机有关的三个路径（不入库，有 .example 模板）
 #   sqliteSettings.py  ← SQLite PRAGMA 常量与库文件装配
 
-_VERSION = "20261004"
+_VERSION = "20261007"
 
 
 # ============================================================
@@ -90,17 +90,68 @@ T_HIGH: float = 0.55
 T_LOW: float = 0.35
 
 
+#: 进程内阈值覆盖（步骤 12 / P-08 设置页）
+#: ------------------------------------------------------------------
+#: 为什么需要它
+#: ------------
+#:   `matchThresholds()` 是全项目读阈值的**唯一入口**，而 matcher 每次判定都调它 ——
+#:   所以只要改这里的返回值，下一次匹配就用新阈值，不需要重启进程。
+#:   不走「把阈值写回 basicSettings.py 源文件」那条路的理由：那是改代码，
+#:   而用户调的是**参数**；而且本项目绑 127.0.0.1 无鉴权，写文件的能力不该由 HTTP 提供。
+#:
+#: ⚠️ 覆盖是**进程级内存态**：服务重启即失效（不会静默改你的源文件）。
+#:   界面上必须把这件事说出来，否则用户以为关掉服务再开就变了。
+#: ⚠️ 只覆盖阈值**数值**，不覆盖预设名 —— 预设表是 S0 实测背书的知识，
+#:   让人在界面里手填一个「tHigh=0.9」是允许的，但要说清它绕过了预设。
+THRESHOLD_OVERRIDE: dict = {}       # {} = 未覆盖；{"tLow":.., "tHigh":..} = 已覆盖
+
+
+def thresholdOverride() -> dict:
+    """当前生效的覆盖值（空字典 = 没覆盖）。给 api/settings.py 展示用。"""
+    return dict(THRESHOLD_OVERRIDE) if THRESHOLD_OVERRIDE else {}
+
+
+def setThresholdOverride(tLow: float = None, tHigh: float = None) -> dict:
+    """设置进程内阈值覆盖并返回**生效值** (tLow, tHigh)。
+
+    两个都不给 = 清除覆盖（回到 MATCH_THRESHOLD_PRESET）。
+    ⚠️ 只给一个也视为非法：灰区 [tLow, tHigh) 必须非空，
+    只改一半会产生「tLow >= tHigh」而 matchThresholds 的检查被绕过，
+    那种情况下 matcher 会把所有分数判成同一段 —— 静默失效最难查。
+    """
+    global THRESHOLD_OVERRIDE
+    if tLow is None and tHigh is None:
+        THRESHOLD_OVERRIDE = {}
+        return matchThresholds()
+    if tLow is None or tHigh is None:
+        raise ValueError("阈值覆盖必须同时给 tLow 与 tHigh（灰区不能为空）；"
+                         "想回到预设请两个都不给")
+    low, high = float(tLow), float(tHigh)
+    if not (0.0 <= low < high <= 1.0):
+        raise ValueError("阈值非法：要求 0 <= tLow < tHigh <= 1，收到 %r / %r" % (low, high))
+    THRESHOLD_OVERRIDE = {"tLow": low, "tHigh": high}
+    return low, high
+
+
 def matchThresholds(preset: str = None) -> tuple:
     """取一套 (tLow, tHigh) 阈值。**全项目读阈值的唯一入口。**
 
     参数
     ----
       preset : None = 用 MATCH_THRESHOLD_PRESET；给键名则取该预设
+               ⚠️ **给了 preset 就绕过覆盖** —— 那是「按某套预设跑一遍」
+                  （回归对比用），不是「现在生效的是什么」。
+
+    ⚠️ 覆盖优先于预设（步骤 12 P-08）：设置页改了阈值之后，
+       matcher 的无参调用必须用新值，否则「界面显示 0.5、实际按 0.62 跑」
+       —— 那是最坏的一种不一致：看起来生效了。
 
     未知预设名**不静默回落**到 s0 —— 那正是"配错了但看不出来"的来源。
     这里直接抛 KeyError，让调用方在启动时就炸（阈值配错必须立刻可见，
     不能等到跑了三万张脸才发现用的是哪一套）。
     """
+    if preset is None and THRESHOLD_OVERRIDE:
+        return float(THRESHOLD_OVERRIDE["tLow"]), float(THRESHOLD_OVERRIDE["tHigh"])
     name = str(preset or MATCH_THRESHOLD_PRESET)
     if name not in MATCH_THRESHOLD_PRESETS:
         raise KeyError("未知的阈值预设 %r，可选：%s"
@@ -163,6 +214,43 @@ BUCKET_ADULT_WIDTH: int = 10
 BUCKET_EQUAL_WIDTH: int = 5
 #: bucketKey 形如 "1995-1999"，必须放得进 pb_*.txt 里的 VARCHAR(16)
 BUCKET_KEY_MAX_LEN: int = 16
+
+# ---- 分桶策略（步骤 12 / P-08 可选）----
+#: 三档与 bucket.bucketKeyAdaptive() 的分支一一对应：
+#:   adaptive —— 按出生年自适应（**默认，也是 S0 结论所在的那一档**）
+#:   fixed5   —— 一律等宽 5 年（无生日时的降级口径；用来看「自适应到底值多少」）
+#:   none     —— 完全不分桶，全部落"ALL"（**对照组**；S0 的 32.75% 就是这一档）
+#:
+#: ⚠️ **改策略必须重刷 shotBucket 再重算质心**（DR-22的硬顺序）：
+#:    只重算不刷桶 = 按旧桶键重算一遍同样的样本，质心内容与改之前逐位相同，
+#:    而用户的直觉是「他忽然认不准了」—— 且不报错。设置页会强制走这两步。
+BUCKET_STRATEGY: str = "adaptive"
+BUCKET_STRATEGY_CHOICES: tuple = ("adaptive", "fixed5", "none")
+
+
+def bucketStrategy() -> str:
+    """当前生效的分桶策略。**读策略的唯一入口**（同 matchThresholds 的纪律）。"""
+    name = str(BUCKET_STRATEGY or "adaptive")
+    if name not in BUCKET_STRATEGY_CHOICES:
+        raise KeyError("未知的分桶策略 %r，可选：%s"
+                       % (name, list(BUCKET_STRATEGY_CHOICES)))
+    return name
+
+
+def setBucketStrategy(name: str) -> str:
+    """设分桶策略并返回生效值。
+
+    ⚠️ 本函数**只改开关，不做任何数据迁移**：改了之后 `pb_face.shotBucket`
+       还是按旧策略写的，必须由调用方接着走「重刷桶 → 重算质心」（DR-22）。
+       把这两步藏进这里看着方便，但那样就没法在界面上把「改参数」与
+       「重算数据」分开提示与分次执行了。
+    """
+    global BUCKET_STRATEGY
+    text = str(name or "").strip()
+    if text not in BUCKET_STRATEGY_CHOICES:
+        raise KeyError("未知的分桶策略 %r，可选：%s" % (text, list(BUCKET_STRATEGY_CHOICES)))
+    BUCKET_STRATEGY = text
+    return text
 
 #: 质心全量加载时的分页行数（与步骤 3 的 SCAN_INDEX_PAGE 同一个理由）
 #: 3 万个 2048 字节的 BLOB 一次性取回 = 61MB 字节对象 + 61MB 矩阵 = 122MB，
@@ -606,6 +694,153 @@ MIME_BY_EXT: dict = {
 
 
 # ============================================================
+# 八之三、地点中文名（步骤 R4a · DR-28/DR-29）
+# ============================================================
+# 根因：reverse_geocoder 的数据集（GeoNames）**只有英文、无语言参数**，
+# 所以 pb_photo.placeName 永远是 "CN, Xinjiang Uygur Zizhiqu, Araltobe"。
+# ⚠️ **不要去改 placeName 本身**（DR-28）：placeStore.makePlaceCode() 由它派生
+#   placeCode（幂等键），一改中文，编码就漂移 -> 旧行不被认领 -> 被归零 ->
+#   地图上出现「0 张照片却显示 N 张」的幽灵点。
+#   正确做法是**另存一列 nameZh**（显示名），placeName 保持英文做聚合键。
+#
+#: 地点中文名总开关。**关掉后 nameZh 全为 NULL，界面回退英文 placeName**。
+#: 留这个开关的用途：① 出问题时能立刻确认「是不是中文名这条链路引起的」；
+#:   ② 用户不想让服务为地理数据花那几百 MB 常驻内存。
+PLACE_ZH_ENABLED: bool = True
+#
+#: 离线区县边界数据文件（gzip 的 JSON，fetch_zh_geo.py 产出）。
+#: 空字符串 = 用**包内置**的那份（<code>/src/data/china_district.json.gz）。
+#:
+#: ⚠️ 为什么不写死成常量：数据文件 5.7MB，**换一份更新的行政区划**（新撤县设区）
+#:   应该只需要改这个路径 + 重跑一次 fetch_zh_geo.py，而不是改代码。
+#: ⚠️ 文件不存在 / 损坏 / shapely 没装 -> nameZh 全 NULL + **只记一次 warning**，
+#:   属降级不属错误（见 placeNameZh._loadIndex）。**绝不抛错中断**。
+PLACE_AMAP_GEO_FILE: str = ""
+#
+#: point-in-polygon 用哪个多边形层级（DR-29①「精度 = 区县级」）。
+#: 只支持 "district"；留成配置是为了让「以后想退到市级」不必改代码，
+#: 但**别真改成别的值** —— 区县级的理由是「同市不同区在家庭相册里是不同的地方」。
+PLACE_ZH_LEVEL: str = "district"
+#
+#: 中文名里省级与区县之间的分隔符。「新疆维吾尔自治区 · 阿勒泰市」
+PLACE_ZH_JOINER: str = " · "
+
+
+# ============================================================
+# 八之四、目录名地点（步骤 R4b · DR-30/DR-32/DR-34）
+# ============================================================
+# 为什么要从**目录名**取地点（DR-30）：
+#   `pb_photo.placeName` 来自 GPS 逆地理，而实测正式库 2137 张里只有 **65 张**
+#   有地点名（GPS 覆盖 91 张，其中 26 张是 (0,0) 占位）。而目录名里带
+#   「日期 + 地名」的约 **598 张**（9 倍）—— 真信息在目录名里。
+#   `relPath` 是**已经存好的事实**，一个正则就能提取，且不依赖任何外部数据。
+#
+#: 目录名 -> 地点名的判据（DR-32）。默认口径 = 「**日期前缀 + 非空地名**」，
+#: 实测能干净分开「日期+地名」的 A 类（`2013.07.26 华盛顿`，598 张）
+#: 与「人名/组名」的 B 类（`BaiRuiQin` / `MOT Friends` / `廉家老照片`，1539 张）。
+#: ⚠️ 这是**用户的命名习惯**，不是普适规律 —— 改库里的目录风格时同步调这里。
+#: ⚠️ 两个副作用（都是刻意保留的，别"顺手修掉"）：
+#:   · `2011聚会` 不匹配（"2011" 之后跟的不是两位月份）→ 排除。它确实是活动名不是地点；
+#:   · `20051229`（只有日期）与 `201105`（只有年月）不匹配（`name` 组要求非空）→ 排除。
+DIR_PLACE_PATTERN: str = r"^(?P<y>\d{4})[.\-/]?(?P<m>\d{2})[.\-/]?(?P<d>\d{2})\s*(?P<name>\S.*)$"
+#
+#: 明确排除的目录名（**黑名单**）：正则**收得下**、但人知道它不是地点。
+#: （比如某天出现一个 `20130101 全家福` 这样的目录 —— 往这里加一个名字即可，
+#:   不必改正则；匹配是**大小写不敏感**的整名匹配，不是子串。）
+#: ⚠️ 与下面那个"已确认排除"配置**不要混**：
+#:   · 本项：**会改变判定**（命中 ⇒ 排除，reason = `blacklisted`）
+#:   · `DIR_PLACE_CONFIRMED_NOT_PLACE`：**不改变判定**，只让疑似报告闭嘴
+DIR_PLACE_BLACKLIST: tuple = ()
+#
+#: **已人工确认"不是地点"的目录名**（整名匹配、大小写不敏感）。
+#: 下面是正式库实测的 41 个目录（1539 张），全部是**人看过的**结论：
+#:   人名（`BaiRuiQin` / `lianzhongwen` / `LianYi` …）、组名（`MOT Friends` /
+#:   `Friends` / `Family`）、活动名（`聚会` / `2011聚会` / `毕业照` / `老照片`）、
+#:   学校/代号（`BUPT871` / `DDQ`）、家族名（`廉家老照片` / `Lian Family`）、
+#:   来源目录（`others source` / `Photo`）。
+#: ⚠️ 它们**本来就**被正则排除，所以写在这里的好处是：
+#:   ① 决策留痕（下次看清单知道"这是判过的"）；
+#:   ② `suspectsOf()` 的「疑似地点」报告**不重复报同一批**，只报新出现的。
+#: ⚠️ 与黑名单的关键区别：**它不改变判定结果**，所以这些目录的 reason 仍然是
+#:   机械原因（`noDatePrefix` 等）—— "是不是地点"与"为什么被排除"是两件事，
+#:   人确认过的事实不该把机械原因擦掉（那是排障时唯一的线索）。
+#: ⚠️ 若某个名字**在这里却又被正则采纳**（配置写错了），`parseDirName` 会记一次
+#:   warning 提醒你 —— 否则"确认不是地点"会被静默无视。
+DIR_PLACE_CONFIRMED_NOT_PLACE: tuple = (
+    "BaiRuiQin", "MOT Friends", "lianzhongwen", "BUPT871", "LianZhongWen",
+    "LianYi", "lc", "Friends", "Family", "others source", "LiuChang",
+    "MengLi", "Photo", "LvZhenhua", "Wang", "shiyu", "Lian Family",
+    "xiaoyun", "毕业照", "lianzhongming", "mengli", "老照片", "DengGang",
+    "廉政甫", "Liu Family", "xiaomao", "豆豆家", "Friends Photo",
+    "WangRong", "Zhuhong", "XieWanHe", "GouQiMing", "Shiyan", "YuBo",
+    "XiaoYun", "DDQ", "聚会", "廉家老照片", "2011聚会",
+    # `2013美国游` 是 photo 根下的**一级目录**（不在上面那 41 个"父目录"里）：
+    # 它看着像日期、其实是"2013 年去美国玩"的活动名，写进来免得被当成疑似地点。
+    "2013美国游",
+    # ⚠️ **刻意不列** `20051229`(22 张) / `201105`(8 张)：它们的机械原因是
+    #    `dateOnlyNoName`（只有日期、没有地名），比"人工确认"更能说明问题，
+    #    而 `suspectsOf()` 也不报它们（只有日期 = 已理解的形态，不是新写法）。
+)
+#
+#: **别名表**：`"目录名=地点名"`（整名匹配、大小写不敏感）。
+#: 这是「判据没认出来、但人知道它是地点」的落点 —— 与黑名单**对称**：
+#:   · 黑名单：`2016.05.01 全家福` → 正则收得下，人知道不是地点
+#:   · 别名表：`2016_05_01_三亚`   → 正则收不下（下划线），人知道是地点
+#: ⚠️ **不要**用"放宽正则"来解决个例：正则一放宽是**全局**生效，
+#:   迟早把 `BaiRuiQin` / `Wang` 这类名字也放进来，而且**不报错**。
+#: 例：`("2016_05_01_三亚=三亚", "三亚 2016.05.01=三亚")`
+DIR_PLACE_ALIAS: tuple = ()
+#
+#: 名字**开头**残留分隔符的清理正则（`2016.05.01-三亚` → `-三亚`）。
+#: ⚠️ 实测来源：目录名用 `-` 直接连地名时，判据正则只吃掉 `2016.05.01`，
+#:   剩下 `-三亚` —— 地点列表里就会出现一个带前导短横线的名字。
+#:   清完为空则退回原值（宁可难看，不能把名字清没了）。
+DIR_PLACE_NAME_TRIM: str = r"^[\s\-–—~～〜、,，:：|/]+"
+#
+#: 「疑似地点」报告的张数门槛（`dirNamePlace.suspectsOf`）——
+#: 被排除、但**只含中文**的目录，张数达到这个数才报出来。
+#: 目的：新命名风格（`2016_05_01 三亚`）**不许静默**被排除。只报告、不改采纳。
+#: ⚠️ 中文这一类的门槛**必须高**：`廉家老照片` / `毕业照` / `豆豆家` 这些
+#:    "像地名"的目录太多了，门槛一低，报告就会被噪声淹没，等于没报。
+DIR_PLACE_SUSPECT_MIN: int = 5
+#
+#: 「疑似地点」门槛 —— **名字里含 4 位年份数字**的那一类（默认 **1**）。
+#: 这一类几乎不可能是人名/组名（`BaiRuiQin` / `MOT Friends` 都不含年份），
+#: 而"日期 + 地名"正是本库**最主要**的命名习惯 ⇒ 只要有一个目录长这样却
+#: 没被采纳，就值得看一眼（新写法：`2016_05_01 三亚` / `三亚 2016.05.01` /
+#: `2016.5.1 三亚`）。门槛 1 也不会吵：已确认的排除项见
+#: `DIR_PLACE_CONFIRMED_NOT_PLACE`，只有日期的那类见 `dateOnlyNoName`（不报）。
+DIR_PLACE_SUSPECT_MIN_YEAR: int = 1
+#
+#: **扫描完成后自动收尾地点**（`placeFinalize.finalizePlaces`）：填
+#: `pb_photo.placeNameDir` → 重建 `pb_place` →（可选）补 `nameZh`。
+#: 挂在 `scanScheduler.runBatch` 的 DONE 分支（**只在真的扫完时**触发；
+#: stop / maxBatches 用完 / 批次失败都不触发 —— 半截库不许当成完整库建字典）。
+#: ⚠️ 关掉它的后果：新增目录 / 新照片的地点要人工跑 `place_cli --rebuild`
+#:    才会进字典，而"没进"这件事界面上看不出来（这正是 R4b 收尾要解决的问题）。
+PLACE_FINALIZE_AFTER_SCAN: bool = True
+#
+#: 收尾时是否连中文名一起补（`placeNameZh.rebuildNameZh`）。
+#: ⚠️ 只填 `nameZh IS NULL` 的行，**绝不覆盖**；数据源缺失（没装 shapely /
+#:    没有区划文件）时按既有降级返回 `noDataSource`，不报错、不中断扫描。
+#: 代价：首次使用会把离线区划数据加载进内存（约 1 秒，之后进程内复用）。
+PLACE_FINALIZE_NAME_ZH: bool = True
+#
+#: 目录名上溯层数（`placeNameDirOf` 用）。1 = 只看父目录（实测覆盖全部 598 张）；
+#: 2 = 父目录没有地点线索时，再看祖父目录（给「地点目录下面还有一层子目录」留的余量）。
+#: ⚠️ **必须有明确终止条件**，不许"一路爬到 photo 根"：photo 根名（`photo`）
+#:   不是地点，而 `2013美国游` 这种一级目录也不是地点线索，爬到那里只会
+#:   把「按目录归类」变成「按磁盘布局归类」，同一个地点被拆成多行。
+DIR_PLACE_MAX_UP: int = 2
+#
+#: 日期**区间**残留在名字里的清理正则（`2013.07.24～25 康宁及赫尔希`）。
+#: 判据正则只会把日期前缀吃成 `2013.07.24`，剩下 `～25 康宁及赫尔希` ——
+#: 直接当名字的话，界面上会出现一个叫「～25 康宁及赫尔希」的地点。
+#: 只清理**紧跟日期前缀的**这一小段（`～25` / `-25` / `至25`），不碰名字余下部分。
+DIR_PLACE_RANGE_TRIM: str = r"^[～~〜\-–—至到]\s*\d{1,2}\s*"
+
+
+# ============================================================
 # 九、服务
 # ============================================================
 
@@ -637,3 +872,14 @@ if __name__ == "__main__":
     print("HASH_CHUNK_SIZE :", HASH_CHUNK_SIZE, "(%d MB)" % (HASH_CHUNK_SIZE // 1024 // 1024))
     print("EXIF 时区偏移   :", EXIF_LOCAL_UTC_OFFSET_HOURS, "小时")
     print("截图压过 EXIF   :", SCREENSHOT_OVERRIDES_EXIF, "（False = EXIF 优先）")
+    print("地点中文名      :", PLACE_ZH_ENABLED,
+          "（关掉则 nameZh 全 NULL，界面回退英文 placeName）")
+    print("中文名数据文件  :", PLACE_AMAP_GEO_FILE or "(包内置 data/china_district.json.gz)")
+    print("目录名地点判据  :", DIR_PLACE_PATTERN, "（上溯最多 %d 层）" % DIR_PLACE_MAX_UP)
+    print("目录名黑名单    : %d 项（改判定）／已确认排除 %d 项（只闭嘴）"
+          % (len(DIR_PLACE_BLACKLIST), len(DIR_PLACE_CONFIRMED_NOT_PLACE)))
+    print("目录名别名表    :", list(DIR_PLACE_ALIAS) or "(空)")
+    print("疑似地点门槛    : 含年份 >=%d 张／含中文 >=%d 张"
+          % (DIR_PLACE_SUSPECT_MIN_YEAR, DIR_PLACE_SUSPECT_MIN))
+    print("扫描后自动收尾  :", PLACE_FINALIZE_AFTER_SCAN,
+          "（含中文名 %s）" % PLACE_FINALIZE_NAME_ZH)

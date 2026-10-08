@@ -13,13 +13,19 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 /**
- * 侧栏一级导航，固定 6 项（设计稿 §3.1）。
+ * 侧栏一级导航，7 项（R5 在「人物库」之后、「待确认」之前插入「地点」）。
  * 顺序与 §4.1 的 ASCII 布局一致：设置用 divider 隔开，固定在底部。
+ *
+ * ⚠️ 「地点」**没有角标**（`badge: false`，也就是不写）：
+ *    角标在本项目里是「有 N 件事等着你处理」（待确认 / 我不同意）。
+ *    地点数没有「待处理」语义 —— 加了一切非待办的数字都会变成噪声，
+ *    用户会开始忽略角标，连带把真正要处理的那两个也忽略掉。
  */
 export const NAV_ITEMS = [
   { name: 'overview', path: '/', label: '概览', icon: 'Gauge' },
   { name: 'photos', path: '/photos', label: '照片流', icon: 'Images' },
   { name: 'people', path: '/people', label: '人物库', icon: 'Users' },
+  { name: 'places', path: '/places', label: '地点', icon: 'MapPin' },
   { name: 'review', path: '/review', label: '待确认', icon: 'ClipboardCheck', badge: true },
   { name: 'scanJobs', path: '/scan-jobs', label: '扫描任务', icon: 'ScanLine' },
   { name: 'settings', path: '/settings', label: '设置', icon: 'Settings', divider: true },
@@ -55,6 +61,21 @@ const routes = [
     name: 'personDetail',
     component: () => import('@/views/PersonDetailView.vue'),
     meta: { title: '人物详情', crumbs: ['人物库', '人物详情'], icon: 'User' },
+  },
+  {
+    // ⚠️ `/places/:placeCode` 必须排在 `/places` **之后**（vue-router 4 的
+    //    路径打分本来就能分清，但保持「具体 -> 参数」的书写顺序，
+    //    与后端路由同一套阅读习惯）。
+    path: '/places',
+    name: 'places',
+    component: () => import('@/views/PlacesView.vue'),
+    meta: { title: '地点', crumbs: ['地点'], icon: 'MapPin' },
+  },
+  {
+    path: '/places/:placeCode',
+    name: 'placeDetail',
+    component: () => import('@/views/PlaceDetailView.vue'),
+    meta: { title: '地点详情', crumbs: ['地点', '地点详情'], icon: 'MapPin' },
   },
   {
     path: '/review',

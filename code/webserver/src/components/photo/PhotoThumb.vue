@@ -21,6 +21,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Camera, Copy, MapPin, TriangleAlert } from 'lucide-vue-next'
+import { placeDisplayName, placeRawName } from '@/api/place'
 import { thumbUrl } from '@/api/static'
 import { baseName, formatYear } from '@/utils/format'
 
@@ -110,10 +111,30 @@ const hasGps = computed(() => Boolean(props.photo?.hasGps))
 const isDuplicate = computed(() => Number(props.photo?.isDuplicate) === 1)
 const isMissing = computed(() => Number(props.photo?.isMissing) === 1)
 
+/**
+ * 无障碍文案。
+ * ⚠️ 地点用 `placeDisplayName()`（中文优先，R5）：读屏用户听到的应当是
+ *    「华盛顿」而不是 `--` 或英文键；地点是**扫读**这张照片的关键信息之一。
+ * ⚠️ 判据是「有地点」而不是「有 GPS」：598 张目录名照片没有 GPS 但有地点。
+ */
+const placeText = computed(() =>
+  (props.photo?.placeName || props.photo?.placeZh) ? placeDisplayName(props.photo) : '',
+)
+
+/** 缩略图上的 GPS 角标 tooltip：带上地点中文名（没有地点时退回通用文案） */
+const gpsTitle = computed(() => {
+  if (!hasGps.value) return ''
+  return placeText.value ? `有 GPS 定位：${placeText.value}` : '有 GPS 定位'
+})
+
+/** 地点原值（tooltip 用，排障） */
+const placeTitle = computed(() => placeRawName(props.photo))
+
 const altText = computed(() => {
   const parts = [baseName(props.photo?.relPath) || '照片']
   const year = formatYear(props.photo)
   if (year !== '—') parts.push(`${year} 年`)
+  if (placeText.value) parts.push(placeText.value)
   if (faceCount.value) parts.push(`${faceCount.value} 张人脸`)
   if (isDuplicate.value) parts.push('重复照片')
   if (isMissing.value) parts.push('原图不在磁盘上')
@@ -192,10 +213,10 @@ function onError() {
         <span
           v-if="hasGps"
           class="inline-flex items-center gap-0.5 rounded-btn bg-card px-1 py-0.5 text-caption text-ink"
-          title="有 GPS 定位"
+          :title="gpsTitle"
         >
           <MapPin class="h-3 w-3" aria-hidden="true" />
-          <span class="sr-only">有 GPS 定位</span>
+          <span class="sr-only">{{ gpsTitle }}</span>
         </span>
       </div>
 
@@ -215,6 +236,10 @@ function onError() {
       :title="photo?.relPath"
     >
       {{ baseName(photo?.relPath) }}
+      <!-- 有地点时把**中文名**补在文件名后面（时间轴视图里要靠它认地方） -->
+      <span v-if="placeText" class="text-ink-sub" :title="placeTitle || undefined">
+        · {{ placeText }}
+      </span>
     </figcaption>
   </figure>
 </template>

@@ -21,6 +21,9 @@ venv/
 env/
 ENV/
 .pytest_cache/
+# pytest --basetemp 落在仓库内时的产物（Windows 下 os.replace 会被索引器/杀软
+# 锁住，用系统 %TEMP% 更稳；两种都忽略，免得 5000+ 个临时文件进 git status）
+.pytest-tmp/
 .mypy_cache/
 .ruff_cache/
 

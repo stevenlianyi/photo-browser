@@ -221,6 +221,17 @@ def bucketKeyAdultFrom18(age: int, birthYear: int) -> str:
     return bucketKeyAdult(age, birthYear)
 
 
+def strategyOf() -> str:
+    """当前分桶策略（basicSettings.bucketStrategy() 的转发）。
+
+    为什么放在这里而不是让调用方各读 basicSettings
+    -----------------------------------------------
+      策略分支的**唯一**实现就在 bucketKeyAdaptive 里。谁想知道「现在按哪套分桶」，
+      都得从这两个函数之一问出去；再开第三个读取点就是第二个真相。
+    """
+    return basicSettings.bucketStrategy()
+
+
 def bucketKeyAdaptive(shotYear, birthYear=None) -> str:
     """**方案 B · 自适应分桶**（本项目口径）。见文件头规则表。
 
@@ -232,16 +243,27 @@ def bucketKeyAdaptive(shotYear, birthYear=None) -> str:
     返回
     ----
       '1995-1997' 这样的桶键；shotYear 无效时返回空串（NO_BUCKET）。
+
+    ⚠️ 另受 `basicSettings.BUCKET_STRATEGY` 控制（步骤 12 / P-08）：
+       `fixed5` 一律走等宽 5 年；`none` 全部落 `ALL`（= **不分桶的对照组**，
+       S0 测到的FR 32.75% 就是这一档）。只有 `adaptive` 走下面这套自适应规则。
+       改策略后**必须重刷 pb_face.shotBucket 再重算质心**（DR-22），
+       否则质心表里留着旧桶键的行、新桶键又没有质心 —— 匹配率归零且不报错。
     """
     year = validShotYear(shotYear)
     if year is None:
         return NO_BUCKET
+    strategy = basicSettings.bucketStrategy()
+    if strategy == "none":
+        return ALL_BUCKET
+    if strategy == "fixed5":
+        return bucketKeyEqual(year)
     born = validBirthYear(birthYear)
     if not born:
         return bucketKeyEqual(year)
     age = year - born
     if age < 0:
-        # 出生年晚于拍摄年：只有两种可能 —— 生日录错了，或这��照片拍于出生之前。
+        # 出生年晚于拍摄年：只有两种可能 —— 生日录错了，或这张照片拍于出生之前。
         # 两种都**不该**由分桶去猜，退回等宽桶至少不会把脸归到"负岁数"的怪桶里。
         return bucketKeyEqual(year)
     if age <= CHILD_MAX_AGE:

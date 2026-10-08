@@ -10,7 +10,7 @@
 #   2. 与 pb_*.txt 的字段注释一一对应，改表时同步改这里；
 #   3. 本模块零依赖、零IO，可安全被任何层import。
 
-_VERSION = "20261004"
+_VERSION = "20261008"
 
 
 # ============================================================
@@ -142,6 +142,67 @@ def isFinalStatus(status: str) -> bool:
 
 
 # ============================================================
+# 二之二、任务类型（pb_scan_job.jobType）
+# ============================================================
+# 为什么扫描与人脸识别共用一张任务表
+# ----------------------------------
+#   两者是**同一条流水线上的前后两道工序**，共用同一套状态机
+#   （IDLE→RUNNING→PAUSED/DONE/FAILED）、同一套断点续跑语义
+#   （batchIndex / lastCursor）、同一套进度口径（totalCount/processedCount），
+#   而 pb_scan_job 的字段对两者**逐个都对得上**：
+#     · rootPath     —— 人脸识别就是照片库根
+#     · totalCount   —— 待提取特征的**照片**张数
+#     · processedCount—— 已处理张数
+#     · addedCount   —— 提取出**至少一张脸**的照片张数
+#     · pendingCount —— 新写入 pb_face 的**人脸条数**（= 新增待确认量）
+#     · lastCursor   —— 最后处理的 photoCode（断点续跑靠它）
+#   为此另立一张 pb_face_job 只是把同一组列抄一遍，换来的是
+#   「前端要维护两套列表页、两套轮询、两处单写入者互斥」。
+#   ⇒ 一张表 + 一个 jobType 判别位，是这里的最小且一致的做法。
+#
+# ⚠️ 正因为同表，**所有**按类型过滤的查询都必须带上 jobType：
+#    混在一起查会让「扫描台」显示出人脸识别任务的进度条，
+#    而那几个计数字段的口径完全不同（见上）。
+
+JOB_TYPE_SCAN: int = 0    # 照片扫描（步骤 3：遍历 -> 写 pb_photo）
+JOB_TYPE_FACE: int = 1    # 人脸识别（步骤 5：提取特征 -> 写 pb_face）
+
+JOB_TYPE_ALL: tuple = (JOB_TYPE_SCAN, JOB_TYPE_FACE)
+
+JOB_TYPE_TEXT: dict = {
+    JOB_TYPE_SCAN: "照片扫描",
+    JOB_TYPE_FACE: "人脸识别",
+}
+
+#: pb_scan_job.jobCode 前缀（与 basicSettings.SCAN_JOB_CODE_PREFIX 呼应）
+JOB_CODE_PREFIX: dict = {
+    JOB_TYPE_SCAN: "SJ",
+    JOB_TYPE_FACE: "FJ",
+}
+
+
+def jobTypeText(jobType) -> str:
+    """任务类型 -> 中文名；未知值原样回显（不静默变成「扫描」）"""
+    try:
+        return JOB_TYPE_TEXT[int(jobType)]
+    except (TypeError, ValueError, KeyError):
+        return "未知类型(%s)" % jobType
+
+
+def makeJobCode(jobType: int) -> str:
+    """任务类型 -> 带类型前缀的任务编码：SJ_/FJ_ + 时间戳 + 6 位随机。
+
+    前缀让 `GET /api/scan/jobs` 的返回肉眼可辨（排障时看日志最省事），
+    且**不影响幂等**——幂等键是整串 jobCode，不靠前缀推断类型。
+    """
+    import random
+    import time as _time
+    prefix = JOB_CODE_PREFIX.get(int(jobType), "XX")
+    return "%s_%s_%06d" % (prefix, _time.strftime("%Y%m%d%H%M%S"),
+                           random.randint(0, 999999))
+
+
+# ============================================================
 # 三、pb_photo.scanState
 # ============================================================
 
@@ -215,6 +276,32 @@ CLUSTER_NOISE: str = "_NOISE_"
 # 截图等无法识别年份的照片，shotYear 落库为 NULL；
 # 内存/查询层需要占位时统一用这个值，勿散落 0 / -1 / "UNK"
 SHOT_YEAR_UNKNOWN: int = -1
+
+
+# ============================================================
+# 七之三、有效拍摄年（DR-42）
+# ============================================================
+# `pb_photo.shotYear` 是**机器读出来的**年份（EXIF -> 文件名 -> mtime），
+# 而老相册翻拍 / 扫描件的这三条兜底链给出的都是"翻拍那一刻"，不是照片被拍下的年代
+# —— 于是这张照片的人脸会落进错误的年代桶（桶 = f(拍摄年, 该人出生年)）。
+#
+# `pb_photo.shotYearOverride` 是用户手工填的**修正年**（P-03「年代修正」）。
+# 口径只有一条：**override 优先于 shotYear**，全项目一致。
+#
+# ⚠️ 为什么必须收口成一个函数，而不是各处手写 COALESCE：
+#    分桶（rebucket）、时间筛选（browse.listPhotos）、年代跨度（MIN/MAX）、
+#    地点聚合（placeStore.rebuildPlaces）四处都要用同一个口径；
+#    散着写的话，"漏改一处"的症状是**某一处仍按 2019 年算**，
+#    而界面上那几个数字都合法 —— 又是一个不报错的静默不一致。
+
+#: 有效拍摄年在 SQL 里的列表达式。alias 是 pb_photo 在该查询里的表别名。
+#: ⚠️ 生成层**没有**给这两列建联合索引：本表达式会让 idx_pb_photo_shotYear
+#:    失效（表达式不匹配索引）。目前照片量级（万张）下全表扫可接受；
+#:    真要提速，应改为「物化一列 effectiveShotYear 并随修正一起维护」。
+def sqlEffectiveShotYear(alias: str = "p") -> str:
+    """`COALESCE(p.shotYearOverride, p.shotYear)` —— 全项目唯一口径（DR-42）。"""
+    name = str(alias or "p").strip() or "p"
+    return "COALESCE(%s.shotYearOverride, %s.shotYear)" % (name, name)
 
 # ============================================================
 # 七之二、pb_person.relation / pb_person_category.category（步骤 8 联系人导入）
@@ -307,5 +394,8 @@ if __name__ == "__main__":
     print("JOB_STATUS_ALL          :", JOB_STATUS_ALL)
     print("JOB PAUSED -> RUNNING ok :", canTransit(JOB_PAUSED, JOB_RUNNING))
     print("JOB DONE  -> RUNNING ok :", canTransit(JOB_DONE, JOB_RUNNING))
+    print("JOB_TYPE_TEXT          :", JOB_TYPE_TEXT)
+    print("样例 jobCode           :", makeJobCode(JOB_TYPE_SCAN), "/",
+          makeJobCode(JOB_TYPE_FACE))
     print("SCAN_STATE_TEXT         :", SCAN_STATE_TEXT)
     print("DEL_FLAG_ALL            :", DEL_FLAG_ALL)

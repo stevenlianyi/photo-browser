@@ -390,43 +390,72 @@ class FaceStore(object):
 
 def loadPhotoRows(dbFile: str = None, limit: int = 0, offset: int = 0,
                   onlyPending: bool = True, photoRoot: str = None,
-                  orderBy: str = "recID", descFlag: bool = False) -> list:
+                  orderBy: str = "recID", descFlag: bool = False,
+                  minRecID: int = 0) -> list:
     """取待做特征提取的 pb_photo 行（**分页**，与步骤 3 的 SCAN_INDEX_PAGE 同理）。
 
     onlyPending=True -> 只要 scanState=0（步骤 3 刚入库、或内容变更后被归零的行）。
     ⚠️ 一次全取 10 万行峰值 150MB（步骤 3 实测），所以给 limit/offset 分页。
        顺手剔掉磁盘上已经没有的（拔盘 / 挪走），否则白跑一遍模型才发现。
+    minRecID : 只取 recID > 该值的行（**断点续跑的游标**，见 faceScheduler）
+
+    ⚠️⚠️ 判据是 `scanState = 0`，**不是** `scanState IS NULL`
+    --------------------------------------------------------
+      `pb_photo.scanState` 的 DDL 是 `TINYINT NOT NULL DEFAULT 0`：扫描器
+      插入时根本不写这一列（`runner` 的写入列清单里没有它），落库走 DEFAULT 0。
+      所以「待提取」= 数值 0，而不是 NULL。
+
+      之前这里写的是 `nullFields=("scanState",)`，而生成层对不在
+      `NULLABLE_FIELDS` 白名单里的字段是**静默跳过条件**（不报错）——
+      于是 onlyPending=True 返回的是**全表**：已完成提取的那 103 张
+      会被反复重算，白跑几十分钟不说，还让人以为"过滤生效了"。
+      这类"参数被无声忽略"的坑，判据必须与 DDL 的 NOT NULL/DEFAULT 对得上。
     """
     if dbFile:
         sqliteCommon.dbHandle(dbFile)
+    # 多取一些再按 recID 游标切：limit 之内可能有磁盘已缺失的行，
+    # 逐个剔掉之后仍要凑够 limit 才是"这一批真能处理的张数"。
+    overFetch = int(limit or 0) * 2 + 50 if (limit and minRecID > 0) else int(limit or 0)
     rows = sqliteCommon.query_pb_photo(
-        "pb_photo", nullFields=("scanState",) if onlyPending else (),
+        "pb_photo", scanState=(0 if onlyPending else ""),
         orderBy=orderBy, descFlag=descFlag,
-        limitNum=int(limit or 0), offsetNum=int(offset or 0))
+        limitNum=overFetch, offsetNum=int(offset or 0))
     root = os.path.abspath(photoRoot or paths.photo_dir())
+    floor = int(minRecID or 0)
     out = []
     for row in rows:
+        if floor > 0 and int(row.get("recID") or 0) <= floor:
+            # 游标之后必须单调：orderBy=recID 时直接 break，
+            # 否则会把游标之前的行又捞回来重复提取
+            continue
         relPath = str(row.get("relPath") or "")
         if not relPath:
             continue
         if not os.path.isfile(os.path.join(root, relPath.replace("/", os.sep))):
             continue
         out.append(row)
+        if limit and len(out) >= int(limit):
+            break
     return out
 
 
 def extractAndStore(photoRows: list, workers: int = None, dbFile: str = None,
                     photoRoot: str = None, thumbRoot: str = None,
                     engineKwargs: dict = None, replaceFaces: bool = False,
-                    onProgress=None, batchRows: int = None) -> dict:
+                    onProgress=None, batchRows: int = None,
+                    onPhotoDone=None) -> dict:
     """**主编排**：查库取行（调用方给）-> 进程池提取 -> 主进程单线程批量落库。
 
     photoRows  : list[pb_photo 行]（photoCode / relPath / shotYear / 身份列齐全）
     workers    : 进程数，None = cpu_count-1
     replaceFaces : True = 重提取（先删旧人脸行）
     onProgress : 可选回调 onProgress(done, total, result)
+    onPhotoDone : 可选回调 onPhotoDone(photoRow, result) —— **每张照片一次**，
+                  在落库前触发。onProgress 是抽稀的（每 PROGRESS_EVERY 张一次），
+                  拿不到"本批有几张照片检出人脸"这种精确计数；调度器的进度
+                  口径必须用它，不能拿 onProgress 凑（步骤 9 的faceScheduler）。
 
-    返回 {pool: poolSummary, store: storeSummary, timing: {...}}
+    返回 {pool: poolSummary, store: storeSummary, timing: {...}, photos}
 
     为什么编排放在**写库这一层**而不是单独一个模块
     --------------------------------------------
@@ -457,6 +486,11 @@ def extractAndStore(photoRows: list, workers: int = None, dbFile: str = None,
             if photoRow is None:          # 不该发生：任务里的 photoCode 来自同一份 rows
                 _LOG.error("落库时找不到 photoCode=%s 的 pb_photo 行，跳过", photoCode)
                 continue
+            if onPhotoDone is not None:
+                try:
+                    onPhotoDone(photoRow, result)
+                except Exception as e:    # 回调异常不许影响落库
+                    _LOG.warning("onPhotoDone 回调异常（已忽略）: %s", e)
             store.submit(photoRow, result)
         store.flush()
 

@@ -21,13 +21,13 @@
 #
 # ⚠️⚠️ 本模块**只做编排**，一套写库逻辑都不自己实现
 # ---------------------------------------------------
-#   「删旧 linkKey + 写新 source=1 + 刷 shotBucket + 重算原人*与*新人全部桶
+#   「删旧 linkKey + 写新 source=1 + 刷 shotBucket + 重算原人*与*新人全部年代档
 #    + 同步 faceCount + 落 pb_review_log」这套东西是步骤 6/7 已经在
 #   assigner / merger / rebucket / centroid 里**反复打磨过**的实现
 #   （每个函数头上都写着「为什么顺序不能颠倒」「漏了不报错只会越改越乱」）。
 #   在 api 层再写一遍的结果不是「更清晰」，而是**两套规则迟早分叉**：
-#   改判接口漏了刷桶，而 assigner 那条路径刷了——
-#   于是同一个人经UI 改判和经 CLI 改判会落到不同的桶，
+#   改判接口漏了刷新年代档，而 assigner 那条路径刷了——
+#   于是同一个人经UI 改判和经 CLI 改判会落到不同的年代档，
 #   而两边都「看起来成功」。所以这里全部转发，一行写库代码都没有。
 #
 # 两个队列的口径（**唯一权威在 processor/review/queue.py**）
@@ -581,6 +581,14 @@ def undoOperation(body: dto.UndoBody) -> dict:
         linksRestored=int(info.get("linksRestored") or 0),
         linksDropped=int(info.get("linksDropped") or 0),
         missingFaces=info.get("missingFaces") or [],
+        # ⚠️ 下面这几个是 DR-42 年代修正（BUCKET_FIX）的撤销结果 ——
+        #    对 SPLIT / MERGE 恒为 None/0/[]，一并透传可以让前端**不用**
+        #    按 opType 分两套读法，也避免"撤销成功了但界面上说不出做了什么"。
+        photoCode=info.get("photoCode") or None,
+        restoredOverride=info.get("restoredOverride"),
+        facesRebucketed=int(info.get("facesRebucketed") or 0),
+        bucketsChanged=int(info.get("bucketsChanged") or 0),
+        warnings=info.get("warnings") or [],
         centroidBuckets=[one.get("bucketKey") for one in (info.get("centroids") or [])],
         personStats={code: browse.personStatsOf([code]).get(code, {})
                      for code in (fromPerson, toPerson) if code},
@@ -597,6 +605,12 @@ def getRevertible(size: int = Query(default=20, le=dto.MAX_PAGE_SIZE)):
        在最常见的场景下变成一个必然报错的按钮。
     """
     items = merger.revertibleList(limit=size)
+    # 撤销确认框里要写「把「张三」合并进「张三(2)」」—— 只有编码用户读不出来
+    names = _displayNamesOf([one.get("fromPersonCode") for one in items]
+                            + [one.get("toPersonCode") for one in items])
+    for one in items:
+        one["fromDisplayName"] = names.get(str(one.get("fromPersonCode") or "")) or None
+        one["toDisplayName"] = names.get(str(one.get("toPersonCode") or "")) or None
     return {"ok": True, "total": len(items), "count": len(items), "items": items}
 
 
@@ -643,19 +657,34 @@ def getReviewLog(faceCode: str = Query(default=None, description="按人脸查")
         "pb_review_log", faceCode=str(faceCode or ""), photoCode=str(photoCode or ""),
         toPersonCode=str(personCode or ""), opType=str(opType or ""),
         orderBy="recID", descFlag=True, limitNum=s, offsetNum=at)
-    items = [_logItem(r) for r in rows]
+    items = [_logItem(r, _displayNamesOf(
+        [r.get("fromPersonCode"), r.get("toPersonCode")])) for r in rows]
     return dto.pageBody(items, p, s, total)
 
 
-def _logItem(row: dict) -> dict:
-    """pb_review_log 行 -> 前端要的日志条目。"""
+def _logItem(row: dict, names: dict = None) -> dict:
+    """pb_review_log 行 -> 前端要的日志条目。
+
+    `fromDisplayName` / `toDisplayName`（步骤 12 补）
+    -----------------------------------------------
+      界面上要写「把「张三」合并进「张三(2)」」而不是两个编码 ——
+      而 `pb_person.displayName` 是 UNIQUE，导入时重名者会被加后缀，
+      所以「显示真实 displayName，不能只显示姓」是硬要求（DR-16 补充②）。
+      连查带软删的人（`withDeleted`）：被合并掉的档案正是最该在历史里被看见的，
+      而它已经 delFlag='1' 了。
+    """
+    known = names or {}
+    fromCode = row.get("fromPersonCode") or None
+    toCode = row.get("toPersonCode") or None
     return {
         "logCode": str(row.get("logCode") or ""),
         "opType": str(row.get("opType") or ""),
         "faceCode": row.get("faceCode") or None,
         "photoCode": row.get("photoCode") or None,
-        "fromPersonCode": row.get("fromPersonCode") or None,
-        "toPersonCode": row.get("toPersonCode") or None,
+        "fromPersonCode": fromCode,
+        "toPersonCode": toCode,
+        "fromDisplayName": known.get(str(fromCode or "")),
+        "toDisplayName": known.get(str(toCode or "")),
         "similarity": (round(float(row["similarity"]), 4)
                        if row.get("similarity") is not None else None),
         "faceCount": int(row.get("faceCount") or 0),
@@ -667,6 +696,21 @@ def _logItem(row: dict) -> dict:
         "canRevert": (int(row.get("isRevertible") or 0) == 1
                       and not str(row.get("revertedByLogCode") or "")),
     }
+
+
+def _displayNamesOf(codes) -> dict:
+    """一批 personCode -> displayName（连软删一起看）。批量查，不逐个get。"""
+    marks = sorted({str(c) for c in (codes or []) if c})
+    if not marks:
+        return {}
+    sqlMarks = ", ".join(["%s"] * len(marks))
+    out = {}
+    for row in query.selectList(
+            "SELECT personCode AS personCode, displayName AS displayName"
+            " FROM pb_person WHERE personCode IN (" + sqlMarks + ")",
+            tuple(marks)):
+        out[str(row.get("personCode") or "")] = str(row.get("displayName") or "")
+    return out
 
 
 def _codeOf(errText: str) -> str:

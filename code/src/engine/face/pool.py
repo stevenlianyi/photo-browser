@@ -363,6 +363,15 @@ def _newSummary(workers: int) -> dict:
     return {"images": 0, "kept": 0, "rawFaces": 0, "noFace": 0, "failed": 0,
             "elapsedTotal": 0.0, "elapsedList": [], "dropped": {}, "failures": [],
             "droppedDetail": {},
+            # ⚠️ fatal = **整池失败**（子进程全崩 / 队列卡死 / 块没收齐），
+            #   与 failures（单张失败的原因集合）**不是一回事**。
+            #   差别在于：fatal 非空时 images 往往是 0，也就是「一张都没算成」——
+            #   而"一张都没算成"和"算成了但每张都没人脸"在计数上**长得一样**
+            #   （都是 kept=0），不单列出来，调用方就会把
+            #   「依赖没装，子进程 import 就炸」当成「这批照片里没有人脸」，
+            #   于是任务 DONE、进度 100%、待确认 0 —— 一切都显示正常。
+            #   这正是"扫描完却一个待确认都没有"的第三种成因，必须能被上层看见。
+            "fatal": "",
             "workers": workers, "mode": "queue", "wallTime": 0.0,
             "engineInfo": {}}
 
@@ -600,6 +609,8 @@ def extractFaces(tasks: list, workers: int = None, engineKwargs: dict = None,
         if fatal:
             _LOG.error("人脸提取进程池异常: %s", fatal)
             summary["failures"].append(fatal)
+            # 单列出来：调用方要靠它判断「本批是不是一张都没算成」
+            summary["fatal"] = fatal
     except Exception as e:
         # 进程池起不来（受限机器 / 杀软拦 CreateProcess）：**退回主进程串行**，
         # 不让一批坏环境毁掉整轮（与步骤 4 的缩略图池同口径）

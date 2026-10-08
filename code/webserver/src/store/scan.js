@@ -60,8 +60,8 @@ export const useScanStore = defineStore('scan', () => {
     }
   }
 
-  function start(rootPathValue = rootPath.value) {
-    return startScan(rootPathValue, batchSize.value)
+  function start(rootPathValue = rootPath.value, autoFace = true) {
+    return startScan(rootPathValue, batchSize.value, autoFace)
   }
 
   /** 继续下一批：wait=1 同步跑完一批，返回后计数已是最终值 */

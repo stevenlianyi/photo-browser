@@ -88,7 +88,7 @@ function close() {
       <p class="mt-2 text-caption text-ink-sub">
         合并后共
         <b class="tabular-nums text-ink">{{ num(mergedFaces) }}</b> 张人脸，
-        年代桶质心会按新归属<b>全部重算</b>。
+        年代档质心会按新归属<b>全部重算</b>。
       </p>
     </div>
 

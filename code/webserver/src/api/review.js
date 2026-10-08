@@ -8,7 +8,7 @@
  *     侧栏角标必须分两个数字，不能合并成一个。
  *
  * 改判是**唯一**的纠错入口：fix 覆盖「改判到某人 / 置为未知 / 标记陌生人」，
- * 服务端负责删旧 linkKey + 写新 source=1 + 重算原人与新人全部桶 + 落 pb_review_log。
+ * 服务端负责删旧 linkKey + 写新 source=1 + 重算原人与新人的全部年代档质心 + 落 pb_review_log。
  */
 import request from './request'
 

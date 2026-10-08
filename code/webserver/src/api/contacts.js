@@ -27,6 +27,15 @@ export function patchContact(personCode, body) {
   return request.patch(`/contacts/${encodeURIComponent(personCode)}`, body)
 }
 
+/** 设 / 清某个人的**默认头像**（DR-41，走 PATCH 的部分字段语义）。
+ *
+ *  faceCode 给空串 = **清空**（卡片与详情回退到服务端算好的代表脸，DR-40）。
+ *  ⚠️ 头像只影响**展示**：不进质心、不改 pb_face、不写 review 日志。
+ *  ⚠️ 传**别人的** faceCode 后端回 400（不允许库里出现「头像不属于他」的行）。 */
+export function setPersonAvatar(personCode, faceCode) {
+  return patchContact(personCode, { avatarFaceCode: String(faceCode || '') })
+}
+
 /** 停用影响面预览（**只读，一行都不写**） */
 export function getImpact(personCode) {
   return request.get(`/contacts/${encodeURIComponent(personCode)}/impact`)

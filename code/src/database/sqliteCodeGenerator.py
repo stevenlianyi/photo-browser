@@ -187,6 +187,11 @@ INDEX_SPEC = {
         ("idx_pb_review_log_isRevertible", ("isRevertible",), False,
          "isRevertible=1 AND revertedByLogCode IS NULL"),
     ),
+    "pb_scan_job": (
+        # 任务类型过滤（步骤 9 补）：扫描台按类型分栏、后端 /api/face/jobs
+        # 只列人脸识别任务，都靠这一条等值过滤 —— 不加索引就是全表扫。
+        ("idx_pb_scan_job_jobType", ("jobType",), False, None),
+    ),
     # 步骤 9 加：地点字典（`GET /api/places` 不再全表 GROUP BY）
     "pb_place": (
         # 按地点名精确查（rebuildPlaces 回填时按 placeName 认人）
@@ -207,7 +212,7 @@ EXPECTED_INDEX_NAMES = {
     "pb_person": ("idx_pb_person_personCode", "idx_pb_person_displayName"),
     "pb_person_category": (),
     "pb_family": ("idx_pb_family_familyCode",),
-    "pb_scan_job": ("idx_pb_scan_job_jobCode",),
+    "pb_scan_job": ("idx_pb_scan_job_jobCode", "idx_pb_scan_job_jobType"),
     "pb_person_centroid": ("idx_pb_person_centroid_personCode_bucketKey",),
     "pb_photo_person": ("idx_pb_photo_person_linkKey",
                         "idx_pb_photo_person_personCode",
@@ -238,12 +243,19 @@ QUERY_FILTER_FIELDS = {
     "pb_family": ("familyCode",),
     "pb_person": ("personCode", "displayName", "vcardUid", "familyGroupCode"),
     "pb_person_category": ("personCode", "category"),
-    "pb_photo": ("photoCode", "relPathHash", "fileHash", "dupOfPhotoCode"),
+    # ⚠️ scanState 必须在等值过滤白名单里（步骤 9 补的坑）：
+    #   「待提取人脸的照片」判据是 `scanState = 0`（NOT NULL DEFAULT 0），
+    #   **不是** `scanState IS NULL`。先前 faceStore.loadPhotoRows 用
+    #   nullFields=("scanState",) 去查，而 scanState 是 NOT NULL 列 ——
+    #   生成层发现字段不在 NULLABLE_FIELDS 白名单就**静默跳过该条件**，
+    #   于是 onlyPending=True 照样返回**全表**，"只处理待提取的"这个
+    #   承诺从来没生效过（一条不报错，只是白跑）。
+    "pb_photo": ("photoCode", "relPathHash", "fileHash", "dupOfPhotoCode", "scanState"),
     "pb_place": ("placeCode", "placeName"),
     "pb_face": ("faceCode", "photoCode", "personCode"),
     "pb_person_centroid": ("personCode", "bucketKey"),
     "pb_photo_person": ("linkKey", "photoCode", "personCode"),
-    "pb_scan_job": ("jobCode", "jobStatus"),
+    "pb_scan_job": ("jobCode", "jobStatus", "jobType"),
     # ⚠️ fromPersonCode/toPersonCode 不带索引，但**必须有查询参数**：
     #   undo() 要按「同一对(from,to) + opType」把一次合并/拆分的成员行捞出来
     #   （再在 Python 里按 detail 里的 op 标记精确筛）。

@@ -176,10 +176,19 @@ def personCards(needAvatarFallback: bool = True) -> dict:
 
 
 def _candidateDict(one: matcher.Candidate, cards: dict) -> dict:
-    """matcher.Candidate -> 前端要的候选结构（含头像 faceCode）。"""
+    """matcher.Candidate -> 前端要的候选结构（含头像 faceCode）。
+
+    姓名的**权威来源是 card**（personCards() 直读 pb_person.displayName），
+    不是 one.displayName：matcher 那份是 CentroidIndex.displayNames 的引用，
+    而它在 loadAllCentroids 时对空姓名用 personCode 兜过底
+    （centroid._personDisplayNames 的 `or code`，那份要参与同分排序，
+    不可能是空串）。于是只要**进程没重启**、质心索引还拿着旧值，
+    `one.displayName` 就是一个非空的 'CS_BaoRui_Zhang' —— 真名反而被它盖掉，
+    界面上就是一串代号。所以顺序必须是 card 优先。
+    """
     card = cards.get(one.personCode) or {}
     return {"personCode": one.personCode,
-            "displayName": one.displayName or card.get("displayName") or "",
+            "displayName": card.get("displayName") or one.displayName or one.personCode,
             "avatarFaceCode": card.get("avatarFaceCode") or "",
             "similarity": round(float(one.score), 4),
             "bucketKey": one.bucketKey or None}

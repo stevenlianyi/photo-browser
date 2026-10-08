@@ -9,7 +9,9 @@
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { getPhoto, getTimeline, listPhotos, listPersons, listPlaces } from '@/api/browse'
+import { getPhoto, getTimeline, listPhotos, listPersons } from '@/api/browse'
+// ⚠️ 地点封装在 api/place.js（R5 起的唯一出口），不再从 browse.js 引
+import { listPlaces } from '@/api/place'
 
 /** 与后端 dto.DEFAULT_PAGE_SIZE 对齐；单页上限由后端 le 限制 */
 export const DEFAULT_PAGE_SIZE = 60
@@ -266,8 +268,14 @@ export const usePhotosStore = defineStore('photos', () => {
     items.value = []
   }
 
+  /**
+   * ⚠️ 必须**原地改**（Object.assign）而不是换一个新对象：
+   *    PhotosView 里 `const filters = photos.filters` 持有的是**当时那个对象**，
+   *    换新对象后页面手上的还是旧的 —— 点「清除筛选」时输入框里的条件不会消失，
+   *    watch 也看不到变化（它盯的同样是旧对象）。
+   */
   function resetFilters() {
-    filters.value = {
+    Object.assign(filters.value, {
       keyword: '',
       personCode: '',
       placeName: '',
@@ -275,7 +283,7 @@ export const usePhotosStore = defineStore('photos', () => {
       shotYearTo: '',
       hasFace: '',
       isDuplicate: '',
-    }
+    })
     onlyWithFace.value = false
     onlyDuplicate.value = false
     page.value = 1

@@ -32,9 +32,43 @@ onnxruntime>=1.17.0
 # vCard 3.0 / 4.0 解析（KIND:group → 家庭组）
 vobject
 
+# ---- 姓名拼音检索 ----
+# pypinyin：pb_person.displayNamePinyin 的生成库。
+# ⚠️ 必须装：缺了它汉字搜索照常可用，但拼音搜索整条失效
+#    （common/pinyin.py 会降级 + warning，不崩）。
+#    纯 Python、无编译，与本项目「insightface 需要编译、已备降级预案」的
+#    风险立场不冲突。2026-10-07 实测安装 0.55.0。
+pypinyin
+
 # ---- 可选依赖（缺失时自动降级，不影响启动）----
 # 离线逆地理：GPS → 地点名。缺失时 placeName 留空并记录 warning
 reverse_geocoder
+
+# ---- 地点中文名（可选 · 步骤 R4a / DR-28 / DR-29）----
+# 两者的**作用完全不同**，别当成一组：
+#   shapely  = point-in-polygon **引擎**。没它就算不出「这个点落在哪个区县」。
+#   amap-geo = 高德行政区划**离线数据**。⚠️ 实测该包在 PyPI 上**不存在**
+#              （amap-geo / amap_geo / geo-amap / amapgeo 全部 404 或
+#               no matching distribution）；可替代的 china-division / cpca
+#              都只有「编码 + 中文名」、**没有多边形**，做不了 point-in-polygon。
+#              所以数据源改成**本地数据文件**：
+#              code\src\data\china_district.json.gz（tools\fetch_zh_geo.py 产出，
+#              DataV.GeoAtlas 34 省 / 2840 区县，5.7MB gzip，**已入库**）。
+#              `amap-geo` 这行保留在**可选段**：谁装了谁先用，且降级路径
+#              （包缺失 -> 只记一次 warning、nameZh 全 NULL、界面回退英文）
+#              必须真的被跑到过，而不是「反正包不存在，代码可以不写」。
+# ⚠️ 缺失只降级不报错：装不上只是「地点显示英文」，不是故障。
+shapely>=2.0.0
+# ⚠️⚠️ `amap-geo` 那一行**故意注释掉**，不要取消
+# ------------------------------------------------------------
+#   它在 PyPI 上不存在（`pip install amap-geo` -> No matching distribution；
+#   pypi.org/pypi/amap-geo/json -> 404；amap_geo / geo-amap / amapgeo
+#   同样 404）。写成非注释的一行会让**整份 requirements 装不上**
+#   —— 而「地点显示英文」是降级，「服务装不起来」是事故。
+#   保留这段注释是留个记录：DR-29 原始设计用的就是它，
+#   将来若真有了可用版本（或换私有源），取消注释即可，
+#   placeNameZh._loadFromPackage() 那条路已经写好、并在跑它的降级分支。
+# amap-geo>=0.0.7
 
 # ---- 测试 ----
 pytest

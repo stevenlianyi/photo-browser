@@ -10,9 +10,12 @@
   ① **序号常驻在左**（`1` / `2` / `3`）。它不是装饰，是键盘快捷键的
      **可见对应物**：用户按「2」之前得先知道第二个是谁。序号 + 快捷键提示
      写在一起，肌肉记忆才建得起来。
-  ② **灰区条目橙色提示**。相似度落在 T_low–T_high 的候选**不做自动归属**
-     （P0-2「不确定就要问」），所以这几条本身就是"机器没把握"的那些 ——
-     橙色提示不是警告，是**在解释为什么这里要你动手**。
+  ② **相似度分档，而不是只给一个数字**。0.22 和 0.05 长得一样，
+ *     但前者「多半不是」、后者「接近随机基线」，所以数值下面必须有一句
+ *     人话档位：高可靠 / 待判断 / 大概不是 / 基本不是。四档边界跟着
+ *     T_low–T_high 走 —— 落在灰区的候选**不做自动归属**，
+ *     橙色的「待判断」不是警告，是**在解释为什么这里要你动手**。
+     （P0-2「不确定就要问」）：这一档不会自动归属。
   ③ **关系提示来自 `relation` 字段**（如「兄妹，长相接近」）。
      这不是算出来的相似度能表达的信息：0.58 和 0.62 谁更可能是同一个人，
      只有知道"这俩是兄妹"才判断得了。所以它必须显示，且**用橙色**（警示）
@@ -22,15 +25,16 @@
 import { computed } from 'vue'
 import { TriangleAlert, X } from 'lucide-vue-next'
 import { faceUrl } from '@/api/static'
-import { similarityText } from '@/utils/faceState'
+import { confidenceOf, similarityText } from '@/utils/faceState'
+import { relationLabelOf } from '@/store/persons'
 
 const props = defineProps({
   /** { personCode, displayName, avatarFaceCode, similarity, relation, bucketKey } */
   candidate: { type: Object, required: true },
   /** 左上角序号（0 起）；对应键盘 1/2/3 */
   index: { type: Number, default: 0 },
-  thresholdLow: { type: Number, default: 0.3 },
-  thresholdHigh: { type: Number, default: 0.45 },
+  thresholdLow: { type: Number, default: 0.42 },
+  thresholdHigh: { type: Number, default: 0.62 },
   loading: { type: Boolean, default: false },
   /** 高亮：键盘按下时会选中这一条 */
   active: { type: Boolean, default: false },
@@ -40,14 +44,19 @@ const emit = defineEmits(['confirm', 'fix'])
 
 const ordinal = computed(() => props.index + 1)
 
-/** 灰区 = 机器没把握的区间，正是需要人工判断的那些 */
-const inGreyZone = computed(() => {
-  const value = props.candidate?.similarity
-  if (value === null || value === undefined) return false
-  const num = Number(value)
-  return num >= props.thresholdLow && num <= props.thresholdHigh
-})
+/**
+ * 相似度分档（≥T_high 高可靠 / 灰区 待判断 / 偏低 大概不是 / 极低 基本不是）。
+ * 边界跟着设置里的 T_low/T_high 走 —— 用户调了阈值，这里跟着变，
+ * 不会界面按旧口径说「高可靠」而后台已经按新口径自动归属了。
+ */
+const level = computed(() =>
+  confidenceOf(props.candidate?.similarity, {
+    low: props.thresholdLow,
+    high: props.thresholdHigh,
+  }),
+)
 
+/** 灰区 = 机器没把握的区间，正是需要人工判断的那些（标签文案已含这层意思） */
 const hasAvatar = computed(() => Boolean(props.candidate?.avatarFaceCode))
 </script>
 
@@ -83,24 +92,22 @@ const hasAvatar = computed(() => Boolean(props.candidate?.avatarFaceCode))
         class="mt-0.5 flex items-center gap-1 text-caption text-warning-ink"
       >
         <TriangleAlert class="h-3 w-3 shrink-0" aria-hidden="true" />
-        <span class="truncate">{{ candidate.relation }}</span>
+        <span class="truncate">{{ relationLabelOf(candidate.relation) }}</span>
       </span>
     </span>
 
-    <!-- 相似度：灰区用橙色（文字 + 「灰区」标签双编码，不只靠颜色） -->
+    <!-- 相似度：数值 + 分档标签（文字 + 颜色双编码，色盲/灰度下仍可分辨） -->
     <span class="shrink-0 text-right">
       <span
         class="block text-body tabular-nums"
-        :class="inGreyZone ? 'text-warning-ink' : 'text-ink-sub'"
+        :class="level.textClass"
+        :aria-label="`相似度 ${similarityText(candidate.similarity)}，${level.hint}`"
       >
         {{ similarityText(candidate.similarity) }}
       </span>
-      <span
-        v-if="inGreyZone"
-        class="block text-caption text-warning-ink"
-        title="相似度落在灰区：机器没把握，需要人工判断"
-        >灰区</span
-      >
+      <span class="block text-caption" :class="level.textClass" :title="level.hint">
+        {{ level.label }}
+      </span>
     </span>
 
     <el-button

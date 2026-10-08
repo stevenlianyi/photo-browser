@@ -10,6 +10,18 @@
 #   2. resolveShotYear() shotYear 识别优先级：**EXIF -> 文件名 -> mtime**（mtime 最不可靠）
 #   3. 截图类文件名（Screenshot* / 截图*）-> shotYear = NULL，不参与跨年代桶比对
 #   4. reverseGeocode()  GPS -> 离线逆地理地点名
+#   5. isRealCoordinate() 「这个坐标是真的吗」的唯一判据（含 (0,0) 占位判据）
+#
+# 占位坐标纪律（DR-25）
+# -------------------
+#   相机未定位时会往 EXIF 里写 `(0,0)`。它**在合法范围内**，所以只判范围的校验
+#   会放它过关，然后 reverse_geocoder 老老实实查了**几内亚 Takoradi**，
+#   于是「无定位」的照片反而挂上了"加纳"这种看起来很真的地点名（实测 26 张）。
+#   所以「能不能当真实位置用」必须由**独立判据函数 isRealCoordinate()** 说了算，
+#   范围合法只是必要条件、不是充分条件。**不要把占位判断塞进 if 里**——
+#   它要能单测、要能被 readMeta() 和 fix_placeholder_geo.py 复用。
+#   ⚠️ lat/lon 两列**照旧保留** (0,0)：那是 EXIF 里的原始事实，清了等于丢信息；
+#     只有 placeName（推断结果）该留空。见 plan/开发计划.md DR-25。
 #
 # 降级纪律（本模块的第一原则：**任何一张破图都不能让整轮扫描失败**）
 # ------------------------------------------------------------------
@@ -26,6 +38,7 @@
 #   绝不在这里调image.load() / thumbnail()（那是步骤 4 缩略图的活）。
 
 import datetime
+import math
 import mimetypes
 import os
 import re
@@ -40,7 +53,7 @@ if _SRC_DIR not in sys.path:
 from common import miscCommon as misc                                            # noqa: E402
 from config import basicSettings as basicSettings                          # noqa: E402
 
-_VERSION = "20261004"
+_VERSION = "20261007"
 
 _LOG = misc.setLogNew("scannerMeta", "scannermeta.log")
 
@@ -312,24 +325,67 @@ _RG_READY = None            # None=未尝试 / True=可用 / False=不可用
 _RG_CACHE = {}              # (lat, lon) -> placeName
 _RG_WARNED = False          # 「只记一次 warning」的闸门
 
+#: 占位坐标判据：(0,0) 及 |lat|<EPS / |lon|<EPS 一律视为"无定位"
+PLACEHOLDER_EPS: float = 1e-4
+
+
+def isRealCoordinate(lat, lon) -> bool:
+    """真实 GPS 坐标？范围合法 **且** 不是占位值。
+    ⚠️ (0,0) 在范围内但不是真实位置 —— 相机无定位时写的就是它。
+
+    判据（任一命中即False，全部通过才 True）
+    ---------------------------------------
+      · lat / lon 任一为 None；
+      · 任一无法解析成 float（如 "abc"、空串、bytes 垃圾）；
+      · 任一非有限数（NaN / inf —— 注意 `nan <= x <= y` 恒为 False，
+        但显式判一次更清楚，也不依赖这条巧合）；
+      · 任一越界（lat 超 ±90、lon 超 ±180）；
+      · **任一 |v| < PLACEHOLDER_EPS**：这一条才是 (0,0) 的照妖镜。
+
+    为什么阈值不是"精确等于 0"
+    --------------------------
+      设备写`(0.0, 0.0)` 时有的会带上极小抖动（1e-7 量级的噪声），
+      精确判 0 会漏掉这些。而赤道/本初子午线上的真实坐标确实存在，
+      1e-4 度≈ **11m**，这个量级的"零"在照片语境里没有任何地理意义。
+      要真的站在本初子午线上，随手一拍也早就偏了几百米。
+
+    这是「能不能当真实位置用」的**唯一**判据：reverseGeocode() 与 readMeta()
+    都走它；存量数据清理（tools/fix_placeholder_geo.py）也复用同一个判据，
+    保证「入库时怎么判」与「清库时怎么判」绝不会各说各话。
+    """
+    if lat is None or lon is None:
+        return False
+    try:
+        latValue = float(lat)
+        lonValue = float(lon)
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(latValue) and math.isfinite(lonValue)):
+        return False
+    if not (-90.0 <= latValue <= 90.0 and -180.0 <= lonValue <= 180.0):
+        return False
+    # 占位值：(0,0) 及近零。放在最后判，前面的非法值已经被挡掉了
+    if abs(latValue) < PLACEHOLDER_EPS or abs(lonValue) < PLACEHOLDER_EPS:
+        return False
+    return True
+
 
 def reverseGeocode(lat, lon) -> str:
     """GPS -> 地点名。查不到 / 依赖缺失一律返回 None，**绝不抛错**。
 
     reverse_geocoder 是可选依赖（数据离线打包，首次 import 约 1~2 秒）。
     导入失败、或坐标落在数据集之外（海里/无人区）都只留空placeName。
+
+    ⚠️ (0,0) 占位坐标一律返回 None（DR-25）。**不要去猜"那可能是哪个地方的 0"**——
+    相机没定位就是没定位，猜出来的地点名比留空更坏（它会以假乱真地进入地点视图）。
     """
     global _RG_READY, _RG_WARNED
 
-    if lat is None or lon is None:
+    # 合法性 + 占位判据统一交给 isRealCoordinate()，不在这里重复写一遍
+    if not isRealCoordinate(lat, lon):
         return None
-    try:
-        latValue = float(lat)
-        lonValue = float(lon)
-    except (TypeError, ValueError):
-        return None
-    if not (-90.0 <= latValue <= 90.0 and -180.0 <= lonValue <= 180.0):
-        return None
+    latValue = float(lat)
+    lonValue = float(lon)
 
     # 缓存到 4 位小数（约 11m），同一地点的多张照片只查一次
     key = (round(latValue, 4), round(lonValue, 4))
@@ -484,6 +540,11 @@ def parseExifObject(exif) -> dict:
         refLon = refLon.decode("ascii", "ignore") if isinstance(refLon, bytes) else str(refLon or "E")
         if refLon.strip().upper().startswith("W"):
             lon = -lon
+    # ⚠️ 这里**只判范围、不判 (0,0) 占位**，是有意的（DR-25）：
+    #    lat/lon 是 EXIF 里的**原始事实**，相机的确写了 (0,0)，把它抹成 NULL
+    #    等于丢信息（将来要导出给别的工具时，"设备没定位"这个信息本身就值钱）。
+    #    该不该拿它去查地点名，由 isRealCoordinate() 在 reverseGeocode/readMeta
+    #    这一层统一决定 —— 判据只有那一个地方，存量清理脚本也复用它。
     if lat is not None:
         lat = round(float(lat), 7)
         if not (-90.0 <= lat <= 90.0):
@@ -570,8 +631,13 @@ def readMeta(absPath: str, fileSize: int = None, mtime: float = None) -> dict:
     meta["shotYearSource"] = shot["source"]
 
     # ---- GPS 逆地理（可选依赖，缺失即降级）----
-    if meta.get("lat") is not None and meta.get("lon") is not None:
+    # ⚠️ 判据是 isRealCoordinate() 而不是「lat/lon 非空」：(0,0) 占位坐标
+    #    非空却是假的，不挡它就会查出一座真实存在的城市（DR-25 实测 26 张）
+    if isRealCoordinate(meta.get("lat"), meta.get("lon")):
         meta["placeName"] = reverseGeocode(meta["lat"], meta["lon"])
+    else:
+        # 占位 / 缺失：placeName 一律留空，绝不猜
+        meta["placeName"] = None
 
     if fileSize is not None:
         meta["fileSize"] = int(fileSize)

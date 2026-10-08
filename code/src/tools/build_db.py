@@ -336,10 +336,22 @@ def verify(verbose=True) -> dict:
         tableNum += 1
         gotColumns = [row["name"] for row in sqliteCommon.tableInfo(tableName)]
         expectColumns = [c["name"] for c in sqliteCommon.TABLE_COLUMNS[tableName]]
-        add("列 %s（%d 列，顺序也须一致）" % (tableName, len(expectColumns)),
-            "= .txt", "%d 列%s" % (len(gotColumns),
-                                   "" if gotColumns == expectColumns else " 不一致"),
-            gotColumns == expectColumns)
+        # ⚠️ 这里比的是**集合**而不是顺序，原因是 `--migrate` 的物理限制：
+        #   SQLite 的 `ALTER TABLE ... ADD COLUMN` **只能追加到表末尾**，
+        #   而 pb_person.txt 里 displayNamePinyin 放在中间（生成器要求标准七字段
+        #   必须在末尾，见 sqliteCodeGenerator.STANDARD_TAIL_FIELDS）。
+        #   于是「新建的库」列序与 .txt 一致、「迁移过的老库」不一致 ——
+        #   如果按顺序比，老库 migrate 完立刻 verify 报红，而库其实是好的。
+        #   列序在这里没有语义：所有 SQL 都用**显式列清单**（生成层纪律 3），
+        #   没有一条依赖「第 N 列是谁」。
+        miss = sorted(set(expectColumns) - set(gotColumns))
+        extra = sorted(set(gotColumns) - set(expectColumns))
+        add("列 %s（%d 列）" % (tableName, len(expectColumns)),
+            "= .txt",
+            ("缺 %s" % miss if miss else "多 %s" % extra if extra
+             else "%d 列%s" % (len(gotColumns),
+                               "" if gotColumns == expectColumns else "（列序不同，无害）")),
+            not miss and not extra)
     add("表数量", "%d 张" % len(sqliteCommon.TABLE_ORDER), "%d 张" % tableNum,
         tableNum == len(sqliteCommon.TABLE_ORDER))
 

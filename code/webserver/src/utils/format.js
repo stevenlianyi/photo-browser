@@ -58,7 +58,7 @@ export function formatYear(photo) {
   return date ? String(date.getFullYear()) : EMPTY
 }
 
-/** 年代桶 `2010-2014` -> `2010–2014`（界面用连接号更好读） */
+/** 年代档 `2010-2014` -> `2010–2014`（界面用连接号更好读） */
 export function formatBucketKey(bucketKey) {
   const text = String(bucketKey || '').trim()
   if (!text) return EMPTY

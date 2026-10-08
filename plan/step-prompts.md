@@ -6,13 +6,1948 @@
 > 前一步验收未通过，不要开始下一步。
 > 每步结束统一输出：**改动文件清单 + 验收结果 + 遗留问题**。
 >
-> ⚠️ **当前进度：步骤 1–11 已执行完毕，下一步是步骤 12（最后一步）。**
-> 进度以文末「附录 A」的状态表为准；步骤 11 的实际产出与本文件里步骤 11 提示语的
-> 偏差、以及步骤 12 要接着做的事，都写在文末「进入步骤 12 时要知道的现状」里。
+> ⚠️ **当前进度：12 步编码全部完成。M1~M3 已过；M4 = 自己真正用一周（步骤 12 已交付 2026-10-07）。**
+> 进度以文末「附录 A」的状态表为准。**M4 剩下的不是继续写代码，而是真实使用一周** ——
+> 一周自测清单见 `开发计划.md` 步骤 12 的输出与 §八 里程碑。
+> 唯一还欠的技术性报告是 **R2 的验收证据**（见文末提醒），它不影响 M4 的使用。
 >
 > 历史：步骤 1–6 执行后核对发现两处返工，顺序是 **R2 → R → 步骤 7**：
 > **R2 = 分桶口径修复**（`pb_face.shotBucket` 从来没被重写成自适应桶，**S0 的分桶结论一直在跑对照组**）
 > → **R = 纠错闭环**（DR-16）→ 步骤 7。两项均已完成并入。
+>
+> **新增（2026-10-07）：地点维度**。用户提出「按人物选择去过地点的界面（人物 → 地点列表 → 时间线）」，
+> 评估后拆成三步，**顺序 R3 → R4 → R5**：
+> **R3 = 修 `(0,0)` 占位坐标**（DR-25，小步，独立，**必须最先做** —— 26 张照片的地点是错的"加纳"）
+> → **R4 = 地点数据层**（DR-26/27/28/29：geohash 归并 + 目录名抽取 + `/api/places`，**不做界面**）
+> → **R5 = 地点界面**（人物 → 地点列表 → 时间线，缓一步）。
+>
+> **新增（2026-10-08）：人物头像**。用户看 P-04 截图后提出两句 ——「人物库**最好中间显示照片**」
+> 「在人脸样本可以**选择一个作为人物的默认图片**」，评估后合成一步 **R7**（DR-40/41）：
+> **R7 = 人物头像**（卡片显示照片 + 人脸样本设默认）。**与地点线无依赖**，可任选顺序：
+> 前半（卡片显示照片，DR-40）是**纯读取回退、零迁移**，单独做就已解决截图里的问题。
+
+---
+
+# 修正步骤 R3 · 修 `(0,0)` 占位坐标（DR-25）
+
+> **什么时候做**：现在。地点功能的第一步，**也独立有价值**（26 张照片的地点现在是错的）。
+> **为什么必须最先做**：错的 `placeName` 已经落库了，不清掉的话后面所有地点视图都被污染。
+
+```text
+【photo-browser · 修正步骤 R3 · 修 (0,0) 占位坐标】
+
+## 目标
+相机未定位时写的 `(0,0)` 占位坐标被当成真实 GPS，逆地理查到了几内亚亚，
+导致 26 张照片的 `placeName` 落成「加纳」。本步修代码 + 清已落库的错数据。
+
+## 前置
+步骤 1–12 已完成。真实库：`d:\PhotoLib\db\photolib.db`（2137 张照片）。
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-25**
+- plan/照片管理方案_开源调研与自研设计.md（`pb_photo.lat` / `lon` / `placeName` 字段语义）
+
+## 必须先读现有代码
+`code/src/processor/scanner/meta.py` 的 `reverseGeocode()`：
+- 坐标合法性校验只有一条（约 331 行）：
+  `if not (-90.0 <= latValue <= 90.0 and -180.0 <= lonValue <= 180.0): return None`
+  → **`(0,0)` 完美通过**（它确实在合法范围内，只是不是真实位置）
+- `readMeta()` 只在 `lat/lon` 非空时调 `reverseGeocode()`
+
+## 实测事实（我已查过正式库，可复核）
+- 照片总数 2137；有 GPS 91 张（4.3%）；有 placeName 91 张
+- **恰好 `(0,0)` 的有 26 张**，它们的 placeName 全是 `GH, Western, Takoradi`
+- 有效 GPS（剔除 `(0,0)`）**只剩 65 张（3.0%）**
+- 这 26 张**已经落库**，后续不清就会被地点视图当成"加纳"
+
+## 一、修代码（`meta.py`）
+
+新增一个独立的判据函数（**不要把判断塞进 if 里，要能单测、要能复用**）：
+
+```python
+#: 占位坐标判据：(0,0) 及 |lat|<EPS / |lon|<EPS 一律视为"无定位"
+PLACEHOLDER_EPS: float = 1e-4
+
+def isRealCoordinate(lat, lon) -> bool:
+    """真实 GPS 坐标？范围合法 **且** 不是占位值。
+    ⚠️ (0,0) 在范围内但不是真实位置 —— 相机无定位时写的就是它。
+    判据：lat/lon 任一为 None、任一非有限数、任一 |v| < PLACEHOLDER_EPS -> False"""
+```
+
+`reverseGeocode()` 与 `readMeta()` 都改用它。**`(0,0)` 一律返回 None（`placeName` 留空）**，
+不要去猜"可能是哪个地方的 0"。
+
+⚠️ 同时检查 `meta.py` 里还有没有别处也做了坐标合法性判断（grep `90.0` / `180.0`），
+有的一并改，否则会出现"一条路径修了另一条没修"。
+
+## 二、清已落库的错数据（**必做，否则修了代码库里还是错的**）
+
+写一次性脚本 `code/src/tools/fix_placeholder_geo.py`：
+
+```
+--dry-run   只打印将要改的行（默认）
+--apply     实跑
+```
+
+行为：
+1. `SELECT photoCode, relPath, lat, lon, placeName FROM pb_photo WHERE <占位判据>`
+2. **打印清单**（照片数 + relPath 前若干条），让人能确认这些确实是无定位的
+3. `--apply` 时：**`placeName = NULL`**（⚠️ 走 upsert + `forceColumns`；
+   `update_pb_photo` 写不进 NULL —— 这是 DR-16 里已踩过的坑，assigner 文件头有记录）
+4. **`lat` / `lon` 是否也要清？请你给结论并说明理由** ——
+   建议**保留** lat/lon（它们是 EXIF 里的原始事实，清了等于丢信息），
+   只清 `placeName`（那是**推断出来的**结果）。但请你复核后给最终结论。
+5. 跑完打印：清掉的行数、清理后 `placeName IS NOT NULL` 的总数
+
+## 三、要不要顺带加一个「无定位」的可见性
+
+真实库还有 **65 张**照片有真实 GPS 但它们在库里 `placeName` 正常；可另有大量照片
+**根本没有 GPS**（`lat IS NULL`）。请在验收报告里给出这三个数字，方便后续判断地点层能覆盖多少：
+- `lat IS NULL`（无 GPS 坐标）多少张
+- 有 GPS 且非占位多少张
+- 有 `placeName` 多少张
+
+## 四、验收清单（逐条实际运行）
+1. `isRealCoordinate()` 单测：`(0,0)` / `(1e-5, 1e-5)` / `(None, 120)` / `("abc", 120)` /
+   `(39.9, 116.4)` 全部给出预期判定
+2. **跑一个真实坐标**：`reverseGeocode(39.9, 116.4)` 能查出北京的 `admin2`（证明没改坏正常路径）
+3. **`reverseGeocode(0, 0)` 返回 None**（改前会返回加纳 —— 请把改前的对照结果贴出来）
+4. `fix_placeholder_geo.py --dry-run` 输出的行数 = **26**（或你复核后的实际数）
+5. 清单里抽样 5 条贴出 `relPath` 与 `placeName`，人工确认确实是无定位
+6. `--apply` 后：`placeName LIKE '%Takoradi%'` 或 `placeName LIKE 'GH%'` 的行数 = **0**
+7. 清理后**逐表行数不变**（`pb_photo` 行数与清理前一致 —— 只改列不改行）
+8. **照片数与字节数前后比对**（原图只读硬约束）
+9. `pytest code/src/test` 全绿
+10. 给出第三节那三个数字（无 GPS / 有 GPS非占位 / 有 placeName）
+
+## 五、硬约束
+- **原图绝对只读**（`d:\PhotoLib\photo`）
+- 业务层禁止裸 SQL（一律经 sqliteCommon）
+- **只改 `placeName`（与 lat/lon 的取舍按你的结论）**，不要顺手改别的列
+- 不要顺手重构 `meta.py` 里与本步无关的代码
+- 现有代码风格（文件头纪律说明、`_VERSION`、日志、`_RG_CACHE` 等）保持一致
+
+## 六、完成后必须输出
+1. 改动文件清单
+2. 验收结果（10 条逐条给命令与实际输出）
+3. **lat/lon 是否一并清理的结论与理由**
+4. 第三节三个数字
+5. 遗留问题与需要我决策的点
+```
+
+---
+---
+
+# 修正步骤 R4 · 地点数据层（geohash 归并 + 目录名抽取 + API）
+
+> **什么时候做**：R3 验收通过后。
+> **做什么**：把「地点」变成可验证的数据。本步**不做界面**。
+
+```text
+【photo-browser · 修正步骤 R4 · 地点数据层】
+
+## 目标
+建立可用的地点事实层：给照片打 geohash → 归并成地点 `pb_place` → 地点名优先取目录名，
+并提供只读 API 供人工核对。**本步不做任何界面**。
+
+## 前置
+R3 已完成（`(0,0)` 已修、26 张错 placeName 已清）。
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-26（geohash 方案与三个局限）/ DR-27（目录名优先）/ DR-28（不建事件表）/ DR-29（先数据层）**
+- plan/数据库设计.md §1.3 命名规范、§1.4 尾部七字段、§五 索引清单、§六 D-1/D-2（弱外键哲学）
+- plan/照片管理方案_开源调研与自研设计.md 3.10（前端视图清单里的「地点」那一行）
+
+## 必须先读现有代码
+- `code/src/processor/scanner/meta.py` —— `reverseGeocode()` / `_composePlaceName()` /
+  `PLACEHOLDER_EPS`（R3 加的）
+- `code/src/processor/scanner/walker.py` —— `relPath` 的形态（地点线索的来源）
+- `code/src/api/browse.py` —— 分页 / 筛选 / DTO 的既有写法（本步照它来）
+- `code/src/api/dto.py`、`code/src/common/globalDefinition.py`
+- `code/src/config/basicSettings.py` —— 配置项的加法与注释风格
+
+## 实测事实（正式库，我已查过，可复核）
+- 照片 2137 张；有效 GPS（剔占位）**65 张 / 3.0%**；`placeName` 覆盖 4.3%
+- **`relPath` 目录名里带「日期 + 地点」的约 512 张**（是有效 GPS 的 8 倍）：
+  `2013.07.16 东莞`(98) / `2013.07.18 大亚湾`(99) / `2013.07.20 桂林`(38) /
+  `2013.07.22 凤凰`(52) / `2013.07.23 乌镇`(60) / `2013.07.26 张家界`(114) /
+  `2013.07.27 南宁`(51)；另有 `2011春天`(122) / `20101218 Michael's Home`(52)
+- 目录名里还有大量**按人/按组**命名的：`BaiRuiQin`(452) / `MOT Friends`(157) /
+  `lianzhongwen`(116) / `Family`(24) / `Friends`(37) —— ⚠️ 这些**不是地点**，抽取时必须排除
+
+## 一、新增 `pb_place` 表（**10 → 11 张表**）
+
+`code/src/database/pb_place.txt`（先写 txt，再重跑生成器 + `--migrate`）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `recID` | INT AUTO_INCREMENT PK | |
+| `placeCode` | VARCHAR(64) NOT NULL UNIQUE | 幂等键。由「归并后的代表 geohash + 地点名」派生（**不要用随机 uuid** —— 要稳定，重算才幂等） |
+| `name` | VARCHAR(128) NOT NULL | 显示名 |
+| `nameSource` | TINYINT NOT NULL DEFAULT 0 | **0 未知 / 1 逆地理 / 2 目录名 / 3 手工**（手工最高，自动流程不得覆盖） |
+| `admin1` | VARCHAR(64) NULL | 省/州 |
+| `admin2` | VARCHAR(64) NULL | 市/区 |
+| `lat` | DECIMAL(10,7) NOT NULL | 簇中心（照片加权平均） |
+| `lon` | DECIMAL(10,7) NOT NULL | |
+| `photoCount` | INT NOT NULL DEFAULT 0 | 冗余，列表页免 COUNT |
+| `personCount` | INT NOT NULL DEFAULT 0 | 冗余，**有多少人物出现过** |
+| `firstShotYear` | SMALLINT NULL | 最早年份 |
+| `lastShotYear` | SMALLINT NULL | 最晚年份 |
+| + 尾部七字段 | | label/memo/regID/regYMDHMS/modifyID/modifyYMDHMS/delFlag |
+
+⚠️ **不要**给 `pb_place` 加 `isConfirmed` / `isStranger` 之类 —— 地点没有「人工确认」语义。
+手工命名即最高权威，不满意就改名字，不是打标记。
+
+## 二、新增 `code/src/common/geoHash.py`（**自己实现，不引包**）
+
+标准 geohash 算法（字符集 `0123456789bcdefghjkmnpqrstuvwxyz`，base32，交替经纬度二分）：
+
+```python
+def encode(lat, lon, precision: int) -> str: ...       # -> 字符串
+def decode(geohash: str) -> (latMin, latMax, lonMin, lonMax): ...
+def neighbors(geohash: str) -> list:                   # 8 邻居格（DR-26① 的邻域归并要用）
+def distanceKm(lat1, lon1, lat2, lon2) -> float: ...    # haversine
+```
+
+- **不引 `geohash` 包**（DR-26③）。约 50 行，自己写。
+- `neighbors()` 是**DR-26① 格子边界问题的解法**，必须实现并单测。
+- 精度对照（写进文件头注释）：4 位≈39×19km / 5 位≈4.9×4.9km / **6 位≈1.2×0.6km（默认）** / 7 位≈153×153m
+
+## 三、新增 `code/src/processor/place/`（地点抽取与归并）
+
+### 3.1 `dirNamePlace.py` —— 目录名地点线索（**主力来源，DR-27**）
+
+从 `pb_photo.relPath` 的**父目录**（必要时祖父目录）解析：
+
+```python
+@dataclass
+class DirPlaceHint:
+    raw: str              # 原目录名，如 "2013.07.26 张家界"
+    placeName: str        # "张家界"
+    dateHint: str         # "2013-07-26"（可能为空）
+    confidence: int       # 见下
+```
+
+| 情形 | 示例 | placeName | dateHint | confidence |
+|---|---|---|---|---|
+| 日期 + 中文地名 | `2013.07.26 张家界` / `2013-07-26 张家界` | 张家界 | 2013-07-26 | 高 |
+| 日期 + 英文/数字 | `20101218 Michael's Home` | Michael's Home | 2010-12-18 | 中（不确定算不算地点） |
+| 只有中文（无日期） | `旅行照片` | 旅行照片 | — | **低：倾向排除** |
+| **纯人名/组名** | `BaiRuiQin` / `MOT Friends` / `Family` / `Friends` / `BUPT871` | — | — | **必须排除** |
+
+⚠️ **排除人名/组名是这一步最大的难点**，请给出一条**可解释**的判据并写进文件头
+（例如：与 `pb_person.displayName` / `pb_person_centroid` 里出现过的名字匹配 → 排除；
+或纯 ASCII 字母且长度 ≤ 20 且不含空格 → 排除）。**光靠正则会误伤**（`Michael's Home` 就不该被排除）。
+**请把你的判据与它对 2137 张照片的排除结果列出来**（哪些目录被排除了、哪些被采用了）。
+
+### 3.2 `placeStore.py` —— geohash 归并成地点
+
+```
+输入：pb_photo（有 lat/lon 的）+ DirPlaceHint（有地点名的）
+1. GPS 侧：每张有真实坐标的照片 -> geoHash(lat, lon, PLACE_GEOHASH_PRECISION)
+2. 归并：同 geohash 先成簇；再枚举 8 邻居格，簇中心距离 < PLACE_MERGE_RADIUS_KM 则合并
+   -> 每个合并簇一个 pb_place 行，placeCode 由「代表 geohash + 规范化地名」派生
+3. 目录名侧：同名地点（规范化后）合并成一个 pb_place，placeCode 由目录名派生
+   ⚠️ 同名目录地点与 GPS 簇**可能指向同一处**（例如「张家界」目录 + 武陵源 GPS）——
+   给出你的合并判据（规范化名相同就合？还是靠距离？两者都试？），并说明误合并/漏合并的后果
+4. nameSource 优先级：手工(3) > 目录名(2) > 逆地理(1)；**已有手工命名的一律不覆盖**
+5. photoCount / personCount / firstShotYear / lastShotYear 随归并结果一并算出
+```
+
+配置项（加进 `basicSettings.py`，都要有注释说明为什么是这个默认值）：
+- `PLACE_GEOHASH_PRECISION = 6`
+- `PLACE_MERGE_RADIUS_KM = 1.5`（⚠️ 6 位格宽 ~1.2×0.6km，半径要略大于格宽才能把相邻格并起来）
+- `PLACE_MIN_PHOTOS = 1`（低于此数不建地点，避免单张照片也占一行）
+
+⚠️ **只重建地点、不要顺手改 `pb_photo` 的其他列**。
+
+### 3.3 `place_cli.py`
+```
+--audit          只读巡检：地点清单（名称 / 张数 / 年份跨度 / 在场人数 / 代表 geohash）
+--rebuild        清空 pb_place 并按当前数据重建（幂等，跑两遍结果一致）
+--apply          从 --audit 的清单确认后落库
+--photo <code>   单张重算
+```
+
+## 四、只读 API（**本步唯一的对外产物，界面在 R5**）
+
+`code/src/api/place.py`，照 `browse.py` 的写法（分页统一 `page/size/total`、禁止裸 SQL）：
+
+| 端点 | 返回 |
+|---|---|
+| `GET /api/places` | 分页 + 筛选（`q` 名称模糊 / `minPhotos` / `year` / `hasPerson`）。每条：`placeCode / name / nameSource / admin1 / admin2 / lat / lon / photoCount / personCount / firstShotYear / lastShotYear` |
+| `GET /api/places/{placeCode}` | 详情 + 该地点的照片列表（缩略图 URL + 拍摄时间 + 在场的人） |
+| `GET /api/places/{placeCode}/persons` | 该地点出现过的人 + 各自照片数 |
+| `GET /api/persons/{personCode}/places` | **某个人去过的地点列表**（按 `lastShotYear` 倒序）—— 这是 DR-28 里「实时 join」的那条，**不落库** |
+| `GET /api/places/stats` | 汇总：无地点照片数 / 有效 GPS 数 / 目录名命中数 / 地点总数 |
+
+⚠️ **`personCount` / 某人在某地点的照片数一律实时 `DISTINCT` join 算，不冗余存储**（DR-28）。
+`pb_place.photoCount/personCount` 只是**列表页免 COUNT 的冗余**，要有 `--rebuild` 能重算，
+并提供一个 `verifyPlaceCounts()` 核对冗余与实时值是否一致（不一致要能报出来）。
+
+## 五、验收清单（逐条实际运行）
+
+### A. 表与生成器
+1. `pb_place.txt` 写好，重跑生成器，`build_db.py --migrate` 建表
+   （**逐表行数迁移前后一致**，只新增表、不动既有数据）
+2. `PRAGMA table_info(pb_place)` 字段齐全；`placeCode` 的 UNIQUE 索引存在
+3. `pb_person_centroid` 与 `pb_photo` 行数未变
+
+### B. geohash 自实现
+4. `geoHash.encode/decode/neighbors` 单测：`neighbors` 返回 8 个、
+   `decode(encode(p))` 包含 p、跨带（如 39.9/116.4 与 -33.9/151.2）正确
+5. **边界用例**：`39.9999,116.3999` 与 `39.9999,116.4001` 编码后**不同格**
+   → 这正是 DR-26① 要靠 `neighbors()` 归并的场景，请证明归并能合上（贴归并前后）
+
+### C. 目录名抽取（**本步最容易错的地方**）
+6. 给出**完整**的目录级采纳/排除清单（2137 张照片涉及的每个二级目录 → 采用还是排除、理由）
+7. `BaiRuiQin` / `MOT Friends` / `Family` / `Friends` / `BUPT871` **必须被排除**
+8. `2013.07.26 张家界` / `2013.07.16 东莞` 等**必须被采用**，地点名与日期解析正确
+9. `20101218 Michael's Home` 的判定请给结论并说明理由（它可能是地点也可能是人）
+10. 命中率报告：多少张照片因目录名拿到了地点名、多少张仍无地点
+
+### D. 地点归并
+11. `place_cli.py --audit` 输出地点清单。**对照我上面的实测数字核对量级**
+    （目录名线索约 512 张、有效 GPS 65 张）
+12. **至少人工核对 5 个地点**：名字对不对？张数对不对？有没有把不同地点并成一个？
+    有没有把同一地点拆成多个？
+13. **手工命名不被覆盖**：手工把某地点 `name` 改掉 + `nameSource=3`，跑 `--rebuild`
+    → **名字必须不变**
+14. `--rebuild` 跑两遍，`pb_place` 行数与内容一致（幂等）
+15. `verifyPlaceCounts()` 报告 `pb_place.photoCount` 与实时 `COUNT(*)` 是否一致
+
+### E. API
+16. 启动服务，`/docs` 能看到 5 个端点并可试调
+17. `GET /api/places` 分页 / 筛选（`q` / `minPhotos` / `year` / `hasPerson`）都正确
+18. `GET /api/persons/{personCode}/places` **返回的是实时 join 的结果**——
+    构造一个新人物确认其脸后，该地点的 `personCount` 立即变化（证明不是落库的）
+19. `GET /api/places/stats` 给出四个数字（无地点 / 有效 GPS / 目录名命中 / 地点总数）
+20. `photoDir` 零风险：全程文件数与总字节数不变
+
+## 六、硬约束
+- **原图绝对只读**
+- 业务层**禁止裸 SQL**，一律经 `sqliteCommon`
+- **不建「事件」表**（DR-28）：地点×人的交叉一律实时 join
+- **手工命名最高权威**：`nameSource=3` 的行，任何自动流程不得覆盖其 `name`
+- 不引 `geohash` 包（自己实现）
+- 不要顺手做界面（R5 的事）；不要顺手改 `pb_photo` 的其他列
+- 现有代码风格（文件头纪律说明、`_VERSION`、日志、分页/筛选写法）保持一致
+
+## 七、完成后必须输出
+1. 改动文件清单
+2. 验收结果（20 条逐条给命令与实际输出）
+3. **地点清单（`--audit` 全量输出）** —— 这是 R5 界面设计的依据
+4. **目录名采纳/排除清单 + 判据说明**
+5. 归并误判/漏判的自查结论（哪些地点你看着不对、为什么）
+6. 遗留问题与需要我决策的点
+```
+
+---
+---
+
+# 修正步骤 R5 · 地点界面（人物 → 地点列表 → 时间线）
+
+> **什么时候做**：R4 验收通过、**地点清单人工核对过之后**。
+> 本步的提示语**暂未编写** —— 界面形态要在看过真实地点清单之后再定（现在定会返工）。
+> 届时按 R4 输出的「地点清单」决定：地点怎么分组（按省/市？按时间跨度？）、要不要地图、
+> 人物视角与地点视角的入口放哪。
+
+---
+
+# 修正步骤 R4a · 地点中文名（DR-28/29）
+
+> **什么时候做**：现在。地点界面（R5）之前必须做完，否则界面出来还是英文。
+> **前置**：R3 已完成；`pb_place` + `placeStore.py` + `/api/places` 已落地（本步是**增量**，不是重写）。
+
+```text
+【photo-browser · 修正步骤 R4a · 地点中文名】
+
+## 目标
+照片详情/列表里的地点在**中国境内显示中文**。根因是 `reverse_geocoder` 的数据集只有英文。
+本步给 `pb_place` 加一列中文名，并把中文名接到接口与筛选上。**不做界面**。
+
+## 前置（已核实，请自己再确认一遍）
+- `code/src/database/pb_place.txt` —— 表已存在（`placeCode` / `placeName` / `source` /
+  `photoCount` / `firstShotYear` / `lastShotYear` / `centerLat` / `centerLon` + 尾部七字段）
+- `code/src/processor/place/placeStore.py` —— `makePlaceCode()` / `rebuildPlaces()` /
+  `listPlaces()` / `countPlaces()` / `liveAggregatePlaces()`
+- `code/src/api/browse.py` —— `GET /api/places`（约 1285 行）、`POST /api/places/rebuild`（约 1380 行）
+- `code/src/test/test_api_places.py`
+- `code/src/tools/fix_placeholder_geo.py`（R3 的产出，已完成）
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-28 / DR-29**（本步的全部口径）
+- plan/数据库设计.md §1.4 尾部七字段、§五 索引清单
+
+## 必须先读现有代码（重点这几处）
+### 1. `placeStore.py` 的派生纪律（本步最大的坑在��）
+```python
+REBUILD_COLUMNS = ("placeName", "photoCount", "firstShotYear",
+                   "lastShotYear", "centerLat", "centerLon")
+```
+以及文件头这段：
+> `photoCount` / `firstShotYear` / `lastShotYear` / `centerLat` / `centerLon` / **`placeName` 全部可从 `pb_photo` 重算**
+
+⚠️ **`nameZh` 绝不能进 `REBUILD_COLUMNS`** —— 它是**人工/外部来源**，不是派生值。
+进了就会每轮 `rebuildPlaces()` 把中文冲回英文，**而且不报错**（照片张数对、地点名回英文，
+最难发现的一类退化）。请把这条写进 `REBUILD_COLUMNS` 的注释里。
+
+### 2. `placeStore.makePlaceCode(placeName)` —— 幂等键派生
+**本步一个字都不改它。** `placeName` 保持英文做聚合键 ⇒ `placeCode` 不漂移 ⇒
+已有的行、归零逻辑、`/api/places` 的排序筛选全部不受影响。
+
+### 3. `browse.py` 里地点相关的三处
+- `photoSummary()`（约 182 行）—— 列表用的 `placeName`
+- `GET /api/photos` 的 `placeName` 筛选（约 523 行）—— **精确匹配**
+- `photoDetail` 的 `out["gps"]["placeName"]`（约 1214 行）—— **详情页「地点」栏读的就是它**
+⚠️ 还有 `getPerson` 里的 `photosByBucket`（约 991 行）也 SELECT 了 `p.placeName`。
+
+## 一、表结构改动
+
+`code/src/database/pb_place.txt` **在尾部七字段之前**插入：
+```
+nameZh VARCHAR(128) NULL COMMENT '地点中文名 境内区县级 境外为空回退placeName 非派生列rebuild绝不覆盖'
+```
+- 重跑生成器 → `build_db.py --migrate`（**逐表行数迁移前后一致**，只加列不动数据）
+
+## 二、新增 `code/src/processor/place/placeNameZh.py`
+
+```python
+#: 依赖懒加载闸门（照抄 meta.py 的 _RG_READY / _RG_WARNED 纪律）
+_ZH_READY = None       # None=未尝试 / True=可用 / False=不可用
+_ZH_WARNED = False    # 「只记一次 warning」
+
+def isInChina(lat, lon) -> bool: ...
+    """境内判定。⚠️ **不要用 reverse_geocoder 的 cc == 'CN'** —— 边界不准且要多查一次。
+    用 amap-geo 的多边形集合做 point-in-polygon（覆盖即境内）。"""
+
+def zhNameOf(placeCode, placeName, centerLat, centerLon) -> dict:
+    """给一个地点算中文名。返回 {nameZh, source, reason}
+    source: 0=无 2=行政区 3=手工
+    ⚠️ centerLat/centerLon 为空的地点（如手工建的）→ nameZh=None
+    ⚠️ 境外 → nameZh=None（**保留当地语言**，不翻译）
+    ⚠️ amap-geo 不可用 → nameZh=None 并**只记一次 warning**，绝不抛错"""
+
+def rebuildNameZh(dryRun=False) -> dict:
+    """遍历 pb_place，为**还没有 nameZh** 的行补中文名。
+    ⚠️ **绝不覆盖已有的 nameZh** —— 手工填的（source=1）与已算出的都不动。
+    dry-run 只报告将改多少行。"""
+```
+
+### 中文名的组装
+```
+nameZh = "<省级中文> · <区县中文>"
+例：「新疆维吾尔自治区 · 阿勒泰市」、「北京市 · 海淀区」
+```
+- **省级中文**：一级行政区（`Xinjiang Uygur Zizhiqu` / `Beijing` / `Zhejiang Sheng`…）
+  用一张**小型固定映射表**（全国 34 个省级行政区，**有限且可穷举**，不要去映射全球）
+- **区县中文**：`amap-geo` 的 point-in-polygon 结果
+- ⚠️ 边界情形：落在两个多边形上（重叠）/ 都不在（境外或数据集缺口）
+  → **都要给明确 reason 并计数报告**，不要静默给一个空字符串
+
+## 三、依赖与开关（`basicSettings.py` + `requirements.txt`）
+
+```
+#: 地点中文名总开关（关掉后 nameZh 全为 NULL，界面回退英文）
+PLACE_ZH_ENABLED: bool = True
+#: amap-geo 数据文件路径（默认用包内置）
+PLACE_AMAP_GEO_FILE: str = ""
+```
+
+`requirements.txt` 新增（**标注为可选**）：
+```
+# ---- 地点中文名（可选）----
+# amap-geo 含全国 ~3500 个区县多边形（纯离线）；需 shapely 做 point-in-polygon
+amap-geo>=0.0.7
+shapely>=2.0.0
+```
+
+⚠️ **依赖纪律**（照抄 `meta.py` 的 `_RG_READY` / `_RG_WARNED`）：
+- `import amap_geo` / `import shapely` 放进函数内，**模块顶层不许 import**
+- 首次调用才加载（约 1~2 秒），进程内缓存
+- 失败 → `_ZH_READY=False` + **只记一次 warning** + `nameZh=None`
+- **绝对不许抛错中断**：装不上只是「显示英文」，不是故障
+- ⚠️ 首次加载**不许在请求路径上重复发生** —— 要么在 `main/app.py` 启动时预热，
+  要么在第一次 `/api/places` 调用时加载后缓存（请给出结论）
+
+## 四、接口改动
+
+### 4.1 地点字典端点
+`GET /api/places` 的每条**增加 `nameZh`**（`SELECT g.nameZh AS nameZh`）。
+`keyword` 筛选**同时匹配 `placeName` 与 `nameZh`**。
+
+### 4.2 照片列表/详情端点 —— ⚠️ 这一步是「界面能显示中文」的关键
+**`pb_photo` 没有 `placeCode` 列**，所以照片 → 地点的关联只能走
+`JOIN pb_place g ON g.placeName = p.placeName`（B 方案的代价：用字符串 join）。
+⚠️ 这个 join **只对 `placeName` 非空的照片成立**，无 GPS 的照片拿不到中文名（回退 NULL，可接受）。
+
+| 位置 | 改动 |
+|---|---|
+| `photoSummary()` | 增加 `placeZh` 字段（`p.placeName` 存在时 JOIN 取 `g.nameZh`，否则 NULL） |
+| `photoDetail` 的 `out["gps"]` | 增加 `placeZh`；⚠️ **保留 `placeName`**（英文原值作为回退与排障依据） |
+| `getPerson` 的 `photosByBucket` | 同上增加 `placeZh` |
+
+**回退契约（前端要照此实现）**：
+```
+显示名 = placeZh ?? placeName      # placeZh 为空就用英文原值
+```
+⚠️ **不要**用 `placeZh` 覆盖 `placeName` 返回 —— 保留英文原值，排障时要看它，
+而且界面「地点」的 tooltip 可以显示两者。
+
+### 4.3 地点筛选两套都支持（DR-29③）
+`GET /api/photos?placeName=X` 的 `X` 现在可能是中文名（前端下拉给中文），
+内部翻译回英文再精确匹配：
+
+```python
+def resolvePlaceFilter(value) -> tuple:
+    """筛选值 -> (sql 片段, 参数)。
+    X 命中 pb_place.nameZh -> 用该行的 placeName 做精确匹配
+    X 直接是 placeName      -> 直接精确匹配（回退兼容旧调用）
+    两边都没命中            -> 原样精确匹配（返回空集，不报错）"""
+```
+⚠️ **仍然是精确匹配，不要改成 LIKE** —— `browse.py` 现有注释已说明理由
+（「北京」与「北京市」在库里是两个不同字符串，模糊匹配会让用户以为自己筛错了）。
+- 筛选下拉的数据源要**优先给 `nameZh`**（`nameZh IS NOT NULL` 的行），英文值作为回退项补充
+- `test_api_places.py` 里现有的筛选用例**不能挂**
+
+## 五、验收清单（逐条实际运行）
+
+### A. 表与迁移
+1. `pb_place.txt` 加了 `nameZh`，重跑生成器，`build_db.py --migrate` 成功
+   （**逐表行数迁移前后一致**，`pb_photo` / `pb_face` / `pb_person_centroid` 行数不变）
+2. `PRAGMA table_info(pb_place)` 含 `nameZh`
+
+### B. 边界纪律（**本步最关键**）
+3. **`rebuildPlaces()` 跑两遍后 `nameZh` 不变** —— 证明 `REBUILD_COLUMNS` 没把它当派生列
+4. **手工设一个 `nameZh`（模拟用户填的），再跑 `rebuildPlaces()` → 该值不变**
+5. 手工行的 `source=1` 不被复算改回 0（现有代码已处理，本步别破坏）
+
+### C. 中文名正确性
+6. **境内地点的中文名**：列出改后全部 `nameZh`，逐个人工核对（至少 5 个）
+7. **境外地点 `nameZh` 全部为 NULL**（现有库有 `GH, Western, Takoradi`（(0,0) 那批，
+   R3 已清）与真实境外地点；若R3 清干净了，就说明当前库里没有境外真实地点，
+   请用构造数据验证境外返回 NULL）
+8. 省级映射表**覆盖全国 34 个省级行政区**，请给出这份表的完整内容
+9. `zhNameOf` 的每个边界情形都有 reason 与计数（重叠多边形 / 不在任何多边形 / 无坐标）
+10. **你截图那张**：`mmexport17832182934679.jpg`（`CN, Xinjiang Uygur Zizhiqu, Araltobe`）
+    → `placeZh` 应该是中文（阿勒泰市一带）。请贴出实际值
+
+### D. 接口
+11. `GET /api/places` 每条含 `nameZh`；`keyword` 能用中文名搜到
+12. `GET /api/photos/{photoCode}` 的 `placeZh` 有值、`placeName` **仍是英文原值**
+13. `GET /api/photos?placeName=阿勒泰市` 与 `?placeName=CN, Xinjiang Uygur Zizhiqu, Araltobe`
+    **返回同一批照片**（两套都支持的验收）
+14. 无地点的照片：`placeZh = None`、`placeName = NULL`，前端按契约回退
+15. `GET /api/persons/{personCode}` 里的照片也带 `placeZh`
+16. `test_api_places.py` 原有用例全绿（筛选没被改坏）
+
+### E. 依赖与回归
+17. **`amap-geo` 缺失时的降级**：临时把它从环境里屏蔽（或用一个假的 import 失败桩），
+    确认 `nameZh` 全为 NULL、**只记一次 warning**、接口仍 200、**不抛异常**
+18. `PLACE_ZH_ENABLED=False` 时全部回退英文
+19. `pytest code/src/test -q` 全绿（当前基线 **1237 passed**）
+20. `photoDir` 零风险：全程文件数与总字节数不变
+
+## 六、硬约束
+- **原图绝对只读**
+- 业务层**禁止裸 SQL**，一律经 `sqliteCommon`
+- **`placeCode` 的派生逻辑一字不改**（`makePlaceCode` / `REBUILD_COLUMNS` 的既有成员不动）
+- **`nameZh` 绝不进 `REBUILD_COLUMNS`**，绝不被任何自动流程覆盖
+- **`amap-geo` / `shapely` 是可选依赖**：缺失只降级不报错
+- **境外地点不翻译**（保留当地语言）
+- 筛选仍用**精确匹配**，不要改成 LIKE
+- 本步**不做界面**（R5 的事）；不顺手做目录名抽取（DR-30 是独立一步）
+- 现有代码风格（文件头纪律说明、`_VERSION`、日志、可选依赖的懒加载纪律）保持一致
+
+## 七、完成后必须输出
+1. 改动文件清单
+2. 验收结果（20 条逐条给命令与实际输出）
+3. **改后 `pb_place` 全表**（placeCode / placeName / nameZh / photoCount / source）
+4. **省级 EN→ZH 映射表全文**
+5. **你截图那张照片的 `placeZh` 实际值**
+6. `amap-geo` 的首次加载耗时实测
+7. 遗留问题与需要我决策的点
+```
+
+---
+---
+
+# 修正步骤 R4b · 目录名线索接入（DR-25/30）
+
+> ⚠️ **暂未编写**。R4a 完成后决定要不要做 —— 前提是回答：
+> 「地点字典只有 65 张 GPS 照片，而目录名线索有 512 张。值得为它扩表吗？」
+> 若做，涉及 `pb_photo` 加列 + `rebuildPlaces` 的聚合键变更，会影响 `placeCode` 派生，
+> 需重新评估 DR-28 的 B 方案是否还成立。
+
+---
+
+# 修正步骤 R5 · 地点界面（人物 → 地点列表 → 时间线）
+
+> **什么时候做**：R4a 完成、`pb_place` 清单人工核对过之后。
+> 本步的提示语**暂未编写** —— 界面形态要在看过真实地点清单之后再定。
+> 届时需要落实的**显示契约**（本步已定）：
+> `显示名 = placeZh ?? placeName`；地点筛选两套值都认；`placeZh` 为空即回退英文。
+
+---
+
+# 修正步骤 R6 · 照片详情左右翻页（A 档 · DR-31）
+
+> **什么时候做**：R4a 之后（或随时，与地点线无依赖）。
+> **做什么**：P-03 照片详情页支持左右箭头翻看上一张/下一张。**只做前端，后端零改动。**
+
+```text
+【photo-browser · 修正步骤 R6 · 照片详情左右翻页（A 档）】
+
+## 目标
+P-03 照片详情页支持「上一张 / 下一张」：**键盘 ← →** + **左右浮动箭头按钮**。
+**只做 P-03；网格页不动；后端零改动。**
+
+## 前置
+步骤 1–12 已完成。P-03（`PhotoDetailView.vue`，35KB）已上线，`store/photos.js` 已实现列表。
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-31**（本步全部口径）
+
+## 必须先读现有代码
+### 1. `code/webserver/src/views/PhotoDetailView.vue`
+- `onMounted` 现在只有 `review.ensurePersonDirectory()` / `reloadPhoto()` / `probeRange()`
+  —— **没有任何键盘监听**，本步要加
+- 已有 `const zoomPercent = ref(100)` 与 `zoomStyle` —— ⚠️ 箭头不能与缩放交互打架
+- 已有 `FixFaceDialog`（改判入口，DR-16）—— ⚠️ 见「四、与改判的顺序」
+
+### 2. `code/webserver/src/store/photos.js`
+- `items`（已加载列表，**累积上限 `MAX_APPENDED_CELLS = 1800`**）、`total`、`page`、`size`
+- `current`（当前详情对象）、`currentLoading`
+- `hasMore` / `canAppendMore` / `appendCapped` / `rangeText`
+- `applyFilters()` / `resetFilters()` —— **两者都会把 `items` 清空并回到第 1 页**
+
+### 3. `code/webserver/src/views/ReviewView.vue` 的键盘纪律（本步要照抄）
+```js
+function onKeydown(event) {
+  if (activeTab.value !== 'pending') return
+  if (event.metaKey || event.ctrlKey || event.altKey) return
+  if (isTypingTarget(event.target)) return
+  if (overlayOpen()) return
+  ...
+  event.preventDefault()
+}
+onMounted(async () => { window.addEventListener('keydown', onKeydown); ... })
+onBeforeUnmount(() => { window.removeEventListener('keydown', onKeydown); ... })
+```
+⚠️ `isTypingTarget` / `overlayOpen` 这两个判据**复用或照抄**，不要另写一套。
+
+## 一、新增 `code/webserver/src/components/photo/PhotoPager.vue`
+
+单一职责组件：**左右箭头 + 位置提示**。P-03 用它，将来 `PersonDetailView` 的时间轴详情也能复用。
+
+```vue
+<template>
+  <div class="photo-pager">
+    <button class="pager-btn" :disabled="!canPrev" aria-label="上一张"
+            @click="$emit('nav', -1)"> <ChevronLeft /> </button>
+    <div class="pager-info">
+      <span class="pager-index">{{ index }}</span>
+      <span class="pager-total">/ {{ total }}</span>
+    </div>
+    <button class="pager-btn" :disabled="!canNext" aria-label="下一张"
+            @click="$emit('nav', 1)"> <ChevronRight /> </button>
+  </div>
+  <p v-if="loadedHint" class="pager-hint">{{ loadedHint }}</p>
+</template>
+```
+
+| prop | 说明 |
+|---|---|
+| `index` | 当前在 `items` 里的**下标 + 1**（1 基）；不在列表里时为 0 |
+| `total` | **`items.length`**（不是 store 的 `total`！见 DR-31 边界纪律③） |
+| `loadedHint` | `items.length < store.total` 时的补充提示（如「已加载 60 / 2137，滚动可继续加载」） |
+
+⚠️ **禁止循环**：到第一张左箭头灰、到最后一张右箭头灰，**不要**「到底跳回第一张」。
+⚠️ 箭头**必须是真 `<button>`**（不用 `div`），带 `aria-label`、`:disabled`、`focus-visible` 样式。
+
+## 二、`PhotoDetailView.vue` 的改动
+
+### 2.1 计算前后张（**不要新写一个接口**）
+
+```js
+const photoStore = usePhotosStore()
+
+/** 当前 photoCode 在已加载列表里的下标；-1 = 不在列表里 */
+const currentIndex = computed(() =>
+  photoStore.items.findIndex((p) => p.photoCode === current?.photoCode))
+
+const canPrev = computed(() => currentIndex.value > 0)
+const canNext = computed(() =>
+  currentIndex.value >= 0 && currentIndex.value < photoStore.items.length - 1)
+/** ⚠️ -1 时（不在列表里）两个都 false —— DR-31 边界纪律① */
+const pagerTotal = computed(() => photoStore.items.length)
+```
+
+### 2.2 翻页动作
+
+```js
+async function gotoOffset(delta) {
+  if (busy.value) return                      // ⚠️ 改判进行中禁翻（见四）
+  const target = photoStore.items[currentIndex.value + delta]
+  if (!target) return
+  busy.value = true
+  try {
+    await router.push({ name: 'photo-detail', params: { photoCode: target.photoCode } })
+    // ⚠️ 不要预取上一张，只预取下一张（DR-31）
+    prefetchNext()
+  } finally {
+    busy.value = false
+  }
+}
+```
+
+- 路由参数用 `photoCode`（`/photos/:photoCode`），保持「可分享 URL、可刷新」
+- ⚠️ **`currentIndex` 依赖 `photoStore.items`** ⇒ `applyFilters()` / `resetFilters()` 清空
+  `items` 后，`currentIndex` 会变成 -1 ⇒ 箭头自动禁用。**这是期望行为**，不要额外去「记住旧索引」
+
+### 2.3 键盘监听（照抄 ReviewView 三条纪律 + 第四条）
+
+```js
+function onKeydown(event) {
+  if (event.metaKey || event.ctrlKey || event.altKey) return
+  if (isTypingTarget(event.target)) return
+  if (overlayOpen()) return
+  if (event.key === 'ArrowLeft'  && canPrev.value) { event.preventDefault(); gotoOffset(-1) }
+  if (event.key === 'ArrowRight' && canNext.value) { event.preventDefault(); gotoOffset(+1) }
+}
+```
+
+⚠️ **`preventDefault()` 必须调**，否则 `←`/`→` 会触发横向滚动。
+⚠️ `onMounted` 里 `addEventListener`、`onBeforeUnmount` 里 `removeEventListener`（ReviewView 已有这个范式）。
+
+**不要**占用其他键（`Esc` 关闭、`F` 全屏留给将来）。**不要**加 `↑`/`↓`（会与缩放/滚动打架）。
+
+### 2.4 预取下一张（只做 1 张）
+
+```js
+function prefetchNext() {
+  const next = photoStore.items[currentIndex.value + 1]
+  if (!next) return
+  // ⚠️ 用 requestIdleCallback 或 setTimeout 延后；连按 → 时不要堆成一片请求
+  idle(() => { fetch(`${API_BASE}/api/original/${next.photoCode}`, { headers: { Range: 'bytes=0-65535' } }) })
+}
+```
+⚠️ `/api/original` **已支持 Range**（步骤 4 已交付），所以预取首块即可，别整张拉。
+⚠️ 预取失败**静默忽略**，不许弹错误提示（用户没要求看下一张）。
+
+## 三、样式与可访问性
+
+| 项 | 要求 |
+|---|---|
+| 位置 | 大图**左右两侧垂直居中**，浮动；`hover` 才显形（`opacity-0 → 1`），避免干扰看图 |
+| 圆角/阴影 | 圆形按钮 + 轻阴影（沿用 `--radius` 与浅色 token） |
+| 响应式 | `<768` 时缩小按钮（避免遮挡）；**不要**引入手势滑动 |
+| 深色主题 | 两套主题下都要可辨（箭头背景用 `bg-card` / `border-card` 类，不用硬编码色） |
+| 无障碍 | `<button>` + `aria-label="上一张/下一张"` + `focus-visible` 环；`disabled` 用 `disabled:` 变体而非 JS 控制 `opacity` 硬改 |
+| 位置提示 | 箭头之间的 `12 / 60`，小号 `text-secondary`；`loadedHint` 放在下方、更弱的颜色 |
+
+## 四、⚠️ 与改判（DR-16）的顺序 —— 本步最容易漏的一条
+
+P-03 上有「✗ 不是他」改判（`FixFaceDialog`）。改判成功后：
+- 该脸的 `personCode` / `isStranger` 变了 ⇒ **人脸框状态要重画**（`FaceBox` 的描边三态）
+- `pb_photo_person` 变了 ⇒ 侧栏「出现的人」列表要重画
+
+⚠️ **若改判请求未完成就按 `→` 跳走**，回来时状态陈旧，**且不报错** —— 表现是「我明明改判了，人脸框还是绿的」。
+
+**做法**：
+1. `busy` 标志位覆盖「改判请求进行中」与「翻页进行中」
+2. `busy` 为真时 **两个箭头禁用 + 键盘不响应**
+3. 改判成功后**先 `reloadPhoto()` 刷当前图，再解禁**
+
+⚠️ 验收第 6 条专门测这个：改判中途点箭头 → 应无反应；改判成功后当前图的人脸框与侧栏都已更新。
+
+## 五、验收清单（逐条实际运行）
+
+1. P-03 打开时左右箭头**正确显示/禁用**：第一张左箭头灰、最后一张右箭头灰
+2. 点箭头 / 按 `←` `→` 都能翻到相邻照片，**URL 的 `photoCode` 同步变化**（可分享、可刷新）
+3. **不循环**：第一张连按 `←` 停在原地；最后一张连按 `→` 停在原地
+4. 位置提示 `12 / 60` 正确；**分母是 `items.length` 不是 `total`**
+5. `items.length < total` 时出现补充提示（如「已加载 60 / 2137，滚动可继续加载」）
+6. **⚠️ 改判顺序**：改判进行中点箭头 → **无反应**；改判成功后 → 人脸框与侧栏「出现的人」都已更新，然后才能翻
+7. **不在列表里**：从 P-06 待确认队列点开一张照片 → **两个箭头都禁用**，且有说明「不在当前列表中，无法连续翻页」
+8. **换筛选后**：在 P-02 改筛选 → 点进详情 → 索引正确、`items.length` 正确
+9. **三条忽略纪律逐条验**：① 按住 Ctrl/Alt/Shift + `←` 不响应 ② 光标在输入框内按 `←` 不响应
+   （输入框光标移动） ③ `FixFaceDialog` 打开时按 `←` 不响应（不误翻）
+10. `preventDefault` 生效：按 `←`/`→` **页面不横向滚动**
+11. **预取生效**：Network 里能看到下一张的 `/api/original` Range 请求，**且只有 1 张**（不堆成一片）
+12. 预取失败**不弹错误提示**
+13. **网格页 P-02 未受影响**：方向键仍是移动焦点（Tab / 方向键能走到每张缩略图）
+14. `<768` 断点下箭头不遮挡大图；`<1024` 正常
+15. 深色主题下箭头可辨（两套主题都看一遍）
+16. 无障碍：箭头是真 `<button>`、有 `aria-label`、`focus-visible` 环清晰、`disabled` 有视觉态
+17. `npm run build` 通过；`npm run dev` 手动过一遍
+18. **后端零改动**：本步**不改任何 `.py`** —— 用 `git status` 证明（只应有 `.vue` / 可能的 `.js` 改动）
+19. **photoDir 零风险**：全程文件数与总字节数不变
+20. `pytest code/src/test -q` 仍全绿（当前基线 **1237 passed**）
+
+## 六、硬约束
+- **后端零改动**（A 档的核心）：不新增、不修改任何 `.py` / `pb_*.txt`
+- **网格页不动**：P-02 的方向键保持移动焦点（WCAG 2.1 AA 基线）
+- **只占用 `←` `→` 两个键**，不抢其他键
+- 一切读写经既有 store/api 封装，**不要在组件里直接 axios**
+- 现有代码风格（`store` / `api` / `components` 分层、`<script setup>`、Element Plus + Tailwind、主题 token）保持一致
+- 单文件不超过 300 行（`PhotoDetailView.vue` 现有 35KB，若逼近上限请把翻页逻辑拆到 `PhotoPager.vue`）
+- 不要顺手加手势滑动、全屏、缩略图条等本步未要求的功能
+
+## 七、完成后必须输出
+1. 改动文件清单（应只有前端文件）
+2. 验收结果（20 条逐条说明实测情况）
+3. `git status` 证明后端零改动
+4. 第 7 条的实测：从队列点开照片时箭头的实际状态与提示文案
+5. 遗留问题与需要我决策的点
+```
+
+---
+
+# 修正步骤 R7 · 人物头像（卡片显示照片 + 样本设默认 · DR-40/41）
+
+> **什么时候做**：随时（与 R5 地点界面**无依赖**，两边都要改人物相关文件时建议串行）。
+> **做什么**：① 人物库卡片中间显示**本人照片**（人脸裁剪图）；② 人脸样本里**任选一张设为该人的默认头像**，可清除。
+> 拆两半：**A 半（①）零迁移、纯读取回退**；**B 半（②）只多一列写入**。先做 A 单独就已解决截图里的问题。
+
+```text
+【photo-browser · 修正步骤 R7 · 人物头像（DR-40/41）】
+
+## 目标
+① P-04 人物库卡片中间显示**本人照片**（人脸裁剪图），不再是首字母占位。
+② P-05 人物详情「人脸样本」里，**人工确认段与自动归属段任选一张 → 设为该人的默认头像**；可清除（回到自动代表脸）。
+拆两半：**A 半（①）纯读取回退、零迁移**；**B 半（②）只多一列写入**。A 单独做即可先上线。
+
+## 前置
+步骤 1–12 与 R3 / R4 / R4a / R4b / R6 均已完成。
+真实库 `d:\PhotoLib\db\photolib.db`：`pb_person` **2029** 行、`pb_face` **3647** 张（但**仅 67 张有归属**），
+`pb_person.avatarFaceCode` 列**已存在**、且**全库几乎为空**（这就是卡片全是字母的原因）。
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-40 / DR-41**（本步全部口径）
+- plan/UI/photo-browser UI 设计.md §4.8（P-04 人物库）/ P-05 人物详情 —— **「改头像」本来就在设计稿的操作行里**
+
+## 必须先读现有代码
+### 1. `code/webserver/src/components/common/PersonCard.vue`
+- 第 40–42 行 `avatarSrc` **只读** `person.avatarFaceCode` ⇒ 空就退到第 45 行的 `initial`（首字母）
+- 第 12–16 行文件头**已经把取舍写死**：头像永远是人脸裁剪图，**不是照片缩略图**（合影里脸太小认不出）—— 本步照此执行
+- 第 95–116 行是头像那块（圆形遮罩 `h-20 w-20`），第 109–115 行是首字母占位
+
+### 2. `code/webserver/src/views/PersonDetailView.vue`
+- 第 76–81 行 `avatarSrc`：`avatarFaceCode` → 否则「第一张确认样本」。⚠️ 与列表页口径**不一致**，本步统一到后端 `coverFaceCode`
+- 第 379–385 行 `setAvatar()` 是**死代码**（模板里没有任何按钮调它，函数体只弹一条「不提供编辑入口」的提示）⇒ **删掉**，换成真的实现
+- 第 554–571 行（人工确认段）/ 第 593–632 行（自动归属段）是样本列表；自动段每张已有「确认 / ✕ 移除」
+
+### 3. `code/src/api/browse.py`
+- 第 234–276 行 `personSummary()`（第 271 行的 `thumbUrl` 就是头像 URL）
+- 第 605 行 `personStatsOf()` —— **本步新函数的样板**：一次 `IN` 查询算一批人，禁止逐人查库
+- 第 298 行 `_inClause()`；第 750–757 行 `listPersons` 的 items 组装；第 784–786 行 `getPerson`
+- 第 871 行 `_faceSummary()`（Tab2 的样本形状，`thumbUrl` = `/api/face/<faceCode>`）
+
+### 4. `code/src/api/contacts.py`
+- 第 415–416 行 `CONTACT_PATCH_COLUMNS`；第 455–515 行 `patchContact` 主流程
+- ⚠️ 第 463–471 行「未知字段优先报错」与「没有任何字段要改」的**顺序不要改**
+- 第 301 行（contacts 列表）与 `code/src/api/place.py` 第 715–720 行也要同步传代表脸
+
+### 5. `code/src/api/dto.py`
+- 第 352–380 行 `ContactPatchBody`（`extra="allow"`：白名单外的键由路由 400 拒掉）
+
+## 一、A 半：卡片显示照片（DR-40）
+
+### 1.1 后端：新增 `personCoverOf(codes)`（放在 `personStatsOf` 旁边）
+
+对每人取一张**代表脸**，优先级：
+`isConfirmed DESC`（用户核对过的优先）→ `detScore DESC` → `quality DESC` → `regYMDHMS ASC`（稳定）。
+
+- 一次 `IN` 查询拿一批人（⚠️ **必须批量**；正式库 2029 人，逐人查就是 N+1）
+- 只取 `delFlag='0'` 且 `personCode IS NOT NULL` 的脸
+- 返回 `{personCode: faceCode}`；**查不到**的人不出现在字典里（调用方 `.get()` 拿 `None`）
+
+⚠️ **不要做 `thumbStore.exists()` 探测**：列表接口不该为每行去碰文件系统（一页 24 次 `stat`，磁盘异常会把列表拖死）。裁剪图缺失由前端 `@error` 兜底。
+
+### 1.2 `personSummary()` 增 `coverFaceCode`
+
+- 新参数 `coverFaceCode=None`；值 = **用户指定的默认（且那张脸还在他名下）→ 否则代表脸**
+  （⚠️ 由 `personCoversOf()` 解析好后传进来，**不要在 `personSummary` 里写 `avatarFaceCode or ...`** ——
+  见文末「R7 落地时的偏差」第 1 条）
+- `thumbUrl`（第 271 行）指向 `coverFaceCode`
+- ⚠️ `avatarFaceCode` 字段**语义不变**（用户指定的默认）；`coverFaceCode` 才是「实际展示的那张」
+- ⚠️ **代表脸绝不写库**：`avatarFaceCode` 为空是**合法状态**，不能变成「浏览一次就写一次库」
+
+接线四处：`browse.listPersons`（750）、`browse.getPerson`（784）、`contacts.py` 列表（301）、`place.py`（715–720 —— 该处已有 `thumbUrl` 字段，一并改口径）。
+
+### 1.3 前端：`PersonCard.vue`
+
+- `avatarSrc` 改成 `faceUrl(person.avatarFaceCode || person.coverFaceCode)`（任一为空 → 退首字母）
+- 头像尺寸 **`h-20 w-20` → `h-24 w-24`（96px）**（用户要的是「中间显示照片」，80px 太小）
+- `<img>` 加 **`@error`** ⇒ 加载失败切回首字母占位（**不允许出现破图**）
+- 首字母占位（109–115 行）**保留**：没有任何脸的人（刚导入的联系人）仍然靠它
+
+### 1.4 前端：`PersonDetailView.vue` 头部
+
+第 76–81 行的 `avatarSrc` 改为优先用后端 `coverFaceCode`，**与列表页口径统一**（不要再自己取 `facesConfirmed[0]`）。
+
+## 二、B 半：人脸样本设默认头像（DR-41）
+
+### 2.1 后端：`avatarFaceCode` 进 PATCH 白名单
+
+- `dto.ContactPatchBody` 加 `avatarFaceCode: Optional[str]`
+- `CONTACT_PATCH_COLUMNS` 加 `"avatarFaceCode"`
+- `patchContact` 里加**写库前**的校验：
+  - 非空 ⇒ `browse.faceRow(faceCode)` 必须存在、未软删、且 `face.personCode == personCode`；
+    **不存在/已软删 → 404 `NOT_FOUND`**，**属于别人 → 400 `PARAM_INVALID`**（见文末偏差第 2 条）
+  - 空串 / `None` ⇒ 清空（回退代表脸），**合法**
+- ⚠️ **不写 `pb_review_log`**、**不重算质心**、**不 rebucket**：头像是展示，不是归属
+- 响应：`changedFields` 天然含它；`personSummary` 已返回 `avatarFaceCode`
+
+### 2.2 前端：Tab2 就地设默认
+
+- ⚠️ 走既有封装：`store/persons.js` 加 `setAvatar(personCode, faceCode)`（内部调 `api/contacts.js` 的 `patchContact`，成功后重取 `fetchPerson` + `fetchFaces`）。**组件里不要直接 axios**
+- 两段样本（554–571 / 593–632）每张加「设为默认」
+- **当前默认那张**：加实心描边 + 「默认」角标（⚠️ 描边语义沿用 `utils/faceState.js` 那套，**不要另写配色**）
+- 头部接「改头像」按钮（设计稿 P-05 操作行里本来就有）：打开「选择默认头像」弹窗 —— 列出全部样本、点选即设、内含「清除默认」
+- 选中**自动归属段**的样本时给一句说明：「这张是机器认的、还没确认；**头像只影响展示，不影响匹配**」
+- 成功 Toast「已设为默认头像」；清除后 Toast「已清除默认头像，已回到自动代表脸」
+
+### 2.3 边界
+
+| 情况 | 行为 |
+| --- | --- |
+| 默认那张脸被「移除」/「合并走」 | `avatarFaceCode` **留着不动**，展示层自动降级到代表脸（DR-41 ④ 的刻意选择） |
+| 库里没有任何脸 | 首字母占位；「设为默认」入口**隐藏或禁用并说明原因** |
+| 已停用的人 | 头像照旧（`opacity-60`），不改行为 |
+| 传别人的 `faceCode` | 400，且库里一个字不变 |
+
+## 三、样式与可访问性
+
+| 项 | 要求 |
+| --- | --- |
+| 卡片头像 | 圆形（沿用现有 `rounded-full`），96px，`object-cover` **铺满圆框**。⚠️ **不要**在圆框内留一圈底色环把照片缩小 —— 2026-10-08 试过（`p-2` + 内层 `rounded-full`，照片缩到 ~75%），观感成了两个同心圈，用户否决并已回退 |
+| 「默认」角标 | **不只靠颜色**（DR-16② 的三重编码纪律）：图标 + 文字「默认」+ 描边 |
+| 可点区域 | 「设为默认」是真 `<button>`，带 `aria-label`（含年份），有 `focus-visible` 环 |
+| 深色主题 | 两套主题都过一遍（用 `bg-card` / `border-line` 类，不硬编码色） |
+| 图片加载 | 一律 `loading="lazy"` + `decoding="async"`；`/api/face` 已是 160px 方图，前端不再裁 |
+
+## 四、验收清单（逐条实际运行）
+
+1. P-04 一页 24 人：**所有「有人脸」的人卡片中间都显示本人照片**，不再全是字母
+2. **没有任何脸**的人仍显示首字母，且接口 200、无报错、无破图
+3. 手动把某人的 `avatarFaceCode` 改成一个**已软删的 faceCode** → 卡片自动降级到代表脸（**不出现破图**）
+4. P-05 Tab2 **人工确认段**任一样本可设默认：设置后**详情头部与 P-04 卡片同时更新**
+5. P-05 Tab2 **自动归属段**任一样本可设默认（并出现「只影响展示」的说明）
+6. 「清除默认」后回到代表脸（`avatarFaceCode` 变 NULL）
+7. 传**别人的** `faceCode` → **400**，且 `pb_person` 该行一个字不变（连 `modifyYMDHMS` 都不变）
+8. 传不存在的 `faceCode` → **404**（不是 500，也不是静默成功）
+9. 设默认**不影响匹配**：`pb_person_centroid` 的 `modifyYMDHMS` 不变；`pb_face` 零变动
+10. 设默认**不产生 `pb_review_log`** 记录（前后 `COUNT(*)` 一致）
+11. 失效场景：把默认那张脸用「✕ 移除」（`fix('unknown')`）掉 → 卡片与头部**自动降级**，无破图
+12. **N+1 检查**：`/api/persons?size=24` 的 SQL 日志里 `pb_face` 查询**只有 1 条**（不是 24 条）
+13. 停用的人仍正常显示头像（`opacity-60`），不报错
+14. 深色主题下卡片头像与「默认」角标均可辨
+15. 无障碍：「设为默认」是真 `<button>` + `aria-label`；「默认」角标有文字、不只靠颜色
+16. `npm run build` 通过；`npm run dev` 手动过一遍
+17. `pytest code/src/test -q` 全绿（R7 完成后基线 **1371 passed / 3 skipped**；改动前为 1237）
+18. **原图零风险**：`d:\PhotoLib\photo` 的文件数与总字节数全程不变
+19. `git status` 里**没有任何 `pb_*.txt` 改动**（本步**不改表**：`avatarFaceCode` 列早就存在）
+
+## 五、硬约束
+- **只写 `pb_person.avatarFaceCode` 一列**：不碰 `pb_face`、不碰 `pb_person_centroid`、不写 `pb_review_log`
+- **不改表、不重跑生成器、不需要 `build_db --migrate`**（`avatarFaceCode` 列已存在）
+- **不新增任何图片编辑/覆盖/删除入口**（原图只读红线）：设头像只写一个 faceCode，**不生成任何图片文件**
+- 代表脸**必须批量 IN**；列表接口**不碰文件系统**
+- 一切读写经既有 `store` / `api` 封装；业务层禁止裸 SQL
+- 复用既有分层与双主题 token；`<script setup>` + Element Plus + Tailwind 风格保持一致
+- 单文件不超过 300 行（`PersonDetailView.vue` 已接近上限；让文件超标就抽 `components/common/AvatarPicker.vue`）
+- 不要顺手接通讯录头像 `avatarFile`，不要顺手做「头像上传/裁剪」—— 都不是本步
+
+## 六、完成后必须输出
+1. 改动文件清单（后端 / 前端分开列）
+2. 验收结果（19 条逐条说明实测情况）
+3. 第 12 条的实测证据：`/api/persons?size=24` 的 SQL 条数
+4. 一张 P-04 的实际截图（卡片中间出现照片之后的样子）
+5. `SELECT COUNT(*) FROM pb_review_log` 在设置头像前后的对比值
+6. 遗留问题与需要我决策的点
+```
+
+---
+
+## ⚠️ R7 落地时的偏差（执行后回填，供以后回看）
+
+| # | 提示语原样 | 落地成什么 | 为什么 |
+|---|---|---|---|
+| 1 | `avatarFaceCode` 失效时「展示层自动降级到代表脸」 | **降级由服务端 `personCoversOf()` 做**，不是前端；前端**只认 `coverFaceCode`** | 第一版把口径写成 `coverFaceCode = avatarFaceCode or 代表脸`，**没校验那张脸还在不在他名下** ⇒ 默认失效后卡片仍指向已删除的脸（`/api/face` 404 = 破图），DR-41④ 承诺的回退**没有发生**。用例 `test_defaultFaceRemovedDoesNotClearAvatar` 当场抓出。修法：新增 `_liveFaceOwnersOf()` 一次 IN 判「还活着且还属于他」，`personSummary` 不再自己 `or`（详见 DR-40 落地补充） |
+| 2 | 提示语写「不存在的 faceCode → **400**」 | **404 `NOT_FOUND`** | 本项目已有约定：`personCode` / `photoCode` / `faceCode` 查不到一律 404（`dto.CODE_NOT_FOUND` 的说明里就列了 faceCode）。为单个字段改全局错误码映射会让前端多记一个特例。「这张脸属于**别人**」仍是 400（请求值不对） |
+| 3 | 四处接线（persons / person detail / contacts / place） | **六处**（多了 PATCH 响应与家庭成员） | 那两个接口也在返回 `personSummary`。少接线的一处症状是「同一张脸在 A 页有照片、B 页是首字母」，接口全 200、不报错 |
+| 4 | 「每张样本加『设为默认』」 | 人工确认段用**实心按钮**、自动段并进原有的 `确认 / 移除` 行；另加头部「改头像」弹窗 | 64px 宽的样本格塞第三个按钮会换行；自动段本来就有动作行，就地并列比新开一行短。弹窗（`AvatarPicker`）解决「样本上百张时要在 Tab2 里滚很久」的问题 |
+| 5 | 「加实心描边」标出当前默认 | 改成**品牌色环（`ring`）+ ★ 图标 + 「默认」文字**，**不动描边样式** | 描边样式承担「归属来源」这一维（实线=人工确认 / 虚线=机器认的，`utils/faceState.js`）。拿它表示「这是默认」会把两种语义混成一种 |
+| 6 | 未提 | 报错文案带**双方姓名**、且**不含 Markdown 星号** | message 是给人看的一句话，会被原样 Toast；只报「不支持」用户不知道下一步做什么 |
+
+---
+
+# 修正步骤 R8 · 照片年代修正（人工修正拍摄年 · DR-42）
+
+> **什么时候做**：随时（与 R5 地点界面**无依赖**）。用户看完 P-03 截图提出「这个照片的年代桶是错误的」。
+> **做什么**：给照片加一个「人工修正拍摄年」，并在照片详情页提供**编辑入口** —— 让这张照片里每个人脸的**年代桶**、时间筛选、年代跨度、地点年份一起变正确。
+> **核心判断**：这**不是**「桶算错了」，而是喂给桶公式的**拍摄年不可信** —— 所以修照片的年份，不是改人的桶。
+
+```text
+【photo-browser · 修正步骤 R8 · 照片年代修正（DR-42）】
+
+## 目标
+① `pb_photo` 新增「人工修正拍摄年」；**有效拍摄年 = override 优先于 shotYear**。
+② P-03 照片详情「拍摄信息 › 年代」行提供**编辑入口**（先看影响面，再落库）。
+③ 落库后这张照片**全部**人脸重刷年代桶 + 涉及人物质心重算（DR-22 的硬顺序）。
+④ 可撤销（pb_review_log opType=BUCKET_FIX）。
+
+## 前置
+步骤 1–12 与 R3 / R4a / R4b / R6 / R7 均已完成。
+真实库现象：`Len Family/董家老相册/相片纸(2).jpg` 读出来是 **2019-07-19**（翻拍时间），
+而照片本身拍于 1960 年代 —— 一位 1938-12-30 生的人因此落在「2016-2025」，
+按真实年代应当是「1956-1965」。**公式没错，输入错了。**
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-42** 与 **DR-42 落地补充**（本步全部口径）
+- plan/数据库设计.md §4.4 `pb_photo` 的「有效拍摄年」段（含为什么表达式不走索引）
+- plan/开发计划.md「⚠️ 修正步骤 R2」（DR-20/21/22：桶是派生值、刷桶与重算的硬顺序）
+
+## 必须先读现有代码
+### 1. `code/src/engine/match/` —— 分桶与刷桶
+- `bucket.py` 第 235–271 行 `bucketKeyAdaptive(shotYear, birthYear)`：桶 = f(年, 生日)，**规则只在这一处**
+- `rebucket.py` 第 200–218 行 `shotYearOf()`：**全项目唯一**的 photoCode → 年份回查点（改这一处即覆盖 `rebucketFace/Photo/Person/All` 全部路径）
+- `rebucket.py` 第 357–390 行 `rebucketPhoto()`：一张照片的全部人脸重刷（只改 `shotBucket` 一列）
+- `centroid.py` 第 389–419 行 `recomputePerson()`：会 `dropBucket` 掉没样本的旧桶，**执行前**跑 DR-22 前置检查
+### 2. `code/src/api/photoAction.py` —— 照片级写的家（两段式范式照抄 `soft-delete`）
+### 3. `code/src/processor/review/assigner.py` 第 108–129 行（opType 登记表）+ `merger.py` 的 `undo()`（**唯一**逆操作入口）
+### 4. `code/webserver/src/views/PhotoDetailView.vue` 第 702–760 行「拍摄信息」区块
+
+## 一、数据层
+1. `pb_photo.txt` 加 `shotYearOverride SMALLINT NULL`，注释写明「人工修正拍摄年 分桶优先 空=未修正」。
+2. 重跑 `python code/src/database/sqliteCodeGenerator.py`（⚠️ **全量，不要用 `-i`**），
+   再跑 `python code/src/tools/build_db.py --migrate`（只加列，不动数据）。
+3. ⚠️ **不要把新列加进 `runner._META_FULL_COLUMNS`**：重扫是"整列替换"语义
+   （`updateColumns` + `forceColumns`），加进去 = 每次重扫都把人工修正洗回 EXIF 年份。
+
+## 二、口径：有效拍摄年（只有两个出口）
+- SQL 侧 `comGD.sqlEffectiveShotYear(alias)`；Python 侧 `rebucket.effectiveShotYear()`。
+- 要替换的读点（**缺一处 = 某处仍按 2019 算，且两处各自看着都对**）：
+  `browse.py`（列表 / 详情 / `shotYearFrom/shotYearTo` 筛选 / 排序白名单 / 人物年代跨度）、
+  `place.py`（年筛选 / 年代直方图 / 地点人物跨度）、
+  `placeStore.py`（字典 `rebuildPlaces` + 实时聚合 `liveAggregatePlaces` 两路的 `MIN/MAX`）。
+
+## 三、写入口（新建 `processor/photoTimeFix.py`）
+- `previewFix()` **纯读**，必须返回 `persons[]`：谁、从哪个桶、到哪个桶
+  （写入的是**照片级**年份，而桶按各人生日现算 —— 一张合影里三个不同生日的人会朝三个方向变）。
+- `applyFix()` 顺序：① 写 override → ② `rebucket.rebucketPhoto` → ③ `centroid.recomputePerson`。
+- `revertFromLog()`：撤销 = 把 override 写回原值 + 重刷桶 + 重算质心。
+- 日志：**主日志 + 每个受影响人一条成员日志**。成员日志必须带 `toPersonCode` ——
+  `/review/log?personCode=` 是**等值**查，不带就查不到，用户的操作历史里看不见这次修正。
+
+## 四、API
+- `GET /photos/{photoCode}/shot-year-fix`（纯读预览；**省略 shotYear = 预览「恢复自动」**）
+- `POST /photos/{photoCode}/shot-year-fix`（不带 `confirm=1` 只返回影响面，带了才执行）
+- ⚠️ `shotYear` 必须**显式给**：不传 → 400；传 `null` → 恢复自动。两者在 JSON 里都是 None，
+  只能靠 `model_dump(exclude_unset=True)` 区分 —— 混在一起会让"前端漏传"变成"静默清掉用户的修正"。
+
+## 五、前端
+- 新建 `components/photo/ShotYearFixDialog.vue`：年份输入 + 影响面清单 + 「恢复自动」。
+- `PhotoDetailView.vue`：拍摄信息加「年代」行（值 + 「人工修正」角标 + 「修正」按钮）。
+- `api/photoAction.js`：`getShotYearImpact` / `fixShotYear`（恢复自动要**显式**传 `{shotYear: null}`）。
+- 撤销侧：`PersonDetailView.vue` 的撤销按钮文案与成功提示必须按 `opType` 区分 ——
+  `/review/revertible` 是**通用**可撤销列表，最新一条可能是 BUCKET_FIX。
+
+## 验收
+见 plan/开发计划.md「修正步骤 R8」的验收栏（8 条），新建 `test/test_photo_time_fix.py` 逐条钉住。
+**最容易漏的一条**是 `test_rescanUpsertKeepsOverride`（重扫 upsert 之后修正还在）——
+它守的是"新列没被顺手加进扫描器的列白名单"这个边界。
+```
+
+## 落地与原提示语的差异（R8 实测）
+
+| # | 原提示语 | 落地成什么 | 为什么 |
+|---|---|---|---|
+| 1 | 用户提「**拖拽**方式或者编辑方式」 | 本轮**只做编辑入口**（P1 再做拖拽） | 拖拽的落点是「**这个人**的桶」，而写入的是**照片级**年份 ⇒ 反解有歧义（10 年桶只能保证落在桶内）；且 `BucketTimeline` 得先有一个「可选桶清单」（含 0 张的空桶）才能当放置区，那是新增 API + 组件改造。编辑入口不依赖这些，且语义更贴近真相（"这张照片是 1960 年拍的"） |
+| 2 | 修「年代桶」 | 只修**到年**（`takenAt` 一个字不动） | 桶只由年决定（用户明确要的也是桶）；改 `takenAt` 会覆盖掉「扫描器读到的 EXIF 时间」这个事实，还引入一个本需求不需要的第二真相。代价是照片流的「年月」分组里它仍在 2019 那一格 —— 已记在 R8 的「已知取舍」 |
+| 3 | 撤销 | **复用** `POST /api/review/undo`（`merger.undo` 分流委托），不新开端点 | 撤销入口只能有一个：两套入口 = 两套闸门（`isRevertible` / `revertedByLogCode`），迟早分叉。⚠️ 委托时要把 `PhotoTimeFixError` **转成 `MergeError`** —— `api/review.py` 的 `_codeOf()` 是按**错误文本**映射状态码的，直接抛新异常会变成 500（"撤销两次"本该是 409） |
+| 4 | 日志 | **主日志 + 每人一条成员日志** | 主日志的 `from/to` 都是空的（一次修正可能牵动多人，写谁都不对），而 `/review/log?personCode=` 是等值查 `toPersonCode` ⇒ 只写主日志的话，**用户在这个人的操作历史里什么都看不到** |
+| 5 | 落库后重算质心 | 重算失败**不当作整体失败**，转成 `warnings[]` 返回 | `recomputePerson` 会先跑 DR-22 前置检查；被修正的人**别的照片**若还残留旧口径桶键，它会抛 `BucketStaleError` —— 而本次这张照片的桶**已经刷对了**。「静默吞掉」与「整次操作失败」都不对，所以把建议命令交给界面显示 |
+| 6 | 未提 | 生成器**必须全量跑**（`sqliteCodeGenerator.py` 不带 `-i`） | 实测踩到：`-i pb_photo.txt` 只生成这一张表的区块，把产物里其余 9 张表的 CRUD **全抹掉了**（2600+ 行 → 997 行）。它是"只处理指定表"的语义，不是"只更新指定表" |
+
+---
+
+# 修正步骤 R4b · 目录名线索接入（DR-25/30/32/33/34/35）
+
+> **什么时候做**：R4a 已完成，随时可做。
+> **做什么**：把「目录名里的地点」接进地点字典。**这是地点维度最大的一块数据** ——
+> 目录名线索约 **598 张**，是有效 GPS（65 张）的 **9 倍**。
+
+```text
+【photo-browser · 修正步骤 R4b · 目录名线索接入】
+
+## 目标
+让「目录名里写着地点」的照片也能进地点字典。做法：`pb_photo` 存目录名解析结果，
+`rebuildPlaces()` 的聚合键改成「目录名优先」，并重跑一次（顺带清掉 26 张幽灵行）。
+**不做界面。**
+
+## 前置（已核实，请自己再确认一遍）
+- R4a 已完成：`pb_place.nameZh` 已加、`processor/place/placeNameZh.py` 已交付（45KB）
+- `pb_place` 现有 **17 行**，16 行有 `nameZh`（唯一 NULL 是 `(0,0)` 那批，判定正确）
+- `pb_photo` 现有 2137 行；`placeName` 非空 **65** 张；`lat/lon` 非空 **91** 张
+- ⚠️ `pb_place.photoCount` **合计 91**，比实际 65 多 **26** —— 见 DR-33（R3 清数据后没重跑 rebuild）
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-25 / DR-30 / DR-32 / DR-33 / DR-34 / DR-35 / DR-36**
+- plan/数据库设计.md §1.3 命名规范、§1.4 尾部七字段、§五 索引清单
+
+## 必须先读现有代码
+### 1. `code/src/processor/place/placeStore.py`（27KB，本步主要改动面）
+- `makePlaceCode(placeName)` —— **幂等键派生，本步要改它的输入语义**（见第三节）
+- `REBUILD_COLUMNS = ("placeName", "photoCount", "firstShotYear", "lastShotYear",
+  "centerLat", "centerLon")` —— ⚠️ `nameZh` **刻意不在内**，本步**别把它加进去**
+- `rebuildPlaces()` 的聚合（`GROUP BY placeName`）+ 归零逻辑（「本次没出现在 pb_photo 里的行
+  `photoCount` 置 0，**不删行**」）+ `source` 刻意不进 `updateColumns`/`forceColumns`
+- `listPlaces()` / `countPlaces()` / `liveAggregatePlaces()` / `nameZhMap()` / `resolvePlaceFilter()`
+
+### 2. `code/src/database/pb_photo.txt`（31 行）
+- `placeName VARCHAR(256) NULL COMMENT '逆地理地点'`
+- ⚠️ **没有** `placeNameDir`
+
+### 3. `code/src/processor/scanner/walker.py` / `meta.py`
+- `relPath` 的形态（相对 photo 根、正斜杠）
+- ⚠️ **不要改扫描器去写 `placeNameDir`** —— 见第五节「谁来填这一列」的说明
+
+## 一、表结构改动
+
+### 1.1 `pb_photo` 增列
+在 `placeName` **之后**插入：
+```
+placeNameDir VARCHAR(128) NULL COMMENT '目录名解析出的地点名 非派生列 扫描与rebuild均只填空不覆盖'
+```
+- 重跑生成器 → `build_db.py --migrate`（**逐表行数迁移前后一致**，只加列不动数据）
+
+### 1.2 `pb_place.txt` 的注释要更新（DR-34）
+`placeName` 的语义在 R4b 后变成「**聚合键兼显示名**」，来源可能是 GPS 英文、也可能是目录名中文：
+```
+placeName VARCHAR(256) NOT NULL COMMENT '聚合键兼显示名 来源=目录名(优先)或GPS逆地理 目录名地点已是中文故nameZh可空'
+```
+
+## 二、新增 `code/src/processor/place/dirNamePlace.py`
+
+```python
+#: 判据正则（**做成配置，见 basicSettings**）—— DR-32 实测得出的口径
+#: 「日期前缀 + 非空地名」：A 类全带日期，人名/组名全不带
+DIR_PLACE_PATTERN_DEFAULT = r"^(?P<y>\d{4})[.\-/]?(?P<m>\d{2})[.\-/]?(?P<d>\d{2})\s*(?P<name>\S.*)$"
+
+def parseDirName(dirName: str) -> dict:
+    """目录名 -> {isPlace, placeName, dateHint, reason}
+    ⚠️ 判据要**可解释**：返回 reason 说明为什么采纳/排除，
+       便于输出「采纳/排除清单」让人核对（验收第 2 条）"""
+
+def placeNameDirOf(relPath: str, depth: int = 1) -> str:
+    """relPath -> 目录名地点名（空串 = 无线索）。
+    depth=1 先看父目录；父目录无名时**可考虑**上溯祖父目录
+    —— 但要注意 `2013.07.26 华盛顿/xxx/` 这种，祖父目录就是它本身。
+    ⚠️ 上溯要有**明确终止条件**，不要一路爬到 photo 根目录。"""
+
+def scanDirNames(dryRun=True) -> dict:
+    """遍历 pb_photo，算出每张照片的 placeNameDir。
+    ⚠️ **只填空不覆盖**：已有非空值的行不动（这是它敢做非派生列的前提）。
+    dryRun 报告将填多少行 + 完整采纳/排除清单。"""
+
+def rebuildDirPlaces(dryRun=False) -> dict:
+    """落库 + 报告。落库后提示调用 placeStore.rebuildPlaces()（见第三节的硬顺序）"""
+```
+
+### 判据必须做成配置（`basicSettings.py`）
+```
+#: 目录名 -> 地点名的判据（DR-32）。默认口径 = 「日期前缀 + 非空地名」，
+#: 实测能干净分开「日期+地名」的 A 类与「人名/组名」的 B 类。
+#: ⚠️ 这是**用户的命名习惯**，不是普适规律 —— 改库里的目录风格时同步调这里。
+DIR_PLACE_PATTERN: str = r"^(?P<y>\d{4})[.\-/]?(?P<m>\d{2})[.\-/]?(?P<d>\d{2})\s*(?P<name>\S.*)$"
+#: 明确排除的目录名（黑名单，逗号分隔）。用于正则拦不住的特例。
+DIR_PLACE_BLACKLIST: tuple = ()
+```
+
+### 实测的目录清单（**请以此为验收基准，逐个给判定**）
+
+**必须采纳**（日期 + 地名，约 598 张）：
+```
+114  2013.07.26 华盛顿          60  2013.07.23 尼亚加拉大瀑布
+ 99  2013.07.18 大都会博物馆     52  2013.07.22 千岛湖
+ 98  2013.07.16 纽约            51  2013.07.27 国家艺术馆
+ 38  2013.07.20 波士顿          15  2013.07.21 Watertown
+ 13  2013.07.19 罗德岛           6  2013.07.24～25 康宁及赫尔希
+ 52  20101218 Michael's Home
+```
+
+**必须排除**（人名 / 组名 / 学校 / 无地点）：
+```
+452 BaiRuiQin   157 MOT Friends   122 2011聚会    116 lianzhongwen
+ 98 BUPT871      75 廉家老照片      63 聚会         58 LianZhongWen
+ 52 DDQ          45 LianYi          37 lc           34 Friends
+ 24 Family       24 others source   18 LiuChang     16 Photo / MengLi
+ 14 LvZhenhua    14 Wang            14 shiyu         9 Lian Family
+  8 xiaoyun       5 毕业照           4 lianzhongming 4 mengli / DengGang
+  4 老照片
+```
+
+**需要你给结论的特例**（**必须在报告里给理由**）：
+| 目录 | 张数 | 待判 |
+|---|---|---|
+| `2011聚会` | 122 | 有年份 + 事件名，**无地点** → 我的倾向：**排除**（"聚会"不是地点） |
+| `20051229` | 22 | **只有日期、地名部分为空** → 排除（没有地点信息） |
+| `201105` | 8 | 同上 → 排除 |
+| `20101218 Michael's Home` | 52 | 日期 + `Michael's Home`。"xx 的家"**算不算地点**？→ 我的倾向：**采纳**（它是具体地点，比它没有强），但请你判定 |
+| `廉家老照片` | 75 | 无日期，`廉家` 是家族名 → 排除 |
+| `2013.07.24～25 康宁及赫尔希` | 6 | 日期含**波浪号区间** + 两个地名 → 请给结论（我的倾向：采纳，取整串作名字） |
+
+## 三、`rebuildPlaces()` 的聚合键改动（本步最需要小心的改动）
+
+### 3.1 聚合键
+```sql
+-- 改前
+SELECT placeName, COUNT(*) ... FROM pb_photo GROUP BY placeName
+-- 改后（DR-32：目录名优先，DR-25）
+SELECT COALESCE(NULLIF(placeNameDir, ''), placeName) AS placeKey, COUNT(*) ...
+  FROM pb_photo
+ WHERE COALESCE(NULLIF(placeNameDir, ''), placeName) IS NOT NULL
+ GROUP BY placeKey
+```
+- `placeKey` 就是新的 `pb_place.placeName`，并据此走既有的 `makePlaceCode()` 派生 `placeCode`
+  —— ⚠️ **`makePlaceCode` 本身不改**（`placeStore` 文件头明确「一个字都不改」的纪律）
+- `centerLat/centerLon`：目录名地点**没有坐标** ⇒ 留 NULL（DR-34）。
+  ⚠️ 聚合时**不能**因为 `AVG(lat)` 全 NULL 就把整列塞 0 或不写，要能正确留 NULL
+
+### 3.2 ⚠️ 硬顺序（写进 `rebuildDirPlaces` 的注释与 CLI 提示）
+```
+① dirNamePlace.scanDirNames()   填 pb_photo.placeNameDir
+② placeStore.rebuildPlaces()    按新聚合键重建地点字典
+③ placeNameZh.rebuildNameZh()   （可选）补 GPS 地点的中文名
+```
+反了会怎样：先 rebuild 再填 `placeNameDir` ⇒ 字典里全是旧的 GPS 地名，
+新填的目录名**这一轮完全不生效**，而 `rebuildPlaces` 会打印「更新 N 个地点」看着很正常。
+
+### 3.3 幂等键漂移的连带处理（**DR-32 明确要求，别省**）
+目录名会被用户改动（实测：两天内 `张家界` → `华盛顿`）。改一次名 ⇒ 新 `placeCode` + 旧行归零。必须：
+1. **旧行只归零、不删除** —— 现有逻辑已支持，别破坏
+2. **手工行（`source=1`）永不归零**
+3. **新增「孤儿 `nameZh` 报告」**：`photoCount = 0` 但 `nameZh` 非空的行走一遍并输出
+   —— 手工填过的中文名会因改名变成孤儿，**必须让用户看见而不是静默丢**
+4. **map 陈旧检查**：`liveAggregatePlaces()` 走了实时聚合（降级路径），
+   它的数据源是 `pb_photo` 的 GROUP BY —— 本步改了聚合键后，**这条降级路径也要跟着改**，
+   否则「字典表未 rebuild 时」会给出与字典表不一致的地点名
+
+## 四、谁来填 `placeNameDir`（**明确写清，避免又出现「承诺了没人做」**）
+
+| 时机 | 做什么 |
+|---|---|
+| **本步的 `scanDirNames()`** | 一次性全量填（首次接入） |
+| **扫描器（步骤 3）** | ⚠️ **本轮不改扫描器** —— 理由：改扫描器要动 `runner.py` 的写库批次与 `forceColumns`，风险高于收益。改为在**文档与注释里写明**：「`placeNameDir` 由 `dirNamePlace.scanDirNames()` 填，扫描器不负责」，并提供一个 CLI 便于改名后重跑 |
+| **目录改名后** | 用户手动跑 `scanDirNames()` + `rebuildPlaces()`（重扫会更新 `relPath`，但**不会**自动更新 `placeNameDir`）⚠️ 这个限制必须写进 CLI 的输出提示里 |
+
+⚠️ 这是一个**已知取舍**，请把它写进 `dirNamePlace.py` 的文件头，并在完成后**主动报告**：
+「目录改名后需要手动跑两个命令」——不要让用户自己发现。
+
+## 五、CLI：`code/src/tools/place_cli.py`
+
+```
+--scan-dir       从 relPath 解析并填 pb_photo.placeNameDir（--dry-run 只报告）
+--audit          巡检报告（见下）
+--rebuild        全链路：scan-dir -> rebuildPlaces ->（可选）rebuildNameZh
+--photo <code>   单张照片的地点解析过程（排障用）
+```
+
+`--audit` 必须输出（这是本步的**主要验收产物**）：
+1. **字段级总数**：照片总数 / `placeNameDir` 非空 / `placeName` 非空 / 两者都空
+2. **采纳/排除清单**：每个不同目录名 → 采纳还是排除 + 理由 + 张数（**全量，不是 top N**）
+3. **地点清单**：`placeCode / placeName / nameZh / source / photoCount / firstShotYear / lastShotYear / centerLat / centerLon`
+4. **幽灵行**：`photoCount = 0` 的行（含 `(0,0)` 那批的 26 张）
+5. **孤儿 `nameZh`**：`photoCount = 0` 但 `nameZh` 非空
+6. **重名 `nameZh`**：同一个 `nameZh` 出现多行（DR-36，如「北京市 · 朝阳区」两行）
+7. **无中心点地点**：`centerLat` 为 NULL 的地点（目录名地点全是）
+
+## 六、验收清单（逐条实际运行）
+
+### A. 表与迁移
+1. `pb_photo.placeNameDir` 已加，重跑生成器，`build_db.py --migrate` 成功
+2. **逐表行数迁移前后一致**（`pb_photo` 2137 行、`pb_place` 17 行 等）
+3. `PRAGMA table_info(pb_photo)` 含 `placeNameDir`；`pb_place.txt` 的 `placeName` 注释已更新
+
+### B. 判据（**本步最关键的第二条**）
+4. `--scan-dir --dry-run` 输出**完整**的采纳/排除清单（52 个不同目录逐个给判定与理由）
+5. **必须采纳的 11 个目录全部采纳**（上面列的那批，约 598 张）
+6. **必须排除的全部排除**（`BaiRuiQin` / `MOT Friends` / `lianzhongwen` / `BUPT871` /
+   `Family` / `Friends` / `廉家老照片` / 各类人名拼音…）
+7. 六个特例（`2011聚会` / `20051229` / `201105` / `20101218 Michael's Home` /
+   `廉家老照片` / `2013.07.24～25 康宁及赫尔希`）**逐个给结论与理由**
+8. 判据正则与黑名单**已做成配置**，不是硬编码在函数里
+9. 实跑后 `placeNameDir` 非空的行数 = 预期（约 598，请给出精确数）
+10. **只填空不覆盖**：手工把某一行的 `placeNameDir` 改成别的值 → 再跑 `--scan-dir` → **该值不变**
+
+### C. 聚合与字典
+11. 重跑 `rebuildPlaces()` 后：地点数、`photoCount` 合计 == `placeNameDir` 非空 + `placeName` 非空
+    （**请给出精确对照**）
+12. **26 张幽灵清零**：`PL_GH_Western_Takoradi` 的 `photoCount` 变为 0（DR-33）
+13. **目录名地点的 `placeName` 是中文、`nameZh` 是 NULL、`centerLat/centerLon` 是 NULL**（DR-34）
+14. **GPS 地点的 `nameZh` 未被改动**（R4a 的成果不回归）
+15. **展示契约验证**：`nameZh ?? placeName` 对两类地点都给出正确显示名（逐类举 3 例）
+16. 手工行（`source=1`）在 rebuild 后**仍为手工行**且 `photoCount` 未被归零
+17. `liveAggregatePlaces()`（降级路径）**也用了新聚合键** —— 与字典表的结果一致
+18. **孤儿 `nameZh` 报告**能报出（构造：手工填一个 `nameZh`，然后把该行的照片改到另一个目录 → 重跑）
+19. **重名 `nameZh` 报告**能报出「北京市 · 朝阳区」两行（DR-36）
+
+### D. 顺序与幂等
+20. `--rebuild` 全链路（scan-dir → rebuildPlaces）跑通；**跑两遍结果一致**（幂等）
+21. 故意**反序**（先 rebuild 再 scan-dir）→ 明确提示「必须先 scan-dir」而不是静默给出旧结果
+22. 改名演练：把某个目录改名（构造数据，**不要动真实 photo 目录**）+ 重扫 + `--rebuild` →
+    新 `placeCode` 生成、旧行归零、孤儿 `nameZh` 报告出现
+
+### E. 回归
+23. `pytest code/src/test -q` 全绿（当前基线 **1237 passed**）
+24. 前端构建通过（`npm run build`）—— 本步应**不含任何前端改动**，仅证明未被影响
+25. **photoDir 零风险**：全程文件数与总字节数不变
+26. **不改扫描器**：`git status` 里不应有 `processor/scanner/*` 的改动
+
+## 七、硬约束
+- **原图绝对只读**
+- 业务层**禁止裸 SQL**，一律经 `sqliteCommon`（`query` 模块的 `selectList` 用于复杂聚合，
+  现有 `rebuildPlaces` 已在用，照它来）
+- **`makePlaceCode()` 一个字都不改**（`placeStore` 文件头的纪律）
+- **`nameZh` 绝不进 `REBUILD_COLUMNS`**，`placeNameZh.py` **一个字都不改**（DR-34）
+- **`placeNameDir` 只填空不覆盖** —— 这是它敢做非派生列的前提
+- **旧行只归零不删除**；手工行永不归零
+- **不引入 geohash**（DR-35：目录名无坐标，收益已被 `nameZh` 替代）
+- **不改扫描器**（第四节）
+- **不对 DR-36（重名 `nameZh`）擅自实现归并** —— 只报告，等用户定
+- 现有代码风格（文件头纪律说明、`_VERSION`、日志、`REBUILD_COLUMNS` 的警告注释）保持一致
+
+## 八、完成后必须输出
+1. 改动文件清单
+2. 验收结果（26 条逐条给命令与实际输出）
+3. **完整的采纳/排除清单**（52 个目录逐个 + 理由 + 张数）← R5 界面设计的依据
+4. **改后 `pb_place` 全表**（placeCode / placeName / nameZh / source / photoCount / 年份 / 中心点）
+5. 第 11 条的精确对照：`photoCount` 合计 vs `placeNameDir` 非空 + `placeName` 非空
+6. 六个特例的判定与理由
+7. `--audit` 的七项输出（幽灵行 / 孤儿 nameZh / 重名 nameZh / 无中心点地点）
+8. 遗留问题与需要我决策的点（**含目录改名后需手动跑两个命令这个已知取舍**）
+```
+
+---
+
+# 修正步骤 R5 · 地点界面（地点 → 照片流 + 人物「去过的地方」）
+
+> **什么时候做**：R4a / R4b 已完成，随时可做。
+> **形态已按 R4b 实测数据调整**（见 DR-37）：主路径是**地点 → 照片流**，不是「人物 → 地点列表」。
+> **本轮不做地图**（11/28 个地点无坐标）。
+
+```text
+【photo-browser · 修正步骤 R5 · 地点界面】
+
+## 目标
+把已有的地点数据做成可浏览的界面：
+① **地点列表**（`/places`）→ ② **地点详情**（照片流 + 在场的人）
+③ **人物详情 Tab1「时间轴」后面**加「去过的地方」区块 ← **用户点名要的位置**（见 §3.3）
+④ 照片各处的地点显示改成中文。
+
+## 前置（已核实，请自己再确认一遍）
+- R4a 已完成：`pb_place.nameZh`（中文行政区名）+ 照片接口的 `placeZh` + 筛选两套值
+- R4b 已完成：`pb_photo.placeNameDir` + 聚合键 `COALESCE(placeNameDir, placeName)`
+- **实测数据**：`pb_place` **28 行**（11 个目录名地点 + 17 个 GPS 地点）；`photoCount` 合计 **663**
+  （598 目录名 + 65 GPS）；`pb_person` 2029；`pb_face` 3647 但**只有 67 个有归属**；
+  `pb_photo_person` 仅 66 行
+
+## ⚠️ 必读：两个实测结论决定了界面形态（DR-37）
+
+### ① 人物 × 地点交叉几乎为空
+有地点的照片 663 张里，**已关联到人物的只有 1 张**；`pb_face` 有归属的只有 67/3647。
+⇒ **按「先选人物 → 再看地点」做，点进去是空界面。**
+⇒ 主路径改为 **地点 → 照片流**；人物维度做成人物详情页里的一个区块。
+
+### ② 11 个目录名地点没有坐标
+目录名地点占 663 张里的 **598 张（90%）**，`centerLat/centerLon` 全为 NULL。
+⇒ **地图做不了**（只有 17 个 GPS 点可画，照片最多的 11 个地点会在地图上消失）。
+⇒ **本轮不做地图**；后续要做得先解决「目录名地点无坐标」这个前提。
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-25 / DR-28 / DR-34 / DR-36 / DR-37 / DR-38**（地点口径与形态决策）
+- plan/UI/photo-browser UI 设计.md 第四节（P-02 照片流、P-04 人物库、P-05 人物详情）、第七节（双主题 token）
+- plan/照片管理方案_开源调研与自研设计.md 3.10（前端视图清单里「地点」那行 —— 原设想含地图，本轮不采纳）
+
+## 必须先读现有代码
+- `code/src/processor/place/placeStore.py`（43KB）—— `listPlaces` / `countPlaces` /
+  `nameZhMap` / `resolvePlaceFilter` / `liveAggregatePlaces`，**本步的接口都基于它**
+- `code/src/processor/place/placeNameZh.py`（45KB）、`dirNamePlace.py`（48KB）—— 只读参考，**不改**
+- `code/src/api/browse.py` —— `GET /api/places`（约 1285 行）、`GET /api/photos/{photoCode}`
+  （`out["gps"]["placeZh"]`）、`photoSummary()`、`resolvePlaceFilter()` 的用法；
+  **新增端点要照 `GET /persons/{personCode}/timeline`（第 998 行）的写法摆在同一文件里**
+- `code/src/api/browse.py` 的 `GET /photos`（约 460 行）—— **确认它同时吃 `personCode` 与
+  `placeName`**（§3.3 的点击跳转依赖这个，已核实存在，但要自己再看一眼参数校验）
+- `code/webserver/src/views/PersonDetailView.vue`（33KB）—— **重点看第 515–532 行 Tab1 时间轴**，
+  §3.3 就要插在这一段里；同时看第 34–42 行的 import 与 `store/persons` 的 `fetchTimeline` 用法
+  （新的 `fetchPlaces` 照它写）
+- `code/webserver/src/views/PhotosView.vue` / `PhotoDetailView.vue`
+- `code/webserver/src/components/photo/{PhotoThumb,BucketTimeline,PhotoPager}.vue`
+- `code/webserver/src/components/common/{PersonCard,PersonForm}.vue` —— 新组件同目录同风格
+- `code/webserver/src/router/index.js`、`store/`、`api/` —— **照既有分层写，不要新起一套**
+
+## 一、显示契约（**先定这个，全步都依赖它**）
+
+```js
+// 地点显示名的唯一入口，所有视图都调它，不要各写各的
+export function placeDisplayName(place) {
+  return place.nameZh || place.placeName || '未知地点'
+}
+```
+| 地点类型 | `placeName` | `nameZh` | 显示 |
+|---|---|---|---|
+| GPS 地点 | `CN, Beijing, Datun`（英文） | `北京市 · 朝阳区` | **中文** |
+| 目录名地点 | `华盛顿`（已是中文） | `NULL` | **华盛顿** |
+| 幽灵行（`photoCount=0`） | `GH, Western, Takoradi` | `NULL` | **不展示**（过滤掉） |
+
+⚠️ **后端列表要过滤 `photoCount > 0`**（幽灵行不该出现在界面）；
+若接口不支持，前端过滤并**在报告里说明**。
+
+## 二、后端：补 **5** 个只读接口（**不是纯前端改动**）
+
+- **`code/src/api/place.py`（新建）**：4 个 `/api/places/*` 端点，照 `browse.py` 的分页/筛选/DTO 写法
+- **`code/src/api/browse.py`（改）**：1 个 `/api/persons/{personCode}/places`
+  —— ⚠️ **必须放这里**，与第 998 行 `/persons/{personCode}/timeline`、第 917 行
+  `/persons/{personCode}/faces` 同模块（那两条已存在，本条是它们缺失的兄弟端点；
+  R4a/R4b 的提示语里登记过但**实测未实现**，本步补上）
+- 两边都**禁止裸 SQL**（走 `database/queryCommon.py` 查询出口，步骤 9 已建立）
+
+| 端点 | 所在文件 | 返回 | 关键点 |
+|---|---|---|---|
+| `GET /api/places?groupByNameZh=1` | `place.py` | 地点列表（分页 + `q` 模糊 / `minPhotos` / `year` / `hasPerson`） | **按 `nameZh` 分组归并**（DR-36 方案①） |
+| `GET /api/places/{placeCode}` | `place.py` | 地点详情（含 `photoCount` / 年份跨度 / 坐标 / `placeCodes` 同组列表） | 支持 `?placeCodes=a,b,c` 表示「已归并的同组」 |
+| `GET /api/places/{placeCode}/photos` | `place.py` | 该地点的照片（分页，按年分组） | 复用 `photoSummary()`，带 `placeZh` / `thumb` / `shotYear` |
+| `GET /api/places/{placeCode}/persons` | `place.py` | 出现在该地点的人 + 各自照片数 | **实时 `DISTINCT` join `pb_photo_person`**（DR-26，不落库） |
+| `GET /api/persons/{personCode}/places` | **`browse.py`** | 某人去过的地方（按 `lastShotYear` 倒序）+ `photoTotal` / `locatedPhotoTotal` | 同上，实时 join；**3.3.1 有完整契约** |
+
+### 2.1 重名归并（DR-36 方案①）—— 本步最容易做错的一处
+```
+实测重名 3 组：
+  北京市 · 朝阳区       PL_CN_Beijing_Datun(8) + PL_CN_Beijing_Wangjing(7)  → 归并后 15
+  新疆维吾尔自治区 · 特克斯县  Hujirti(6) + Tekes(1)                        → 归并后 7
+  新疆维吾尔自治区 · 伊宁市    Yengiyar(8) + Huiyuan(1)                     → 归并后 9
+```
+- **`placeCode` 一个字都不改**（R4b 刚确立的纪律，改了幂等键会漂移）
+- 归并只发生在**展示层**：同 `nameZh` 的多行合并成一行，`photoCount` 求和，
+  `firstShotYear`/`lastShotYear` 取并集的最值
+- 组内多个 `placeCode` 要**能下钻**：列表项点击后带 `placeCodes` 进详情，
+  详情里可用 tab / 分段列出组内各点（如「大屯 8 张 / 望京 7 张」）
+- ⚠️ **归并是「展示分组」不是「数据合并」**：不要把同组的照片混成一堆而丢失来源，
+  下钻时仍要能看出「这 15 张里哪 8 张来自大屯」
+
+## 三、前端：2 个新视图 + 1 个新区块 + 3 处改造
+
+### 3.1 `views/PlacesView.vue`（`/places`）
+```
+┌──────────────────────────────────────────────────────────────┐
+│ 地点 28 处      [🔍 搜索地点]  [年份▾] [仅有人物的]           │
+├──────────────────────────────────────────────────────────────┤
+│ ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐ │
+│ │  [封面缩略图]│ │            │ │            │ │            │ │
+│ │ 华盛顿      │ │ 纽约        │ │ 大都会博物馆 │ │ 尼亚加拉... │ │
+│ │ 114 张      │ │ 98 张       │ │ 99 张       │ │ 60 张       │ │
+│ │ 2013        │ │ 2013        │ │ 2013        │ │ 2013        │ │
+│ │ 👤 —        │ │ 👤 —        │ │ 👤 —        │ │ 👤 —        │ │
+│ └────────────┘ └────────────┘ └────────────┘ └────────────┘ │
+└──────────────────────────────────────────────────────────────┘
+```
+- 卡片：**封面用该地点第一张照片的缩略图**（`/api/thumb`）
+- **重名归并项**要有视觉提示（如角标「2 处」），点进去能下钻
+- 无坐标地点**不要显示坐标/地图图标**（11/28 是这样）
+- `👤 n` = 该地点在场人数；现在大多是 0 或 `—`，**空状态文案要友好**（见 3.4）
+
+### 3.2 `views/PlaceDetailView.vue`（`/places/:placeCode`）
+```
+┌──────────────────────────────────────────────────────────────┐
+│ ‹ 地点   华盛顿 · 归并 2 处       2013     114 张            │
+│           [大屯 8 张] [望京 7 张]   ← 重名组内下钻             │
+├──────────────────────────────────────────────────────────────┤
+│  照片(114)  │  在场的人(0)                                     │
+├──────────────────────────────────────────────────────────────┤
+│ 2013  ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢  ← 按年/月分组，缩略图懒加载       │
+│ 2012  ▢ ▢ ▢ ▢                                                │
+├──────────────────────────────────────────────────────────────┤
+│ ⚠ 该地点还没有关联到人物。去「我不同意」或待确认队列确认人脸    │
+│   后，这里会显示当时在场的人。                                │
+└──────────────────────────────────────────────────────────────┘
+```
+- **照片流按年分组**（复用 `BucketTimeline` 或 `PhotoThumb` 网格），分页懒加载
+- 「在场的人」**实时接口**取；**没有数据时给引导文案**（指向纠错队列），不要只显示空白
+- 复用 R6 的 `PhotoPager`？—— 详情内是大图/网格，**点开照片仍走 P-03**（那里已有左右翻页）
+
+### 3.3 `PersonDetailView.vue` · Tab1「时间轴」**后面**加「去过的地方」区块
+> **用户明确要求的位置**：就在**年代桶时间轴下方**（同一个 Tab1 内，`BucketTimeline` 之后），
+> **不新开 Tab**、不独立成页。（空 Tab 会比空区块更难看。）
+
+**现状**（`views/PersonDetailView.vue` 第 515–532 行）：
+```vue
+<el-tab-pane :label="`时间轴（N 个年代桶）`" name="timeline">
+  <div class="space-y-4 pt-2">
+    <p v-if="persons.timelineLoading" class="pb-hint">正在按年代桶分组…</p>
+    <BucketTimeline v-else :groups="timelineGroups" :max-per-bucket="12" @select="onTimelineSelect" />
+    <p class="pb-hint">时间轴按年代桶分组（童年 3 年 / 成年 10 年）—— …</p>
+    <!-- ↓↓↓ 本步在这里加「去过的地方」 ↓↓↓ -->
+  </div>
+</el-tab-pane>
+```
+
+**改动形态**（新组件 `components/common/PersonPlaces.vue`，与 `PersonCard.vue` / `PersonForm.vue` 同目录同风格）：
+```vue
+  <section class="mt-6 border-t border-line pt-4" aria-labelledby="pd-places-title">
+    <h3 id="pd-places-title" class="text-body text-ink">去过的地方</h3>
+    <!-- 每条：地点中文名 + 该人在此的照片数 + 年份范围；整条可点 -->
+    <!-- 点击 → /photos?personCode={personCode}&placeName={placeName} -->
+  </section>
+```
+- 每条用 `placeDisplayName()`（见 §一）显示**中文名**，禁止直接渲染英文 `placeName`
+- 每条按 **`lastShotYear` 倒序**（最近去过的在前）
+- 每条点击 → **`/photos?personCode={personCode}&placeName={placeName}`**
+  —— ✅ 已核实 `/api/photos` **同时支持** `personCode` 与 `placeName`（`api/browse.py`），
+  精确匹配且 R4a 已做「两套写法返回同一批照片」的翻译，所以这个链接能**保留人物上下文**
+  （比跳 `/places/{code}` 更贴合「**这个人**去过的地方」的语义）
+- 整体为空时 → **`v-if` 不渲染这个 `section`**（连标题一起隐藏），另给一行 `pb-hint`：
+  「该人 **{N}** 张照片中，**{M}** 张有地点信息。」（N/M 由接口返回，见下）
+  —— ⚠️ **不要只写「暂无数据」**：用户看到空白不知道是「没做」还是「真没有」。
+  带出 N/M 才能让人明白「是地点线索没覆盖到，不是功能没做」。
+
+#### 3.3.1 后端新增 `GET /api/persons/{personCode}/places`
+- **放在 `api/browse.py`**（与 `/persons/{personCode}/timeline` 第 998 行、`/persons/{personCode}/faces`
+  第 917 行 **同模块、同风格**；不要新建模块）
+- 返回：
+  ```json
+  {
+    "personCode": "CS_0154_Qing_Bai",
+    "photoTotal": 1,          // 该人照片总数
+    "locatedPhotoTotal": 1,   // 其中有地点信息的张数（空状态文案要用）
+    "places": [
+      { "placeCode": "PL_CN_...", "placeName": "纽约", "nameZh": null,
+        "photoCount": 1, "firstShotYear": 2013, "lastShotYear": 2013 }
+    ]
+  }
+  ```
+- 实现要点：**实时 join**（DR-26），一条 SQL 搞定：
+  `pb_photo_person JOIN pb_photo` → 按 `COALESCE(NULLIF(placeNameDir,''), placeName)` 分组，
+  `photoCount` 用 `COUNT(DISTINCT photoCode)`，年份用 `MIN/MAX(shotYear)`；
+  `nameZh` 从 `pb_place` 按同一聚合键取（**不要按 `placeCode` 取**，目录名地点的
+  聚合键与 `placeCode` 可能不是一对一 —— 见 DR-36）
+- **禁止裸 SQL** → 走 `database/queryCommon.py` 查询出口（步骤 9 已建立的口径）
+
+#### 3.3.2 ⚠️ 实测数据预期（**先说清楚，免得以为做错了**）
+本步实测（只读探查，非猜测）：
+```
+pb_photo_person 共 66 行，分布在 20 个人上
+其中「照片带地点信息」的合计只有 2 行 —— 且是【同一张照片】关联了 2 个人：
+  PH_ae8b0bc8e902499982fa5651919f6b37  2013 年  目录名=纽约  无 GPS
+    → Qing Bai（1 张）/ RuiQin Bai（1 张）
+反向：663 张有地点的照片里，只有 1 张有人物关联
+```
+⇒ **R5 做完后，只有 `Qing Bai` 与 `RuiQin Bai` 两人会看到「纽约 1 张」；
+其余 18 人（含截图里的 Steven Lian）这个区块会隐藏，只留一行 N/M 提示。这是数据现状，不是 bug。**
+⇒ 因此 §五 的验收**必须同时验证「有数据的 2 人」与「无数据的 18 人」两种情况**，
+   不能因为看到空区块就判定实现失败。
+⇒ 想让这个区块真正有内容，前提是**在待确认队列里给有地点的照片确认人脸**
+   （现在 3647 张脸只有 67 张有归属）—— 这是 R5 之外的独立工作。
+
+### 3.3b 侧栏「人物库」无需改动
+用户说的「人物库」指**人物详情页**（截图正是 `PersonDetailView`）；`PeopleView.vue`
+（人物网格）本步**不动**。
+
+### 3.4 照片各处的地点显示（**验收重点是「中文」**）
+| 位置 | 改动 |
+|---|---|
+| P-03 照片详情「地点」栏 | `placeZh ?? placeName`；**保留英文原值在 tooltip**（排障要看） |
+| P-02 照片流角标 | `📷` 保持；有地点时 hint 显示中文名 |
+| 地点筛选下拉 | **给中文名**（`nameZh`），英文值作回退项；两套都能筛（R4a 已做后端翻译） |
+| 图片 `alt` | 带地点中文名（无障碍） |
+
+### 3.5 侧栏入口
+- 「地点」作为一级入口（在「人物库」之后、「待确认」之前）
+- 角标：可选（地点数无「待处理」语义，**建议不加角标** —— 加了一切非待办的数字都会变成噪声）
+
+### 3.6 本步新增 / 修改文件清单（**动手前先照这张表核对，别漏也别多**）
+| 类型 | 文件 |
+|---|---|
+| 新增 | `code/src/api/place.py` |
+| 新增 | `code/webserver/src/views/PlacesView.vue` |
+| 新增 | `code/webserver/src/views/PlaceDetailView.vue` |
+| 新增 | `code/webserver/src/components/common/PersonPlaces.vue`（§3.3 的「去过的地方」） |
+| 新增 | `code/webserver/src/api/place.js`（照 `api/` 既有模块的 axios 封装写） |
+| 新增 | `code/src/test/test_api_person_places.py`（§3.3.1 端点单测，基准用例见验收第 6 条） |
+| 修改 | `code/src/api/browse.py`（+`GET /persons/{personCode}/places`；**其余端点不动**） |
+| 修改 | `code/webserver/src/views/PersonDetailView.vue`（**只动 Tab1** 第 515–532 行区间：加 import + 插区块 + 加 `fetchPlaces`） |
+| 修改 | `code/webserver/src/views/PhotoDetailView.vue`（地点栏中文 + tooltip） |
+| 修改 | `code/webserver/src/router/index.js`（`/places`、`/places/:placeCode` 两条） |
+| 修改 | `code/webserver/src/components/layout/AppSidebar.vue`（「地点」一级入口） |
+| 修改 | `code/webserver/src/store/persons.js`（+`fetchPlaces`，照 `fetchTimeline` 写） |
+| **不改** | `processor/place/*.py`（三个文件**一个字都不动**）、`pb_place.txt`、`pb_photo.txt`、`PeopleView.vue`、`PhotoPager.vue` |
+
+> ⚠️ `PersonDetailView.vue` 已有 **33KB**，改的时候**只做插入**，不要顺手重构 ——
+> 这个文件已经踩过「一次重排把 Tab2 人脸样本的实线/虚线语义搞混」的坑。
+
+## 四、样式与可访问性
+- 双主题（浅色默认 + 跟随系统）都要可读（R4a 之后的既有 token，直接用）
+- 卡片 hover 微交互与 `PhotoThumb` 一致（上浮 2px / 120ms）
+- `<1024` 侧栏收窄；`<768` 卡片 2 列
+- 地点卡片是 `<a>`/`<button>`，键盘可达，`aria-label` 带地点名与张数
+
+## 五、验收清单（逐条实际运行）
+
+### A. 后端接口
+1. `GET /api/places` 返回 **28 行**（未归并）/ 归并后 **25 行**（3 组重名各减 1）
+   —— 请给出两个数字与算法
+2. `photoCount` 合计仍为 **663**（归并前后一致，不能因归并丢张数）
+3. **幽灵行不出现在列表**：`PL_GH_Western_Takoradi`（`photoCount=0`）不可见
+4. `GET /api/places/{code}/photos` 分页正确；带 `placeZh` / `thumb` / `shotYear`
+5. `GET /api/places/{code}/persons` **实时 join**：构造一次归属（给某张有地点的照片确认一个人）
+   → 该接口立刻返回这个人（**证明不是落库的**）
+6. `GET /api/persons/{code}/places` **实测两条基准用例**（数据现状见 3.3.2）：
+   - `CS_0154_Qing_Bai` → `photoTotal=1`、`locatedPhotoTotal=1`、`places=[纽约 × 1, 2013]`
+   - `VC_0702_Steven_Lian`（截图那个人）→ `photoTotal=9`、`locatedPhotoTotal=0`、`places=[]`
+   —— 两条都要给实际 JSON，**证明既有数据也对、无数据也对**
+7. 重名组下钻：`?placeCodes=a,b` 能正确返回组内各点的分别张数（如 大屯 8 / 望京 7）
+
+### B. 前端视图
+8. `/places` 列表：28 个地点（归并后 25 行）**全部可见**，名称全为**中文**
+9. 封面缩略图正确加载（走 `/api/thumb`，**不是 `/api/original`**，Network 面板确认）
+10. 重名归并项有「2 处」类提示，点进去能下钻到组内各点
+11. **无坐标地点不报错**：11 个目录名地点正常展示，无地图/坐标占位
+12. `/places/:code` 照片流按年分组、缩略图懒加载、分页正确
+13. **「在场的人」空状态给引导文案**（指向纠错队列），不是空白
+14. 构造一次归属后，地点详情的「在场的人」**刷新即出现**（呼应第 5 条）
+15. **人物详情 Tab1「时间轴」后面有「去过的地方」区块**（用户点名要的位置）：
+    - 打开 `VC_0702_Steven_Lian`（截图那位，9 张照片 / 0 张有地点）
+      → **区块整体隐藏**（连标题一起），只留一行
+      「该人 9 张照片中，0 张有地点信息。」
+      —— **截图给我看这行提示确实出现**，且不是空白、不是空表格
+    - 打开 `CS_0154_Qing_Bai` → 区块**可见**，标题「去过的地方」，
+      下面一条「纽约 1 张 2013」，**地点名是中文**
+    - 点那条「纽约」→ 跳到 `/photos?personCode=CS_0154_Qing_Bai&placeName=纽约`
+      → 照片流**只剩 1 张**（人物 + 地点**双条件都生效**，这是本条的考点）
+    - 时间轴本身**未被破坏**：`BucketTimeline` 仍在原位、桶数与之前一致、
+      Tab2「人脸样本」不受影响
+16. **照片详情「地点」栏显示中文**（你截图那张新疆的照片应是「新疆维吾尔自治区 · 阿勒泰市」），
+    tooltip 里能看到英文原值
+17. 地点筛选下拉给中文名；`?placeName=阿勒泰市` 与 `?placeName=CN, Xinjiang Uygur Zizhiqu, Araltobe`
+    **返回同一批照片**
+18. 侧栏「地点」入口可跳转；**不加角标**
+19. 深色/浅色两套主题下全部可读；`<1024` / `<768` 断点正常
+20. 键盘可达：Tab 能走到每个地点卡片，`aria-label` 带地点名与张数
+
+### C. 回归
+21. `npm run build` 通过；`npm run dev` 手动过一遍（含 R6 的左右翻页未被破坏）
+22. `pytest code/src/test -q` 全绿（当前基线 **1237 passed** 起）
+23. **`photoDir` 零风险**：全程文件数与总字节数不变
+24. **不改地点数据层**：`placeStore.py` / `dirNamePlace.py` / `placeNameZh.py` 的
+    数据口径无改动（本步只加接口与视图）—— 用 `git diff --stat` 说明
+
+## 六、硬约束
+- **原图绝对只读**（所有图片走 `/api/thumb`，点开才 `/api/original`）
+- 业务层**禁止裸 SQL**，一律经 `sqliteCommon`
+- **`placeCode` / 聚合键 / `nameZh` 一个字都不改** —— 归并只在展示层（DR-36 方案①）
+- **人物 × 地点一律实时 join**，不新增关联表（DR-26）
+- **本轮不做地图**（DR-37②：11/28 无坐标）；也不做「行程/事件」推断
+- **不引入 i18n 框架**：地点中文名是**数据层**的事，界面只有中文一套
+- 复用既有 router / store / api / 组件分层与双主题 token，**不要新起一套**
+- 现有代码风格保持一致；单文件不超过 300 行（超了就把卡片/行拆成组件）
+
+## 七、完成后必须输出
+1. 改动文件清单（后端 + 前端分开列）
+2. 验收结果（**24 条逐条**给命令与实际输出，第 15 条含 3 张截图：区块隐藏 / 区块可见 / 双筛选结果）
+3. **地点列表的完整截图或列表文本**（28 → 归并 25 行的对照）
+4. 重名 3 组归并前后的张数对照
+5. 第 5 条「实时 join」的实测过程（构造归属 → 接口即刻返回）
+6. `git diff --stat` 证明地点数据层未被改动
+7. 遗留问题与需要我决策的点（**特别是：地图要不要做、若要做怎么解决 11 个无坐标地点**）
+```
+
+---
+
+# 修正步骤 R9 · 照片旋转（左右转 90°）
+
+> **什么时候做**：R5 已完成（地点界面）。**R9 与地点无关**，随时可做。
+> ⚠️ **编号说明**：`R7` 已被「人物头像」（DR-40/41）占用、`R8` 是「照片年代修正」（DR-42），
+> 所以照片旋转编 **R9**。别再叫它 R7。
+> **核心判断**：旋转是**显示层属性**（DB 存角度 + 前端 CSS 转），**绝不烘进图片文件、绝不服务端转码**。
+
+```text
+【photo-browser · 修正步骤 R9 · 照片旋转】
+
+## 目标
+照片浏览支持左右旋转 90°（修正方向不对的翻拍件 / 扫描件），
+**只改显示，不动原图一个字节**。
+
+## 前置
+- R5 已完成（`api/place.py` / `PlacesView` / `PlaceDetailView` / `PersonPlaces` 已落地）
+- `api/photoAction.py` 已存在（照片级写接口的家，含软删 / 标记重复 / 年代修正 DR-42）
+- 测试基线 `pytest code/src/test -q` = **1237 passed** 起
+
+## ⚠️ 必读：三种做法只有一种能用
+
+| 方案 | 做法 | 判定 |
+|---|---|---|
+| **A（必须选）** | `pb_photo.rotateDeg` 字段 + 前端 CSS `transform` | ✅ 原图零改动；缩略图缓存不失效；`/api/original` 的 Range 不受影响 |
+| B | 服务端转码后返回 | ❌ 整图编码 → **Range 失效**（`api/static.py` 模块头写明「必须支持 Range，否则滚动预加载卡死」）；且每次旋转要重生成 3 档缩略图 |
+| C | 改写原图 EXIF Orientation | ❌ **违反「原图只读」铁律**（`processor/media/thumbMaker.py` 第 16 行：不改动原图任何字节）；且会覆盖相机原始方向，`thumbMaker._openOriented` 与 `faceCropper` 都还在读它 |
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-42**（年代修正 —— 本步要照抄的「用户覆盖值」先例）、**DR-16**（纠错闭环）
+- plan/UI/photo-browser UI 设计.md §五 关键组件表（`PhotoThumb` / `FaceBox` 规格）
+
+## 必须先读现有代码（**顺序别调，前两个是本步的成败点**）
+- `code/src/api/photoAction.py`（224 行，全文读）—— 模块头写明了「为什么不并进 browse.py」
+  「哪些动作落 pb_review_log」，**本步的端点要加在这里并遵守同一套纪律**
+- `code/src/processor/photoTimeFix.py` —— `previewFix` / `applyFix` 的分层，本步照它的结构
+- `code/src/api/browse.py`
+  - `photoSummary()`（**第 197 行**）
+  - **5 处照片 SELECT**：L482-483、L526-527、L651-652、L1204、L1265-1267
+  - `photoRow()`、`FACE_*` 无关，别动
+- `code/src/api/place.py` 第 808-810 行（R5 新增的第 6 处照片 SELECT）
+- `code/src/processor/scanner/runner.py`
+  - `_META_FULL_COLUMNS`（**第 87 行附近**）
+  - `_metaColumns()`（**第 473 行附近**）
+- `code/src/database/pb_photo.txt`（31 行，字段顺序）
+- `code/src/tools/build_db.py` 第 224 / 340 行 —— **已有自动加列迁移**，别手写迁移脚本
+- `code/webserver/src/utils/format.js` 的 `displaySize`（**第 109-120 行**，已在折算 EXIF orientation）
+- `code/webserver/src/views/PhotoDetailView.vue` 的 `frameStyle`（**第 152-160 行**）
+  与主图区（**第 802-821 行**）、放大弹窗（**第 1273-1281 行**）
+- `code/webserver/src/views/ReviewView.vue` 第 **654-668 行**（大图 + 人脸框）
+- `code/webserver/src/components/photo/PhotoThumb.vue` 第 **158-200 行**
+- `code/webserver/src/styles/main.css` 的 `.pb-photo-frame`（= `relative overflow-hidden rounded-thumb border border-line bg-photo`）
+
+## 一、数据库字段（一处新增）
+
+在 `code/src/database/pb_photo.txt` 的 `orientation` 后面加一行：
+```
+rotateDeg SMALLINT NOT NULL DEFAULT 0 COMMENT '人工旋转角度 0/90/180/270 仅影响显示 不改原图 不改EXIF (DR-43)'
+```
+
+**迁移不用手写脚本** —— `tools/build_db.py` 第 224 行已经实现了「缺列 → `ALTER TABLE ADD COLUMN`」：
+```powershell
+code\.venv\Scripts\python.exe src\tools\build_db.py
+```
+
+三条必须知道的细节：
+1. ⚠️ SQLite 的 `ADD COLUMN` **只能追加到表末尾**（`build_db.py` 第 340 行注释）。
+   所以**已存在的库**里 `rotateDeg` 会在**最后一列**，**新建的库**里它在 `orientation` 后面
+   —— 列序不一致**无害**（本项目全部按列名访问），但别用 `SELECT *` 去比对新旧库。
+2. ⚠️ **绝对不要把 `rotateDeg` 加进 `runner.py` 的 `_META_FULL_COLUMNS`（L87）或
+   `_metaColumns()`（L473）**。那两个是重扫 upsert 的 `DO UPDATE` 白名单
+   （`sqliteCodeGenerator` 的 `forceColumns`），加进去会让**重扫一次把用户旋转全部归零**。
+   本步**一行都不用改 runner.py** —— 正因为不加，才安全。
+3. `rotateDeg` 与 `shotYearOverride` 是**同构**的用户覆盖值：`0` = 未修正、
+   「重置」有意义、重扫不覆盖。命名和语义都照 DR-42 的样子来。
+
+## 二、后端
+
+### 2.1 写库逻辑 → 新建 `code/src/processor/photoRotate.py`
+照 `processor/photoTimeFix.py` 的结构写，但**比它简单**：
+```python
+class PhotoRotateError(Exception): ...
+
+VALID_ANGLES = (0, 90, 180, 270)
+
+def applyRotate(photoCode, rotateDeg) -> dict:   # 落库 + 返回 {photoCode, rotateDeg, changed}
+def resetRotate(photoCode) -> dict:              # 等价于 applyRotate(photoCode, 0)
+```
+- **不需要 `previewFix`** —— 旋转**没有影响面**（见 2.2 的理由）
+- 幂等：同值重复提交返回 `changed=False`，不报错
+- 只接受 `0/90/180/270`，其它抛 `PhotoRotateError`
+- **业务层禁止裸 SQL** → 走 `database/queryCommon.py` / 生成的 `sqliteCommon`
+
+### 2.2 端点 → 加进 `code/src/api/photoAction.py`（**不要碰 browse.py**）
+```python
+POST /api/photos/{photoCode}/rotate     body: {"rotateDeg": 90}
+POST /api/photos/{photoCode}/rotate-reset
+```
+⚠️ **本步与 `photoAction.py` 里其他动作有三处关键差别，必须在模块头注释里写清理由**：
+
+| | 软删 / 标记重复 / 年代修正 | **旋转** |
+|---|---|---|
+| 两段式 `confirm=1` | 需要（有影响面 / 不可逆语义） | **不需要** |
+| 落 `pb_review_log` | 软删与标记重复不落；**年代修正落**（它重算质心，动的是归属排障链上的事实） | **不落** |
+| 连带重算 | 年代修正是 DR-22 三步联动（刷桶 + 重算质心） | **零连带** |
+
+**理由（照抄进注释）**：旋转**不改变任何识别事实** —— 不动 `bbox`、不动质心、不动 `shotBucket`、
+不动归属、不动 `pb_photo.faceCount`，且完全可逆（再转回去即可）。
+所以它既没有"必须先让用户看见的影响面"，也不属于"归属纠错排障链"。
+`photoAction.py` 的头注释把这条链讲得很清楚，**别把旋转塞进那条链**。
+
+- 校验非法角度 → `dto.ApiError(dto.CODE_PARAM_INVALID, ...)`
+- 返回 `dto.okBody(executed=True, **result)`
+- 更新文件头的 `_VERSION`（当前 `"20261006"`）
+
+### 2.3 DTO 透出（**漏了这步前端根本拿不到值**）
+`rotateDeg` 必须出现在**所有返回照片摘要/详情的地方**：
+| 文件 | 位置 |
+|---|---|
+| `api/browse.py` | `photoSummary()` L197；SELECT L482-483、L526-527、L651-652、L1204、L1265-1267 |
+| `api/place.py` | SELECT L808-810（R5 新增的第 6 处） |
+| `api/dto.py` | 若有照片字段白名单/文档串，一并补 |
+
+⚠️ 这 6 处**一处都不能漏** —— 少一处就是「照片流里转了、地点详情里没转」这类
+最难发现的不一致（接口 200、字段缺失、界面静默错）。
+
+## 三、前端
+
+### 3.1 唯一几何入口：扩展 `displaySize`（**不要另起新函数**）
+`utils/format.js` 的 `displaySize(photo)` 已经在处理「EXIF orientation ∈ {5,6,7,8} 时宽高转置」。
+旋转是**同一条路径上的第二次转置**，必须合并在同一个函数里：
+```js
+export function displaySize(photo, rotateDeg = 0) {
+  // ① 先按现有逻辑折算 EXIF orientation
+  // ② rotateDeg 为 90 / 270 时再转置一次
+  return { width, height }
+}
+```
+调用点全部改传角度：`PhotoDetailView.vue` **L154**（frameStyle）与 **L921**（「尺寸」行）。
+
+> 物理含义：`displaySize` 返回的是**最终显示方向的宽高**。
+> 照片详情右下角「尺寸」显示的也就该是旋转后的值。
+
+### 3.2 ⚠️ 旋转容器结构（**本步最容易做错的一处，做错人脸框全错位**）
+
+人脸框 `pb_face.bbox` 是**归一化 x,y,w,h**，由 `utils/faceState.js` 的 `parseBbox` →
+`faceBoxStyle` 转成百分比，`FaceBox` **绝对定位**叠在图上。
+**如果只给 `<img>` 加 `transform` 而 FaceBox 在外面 → 百分比基座没变 → 框全部错位。**
+
+正确结构（旋转**容器**，不旋转 img 自己）：
+```
+外层 outer：吃【旋转后】的比例（90/270 时 w/h 互换）
+  内层 inner：宽高用【未旋转】比例，居中 + transform: rotate(deg)
+    ├── <img>          ← 不单独加 transform
+    └── <FaceBox> × N  ← 跟着 inner 一起转，百分比基座不变
+```
+**这样 bbox 语义完全不用动，一行坐标数学都不用写。**
+（另一种做法是改 `parseBbox` 做坐标变换，能行但容易在 90/180/270 上写错，
+且 `FaceBox` 的「标签放哪一侧不挡脸」启发式读的还是同一个 box —— 不推荐。）
+
+⚠️ **副作用要实测**：`FaceBox` 用 `ResizeObserver` 量 `frameW/frameH` 来定标签方向，
+而 CSS transform **不改 layout box** → 旋转 90° 后这个启发式按未旋转尺寸算，
+**标签可能贴到边上**。属外观问题，实机看一眼，必要时把旋转角度传给它自己换算。
+
+### 3.3 各触点怎么改（**按「框的形状」分三类，规则只有三条**）
+
+> **通用规则**
+> · 框是**正方形** → 直接转 `<img>`，`scale(1)`（正方形转 90° 仍是正方形，**无缝**）
+> · 框是**固定 4:3** → 转 `<img>` + `scale(4/3)` 重新盖满（或把框换成 `aspect-[3/4]`）
+> · 框是**动态真比例** → 外层换成旋转后比例 + 内层包住 img 与脸框一起转
+
+| 位置 | 框的形状 | 做法 |
+|---|---|---|
+| `PhotoDetailView.vue` 主图 **L808-821** | **动态真比例**（`frameStyle` L152-160） | `frameStyle` 的 `aspectRatio` 与 `width` 都用**旋转后**的 `displaySize(photo, rotateDeg)`；内层包 img + FaceBox 一起转。⚠️ 该处**刻意不套 `.pb-photo-frame`**（L804 注释：脸框标签与「不是他」要溢出框外）→ 内层**也别加** `overflow-hidden` |
+| `PhotoDetailView.vue` 放大弹窗 **L1273-1281** | 无框、裸 `<img>` | 只转 img（这里没有脸框） |
+| `ReviewView.vue` 大图 **L654-668** | 固定 `aspect-[4/3]`，**含脸框** | 内层包 img + 那个 `border-dotted` 的框一起转；⚠️ 外层比例要跟着换成 `aspect-[3/4]`，否则 4:3 框装 3:4 内容会出现空隙（`.pb-photo-frame` 自带 `overflow-hidden`，空隙里会露出 `bg-photo` 底色） |
+| `PhotoThumb.vue` **L159-180** | 固定 `aspect-square`（**实测全项目没有一处传 `ratio=`，网格恒为 square**） | 只转 `<img>`，无需 scale。⚠️ **角标（L191 起的 👤/⚠/📷）绝对不能转** —— 它们与照片内容无关 |
+| `PlacesView.vue` **L228-233** | 固定 `aspect-[4/3]` 封面，无脸框 | 转 img + `scale(4/3)` |
+| `DuplicateCompare.vue` **L218** 等处 | 固定 `aspect-[4/3]`，**已确认无人脸框** | 同上 |
+| `PersonDetailView.vue` 时间轴 | 走 `PhotoThumb` | 无需单独改 |
+| `PersonDetailView.vue` 人脸样本 L558 等 | **人脸裁剪图**（已裁好的独立小方图） | **不改** |
+| 任何 `faceUrl()`（人脸裁剪图 / 头像） | 独立产物 | **一律不改** |
+
+> 说明：`PhotoThumb` 的 `object-cover` 是**先按正方形裁、再整体旋转**，
+> 与「先旋转、再按正方形裁」取到的区域**不完全相同**（正方形旋转不变，
+> 所以不会有空隙，只是取景范围略有差别）。缩略图尺度上可接受，
+> **不要为此去改缓存或做双份生成**。
+
+### 3.4 交互
+- **照片详情主图区**加两个图标按钮（`lucide-vue-next` 的 `RotateCcw` / `RotateCw`）：
+  「↺ 左转 90°」「↻ 右转 90°」
+- **「重置方向」按钮**：仅 `rotateDeg !== 0` 时出现，点了写 0
+- 角度累加 mod 360。**不做单独的 180° 按钮** —— 连点两次左转就是 180°
+- 快捷键 `[` 左转 / `]` 右转 —— **照 `ReviewView.vue` 的键盘纪律抄**
+  （先读它怎么避免抢输入框焦点、怎么处理组合键）
+- ⚠️ **翻页不能串角度（最典型的 bug）**：`PhotoPager` 切到下一张时，
+  `rotateDeg` 必须取**那张照片自己的值**。写错的表现是「转完一张按 →，
+  下一张也是躺着的」，而且刷新一下就好了 —— 极易漏测。**验收第 15 条专门测它。**
+- 乐观更新 + 失败回滚；成功后把新值写回 store（不要整页 reload）
+- ⚠️ **下载原图仍是原始方向**（原图不动）。这是**有意为之**，
+  不要"顺手"给下载链接加旋转；若将来要"旋转后另存"，那是导出功能，另开一步
+- 无障碍：按钮要有 `aria-label`（「向左旋转 90 度」），并在界面上可见地反映当前角度
+
+### 3.5 前端 api
+`api/photoAction.js`（已有 `softDelete` / `fixShotYear` 等 7 个导出）加：
+```js
+export function rotatePhoto(photoCode, rotateDeg) { ... }   // 照 fixShotYear 的写法
+export function resetRotate(photoCode) { ... }
+```
+
+## 四、验收清单（逐条实际运行）
+
+### A. 字段与迁移
+1. `pb_photo` 出现 `rotateDeg`；`PRAGMA table_info(pb_photo)` 显示类型 `INTEGER`、
+   `notnull=1`、`dflt_value=0`。**把那一行原文贴出来**
+2. 再跑一次 `build_db.py` **幂等**（不再加列、不报错）
+3. 加列**不丢数据**：已有 **2137 行**的 `rotateDeg` 全为 0，`COUNT(*)` 仍 2137
+
+### B. 重扫不覆盖（本步最关键的一条）
+4. 手工把某张的 `rotateDeg` 改成 90 → 对这张跑一次扫描 → 值**仍是 90**
+   —— 证明它**没被塞进** `_META_FULL_COLUMNS`。
+   请给出 `runner.py` 的 `git diff` 为**空**（本步不该改这个文件）
+
+### C. 接口
+5. `POST /api/photos/{code}/rotate` body `{"rotateDeg":90}` → 返回 `rotateDeg=90`
+6. 传 `45` / `-90` / `"abc"` → 全部 **400**
+7. 重复提交同值 → `changed=false`，不报错
+8. `rotateDeg` **6 处全部透出**：`GET /api/photos/{code}`、`GET /api/photos`（列表）、
+   `GET /api/places/{code}/photos` —— 逐个贴响应片段
+9. 旋转**没有**新增 `pb_review_log` 行（对比操作前后 `COUNT(*)`）
+10. 旋转**没有**改变任何识别数据：`pb_face` 的 `bbox`/`personCode`/`isConfirmed`、
+    `pb_person_centroid` 的 `centroid` BLOB、`pb_photo.faceCount`
+    —— 操作前后各查一次对比，**全部逐字节相同**
+
+### D. 渲染（**本步存在的意义，必须有截图**）
+11. **人脸框跟着转**：拿一张有脸、`orientation=1` 的照片，详情页转 90°
+    → 人脸框仍**贴在脸上**。**贴旋转前 / 旋转后两张截图对比**
+12. 同样测一张 **`orientation=6`** 的照片（EXIF 与人工旋转**叠加**：
+    `orientation=6` 已让画面变竖，再人工转 90° 应变横）—— 截图
+13. **ReviewView 待确认队列的大图与脸框一起转**，且外层从 4:3 变 3:4、**四周无空隙**
+14. 网格（照片流）：旋转后缩略图也转了；**角标（👤/⚠/📷）没有被转**（截图指出角标位置）
+15. **翻页不串角度**：转第 1 张 90° → 按 `→` → 第 2 张是**正常方向**；
+    再按 `←` 回第 1 张 → **仍是 90°**
+16. 照片详情「尺寸」行（L921）显示的是**旋转后**的宽高（与截图对照）
+17. 放大弹窗的图与主图方向一致
+18. 连点 4 次右转 → 回到原方向，与初始截图一致
+19. `rotateDeg !== 0` 时「重置方向」才出现；点了回 0 且按钮消失
+
+### E. 红线回归（**证明没走错方案**）
+20. **缩略图目录文件数与总字节数不变** —— `GET /api/media/stats` 前后对照，
+    或直接数 `d:\PhotoLib\thumb\thumbs\` 的文件数。**证明旋转没烘进缩略图、没触发重新生成**
+21. **`photoDir` 文件数与总字节数不变**（原图零风险）
+22. `Range: bytes=0-65535` 仍返回 **206** 且 `Content-Range: bytes 0-65535/<size>` 正确
+    —— 贴响应头原文，**证明 `/api/original` 的直传与 Range 没被破坏**
+23. 下载原图得到的文件方向 = **原始方向**（不是旋转后的）
+24. 深浅主题、`<1024` / `<768` 断点正常；键盘可达（Tab 能走到两个旋转按钮，`[`/`]` 生效）
+25. `npm run build` + 样式门禁通过；`pytest code/src/test -q` 全绿（基线 **1237 passed** 起）
+
+## 五、硬约束
+- **原图绝对只读**：不改写、**不改 EXIF**、不碰 mtime。
+  旋转一律是「DB 里的一个角度 + 前端一次 CSS transform」
+- **旋转不烘进缩略图**（缓存键是 `thumb_relpath(fileHash, size)`，不含旋转）
+- **不做服务端转码**（保住 `/api/original` 的 Range 直传）
+- **不改 `browse.py`**（它的纪律是"整个模块一个字都不写"）→ 端点进 `api/photoAction.py`
+- **不落 `pb_review_log`**；**不做两段式 `confirm`**（理由见 §2.2）
+- **不改 `runner.py`**（不加进重扫 `DO UPDATE` 白名单）
+- **人脸框必须与被旋转的图在同一个旋转容器内**（否则框全错位）
+- 只支持 **0 / 90 / 180 / 270**；**不做任意角度、不做镜像翻转**
+- 业务层禁裸 SQL；复用既有 router / store / api / 组件分层与双主题 token
+- 单文件不超过 300 行；`PhotoDetailView.vue` 已 43KB，**只做插入不要顺手重构**
+- 现有代码风格保持一致（本仓库注释密度很高，新代码请同样写清"为什么"）
+
+## 六、完成后必须输出
+1. 改动文件清单（后端 / 前端分开列，标注新增还是修改）
+2. 验收结果（**25 条逐条**给命令与实际输出）
+3. **第 11 / 12 条的截图**（旋转前后人脸框仍贴脸；含 `orientation=6` 那张）
+   —— 这是本步存在的意义，没有截图就等于没做
+4. 第 20 / 21 条的缩略图与原图目录统计**前后对照**
+5. 第 22 条的 **206 响应头原文**
+6. `PRAGMA table_info(pb_photo)` 里 `rotateDeg` 那一行原文
+7. `runner.py` / `browse.py` 的 `git diff` 为空的证明
+8. 遗留问题与需要我决策的点
+   （特别是：**要不要做批量旋转**、**下载要不要给"旋转后"版本**）
+```
 
 ---
 
@@ -1111,6 +3046,9 @@ thumbDir\   生成物，可随时重建
          · 改 displayName 撞 UNIQUE → `409 + {"code":"DUPLICATE_DISPLAY_NAME",
            "existing":{personCode, displayName, photoCount, faceCount}}`，**不写库**
          · 改 familyGroupCode 要写进 pb_person；分类走 pb_person_category 增删
+         · **R7 追加：`avatarFaceCode` 也可 PATCH**（DR-41）——设/清默认头像。
+           它是**展示**字段：不重算质心、不写 `pb_review_log`。
+           写库前必须校验「这张脸存在且属于这个人」（不存在 404 / 属于别人 400）
    - GET  /api/contacts/{personCode}/impact
          停用影响面预览 `{photoCount, faceCount, confirmedCount, centroidCount, pendingAfter}`
    - POST /api/contacts/{personCode}/disable?confirm=true
@@ -1626,6 +3564,15 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 
 | 步 | 主题 | 里程碑 | 状态 |
 | --- | --- | --- | --- |
+| **R5** | **地点界面**（**地点 → 照片流** + 人物「去过的地方」区块 · DR-37/38） | — | ✅ 已完成（`api/place.py` 48KB / `PlacesView` / `PlaceDetailView` / `PersonPlaces` / `test_api_person_places.py`；路由 `/places` + `/places/:placeCode`、侧栏 `MapPin`、`PersonDetailView` L684「↓↓↓ R5：去过的地方 ↓↓↓」均已接线） |
+| **R9** | **照片旋转**（左右转 90° · 显示层 CSS + `rotateDeg` 字段 · DR-43） | — | ⬜ **待做（提示语已写）** |
+| **R6** | **照片详情左右翻页**（DR-31，A 档，后端零改动） | — | ✅ 已完成（`components/photo/PhotoPager.vue`） |
+| **R7** | **人物头像**（卡片显示照片 + 人脸样本设默认 · DR-40/41） | — | ✅ 已完成（2026-10-08：`personCoversOf` + `AvatarPicker` + 16 条用例；**正式库副本实测 24/24 卡片有封面脸**，改前 0/2030 有 `avatarFaceCode`） |
+| **R8** | **照片年代修正**（人工修正拍摄年 + 编辑入口 · DR-42） | — | ✅ 已完成（2026-10-08：`pb_photo.shotYearOverride` + `comGD.sqlEffectiveShotYear` + `processor/photoTimeFix.py` + `ShotYearFixDialog.vue` + `test_photo_time_fix.py` 12 条用例全绿）；⚠️ 拖拽（P1）与 `takenAt` 修正到日（P2）未做 |
+| **R3** | **修 `(0,0)` 占位坐标**（DR-23） | — | ✅ 已完成（`tools/fix_placeholder_geo.py`） |
+| **R4** | **地点字典基础层**（`pb_place` + `placeStore` + `/api/places`） | — | ✅ 已完成（`pb_place.txt` / `placeStore.py` / `browse.py` `/api/places` / `test_api_places.py`） |
+| **R4a** | **地点中文名**（DR-28/29：`pb_place.nameZh` + 筛选两套） | — | ✅ 已完成（`placeNameZh.py` 45KB；实测 16/17 GPS 地点有中文名） |
+| **R4b** | **目录名线索接入**（DR-32/33/34/35/36） | — | ✅ 已完成（`dirNamePlace.py` 48KB + `placeFinalize.py`；实测 `placeNameDir` **598 张**、`pb_place` **28 行**、`photoCount` 合计 **663 = 598+65** 完全对上、**26 张幽灵已清零**）<br>⚠️ 遗留：`nameZh` 重名 3 组（交 R5 处理） |
 | **R2** | **分桶口径修复**（DR-20/21/22 自适应分桶从未生效） | — | ✅ **代码已落地**（`engine/match/rebucket.py` 的 `rebucketFace/rebucketPerson/rebucketAll`、DR-21 未归属脸候选桶放宽、DR-22「先刷桶再重算」顺序闸、`auditBuckets`；`test_rebucket.py` **36 用例全绿**）<br>⚠️ 但 **R2 的验收证据仍欠**：`auditBuckets` 改前/改后对照、`verify_bucket_gain.py` 的生产库 FR 实测、全库重算质心 —— 这三项报告没出 |
 | **R** | **返工修正 1–6（纠错闭环 DR-16）** | — | ✅ 已完成（已并入步骤 6 / 7，不单列） |
 | 1 | 工程基线与配置骨架 | — | ✅ 已完成 |
@@ -1638,8 +3585,8 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 | 8 | 联系人导入 | — | ✅ 已完成（CSV+vCard 双通道 + 家庭组 + 1012 张头像；**M2 待人工确认 3 张脸**） |
 | 9 | 后端 API 全量 | **M3**（接口全可用、扫描可后台跑） | ✅ 已完成（`api/` 六个模块 + `database/queryCommon.py` 查询出口 + `processor/place/` 地点字典；**含 contacts CRUD**，DR-17/18/19。`pytest code/src/test` = **1153 passed / 0 failed**，`/docs` 可试调，扫描可后台跑）|
 | 10 | 前端骨架 + 双主题 | — | ✅ 已完成（Vue3 + Vite + Tailwind + Element Plus 按需引入；`tokens.css` 单一口径出双主题，浅/深/跟随系统三态；`check-style-order.mjs` 门禁防 EP 覆盖顺序） |
-| 11 | 照片流 + 详情 + 待确认队列 | — | ✅ 已完成（`PhotosView` / `PhotoDetailView` / `ReviewView` + 7 个新组件；**DR-16 纠错闭环全部落地**：`FaceBox` 三种描边样式 + 悬停「✗ 不是他」一次可达、`ReviewView` 双 Tab + 键盘 1/2/3/N/S/I + 批量确认、合并/拆分独立端点。`pytest` = **1175 passed / 0 failed**。⚠️ **撤销按钮的 UI 未接**，`/review/revertible` + `merger.undo` 后端已通） |
-| 12 | 人物库/详情 + 扫描台 + 设置 + 打磨 | **M4**（自己真正用一周） | ⬜ 未开始（**下一步**）。5 个视图已存在，**本步是补齐交互不是从零新建**；需新建的只有 `PersonCard.vue`（`PersonForm.vue` 步骤 10 已产出）。**待接：撤销上次合并·拆分的 UI**（后端已通）、质心健康度提示、备份脚本 `tools/backup.py`、`/api/map`（可选）、重复照片对比 |
+| 11 | 照片流 + 详情 + 待确认队列 | — | ✅ 已完成（`PhotosView` / `PhotoDetailView` / `ReviewView` + 7 个新组件；**DR-16 纠错闭环全部落地**：`FaceBox` 三种描边样式 + 悬停「✗ 不是他」一次可达、`ReviewView` 双 Tab + 键盘 1/2/3/N/S/I + 批量确认、合并/拆分独立端点。`pytest` = **1175 passed / 0 failed**） |
+| 12 | 人物库/详情 + 扫描台 + 设置 + 打磨 | **M4**（自己真正用一周） | ✅ **编码已完成**（2026-10-07）。撤销 UI 已接（候选集口径也修了：一次合并只出一个候选）、质心健康度提示、备份脚本 `tools/backup.py`（DR-24：故意不做进 HTTP）、重复照片对比、`/api/settings` 四端点。**修了两个既有缺陷**：人物桶内 `photoCount` 恒为 0、撤销候选集按 N 条成员行重复出现。`pytest` = **1225 passed / 0 failed**，`npm run build` + 样式门禁通过。⚠️ 未做：`GET /api/map`（可选，见该步「已知取舍」①）。**M4 剩下的是"用一周"，不是写代码** |
 
 ## 附录 B · 每步固定的输出格式
 
@@ -1650,21 +3597,44 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 ```
 
 > 提醒：新对话里请**只粘贴当前步骤的提示语**，不要把多步一起粘过去，否则上下文会过长导致遗漏约束。
-> 当前应粘贴的是 **「步骤 12 · 人物库/详情 + 扫描台 + 设置 + 打磨」**（12 步里的最后一步）。
 >
-> **进入步骤 12 时要知道的现状**（都是步骤 10/11 实际做完后与本提示语原文有出入的地方）：
-> - 步骤 12 产出清单里的 `PeopleView.vue` / `PersonDetailView.vue` / `ScanJobsView.vue` / `SettingsView.vue`
->   **步骤 10 已建好骨架、步骤 11 已接上真实接口**，本步是补齐交互与打磨，不是从零新建。
-> - `PersonForm.vue` **已存在**（步骤 10 产出，`FixFaceDialog` 的「新建人物」在用）。硬约束「不得有第二份表单」仍然成立。
-> - **撤销上次合并/拆分的 UI 还没做** —— 后端 `/review/revertible` 与 `merger.undo` 已通并实测（能把双方归属和质心一起还原），
->   但 `ReviewView` / `PersonDetailView` 里没有按钮。本步要接上，并且**必须在界面上说明「撤销只能回到合并/拆分前的归属，质心的原值回不来」**。
-> - 照片级写操作（软删 / 恢复 / 标记重复）步骤 11 已加端点，语义是「只改库、不动磁盘、不删关联行、软删可恢复」。
-> - 空 query 参数（`hasFace=''` 之类）已在 `api/request.js` 的 `paramsSerializer` 根治：
->   **只丢 `undefined`/`null`/`''`，`0` 与 `false` 原样发出**（`desc=0` 升序不能被当空值丢掉）。
+> **当前应粘贴的是「修正步骤 R9 · 照片旋转」**（本文「修正步骤 R9」那一节）。
+> 12 步主线于 2026-10-07 全部完成；R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 均已完成，
+> **R9（照片旋转）是唯一待做项**。
 >
-> ⚠️ 与当前进度无关、但仍未补齐的一件事：**R2 的验收证据**。代码已落地并有 36 条用例兜着，
-> 但下面三项报告一直没出，而它们是 **M2「识别复现 S0」** 的前提
-> （桶口径说了算，不能只凭"代码写完了"就认为 S0 的结论能在生产库复现）：
-> `auditBuckets()` 改前/改后完整对照、`verify_bucket_gain.py` 的生产库 FR 实测、
-> 全库重算质心（`--all --recompute`）前后行数变化。
-> 要补就单独贴 **「修正步骤 R2」**。
+> ⚠️ **编号提醒**：`R7` = 人物头像（DR-40/41，已完成）、`R8` = 照片年代修正（DR-42，已完成）、
+> **`R9` = 照片旋转（DR-43，待做）**。别把 R9 叫成 R7。
+>
+> **R9 完成后（按优先级）**
+> 1. **M4 一周自测**（最重要，不是写代码）：按 `开发计划.md` §八 的建议用法真用一周，
+>    第 7 天自问「还会想去资源管理器看照片吗」。
+> 2. **R2 的验收证据**（唯一还欠的技术报告）：`auditBuckets()` 改前/改后完整对照、
+>    `verify_bucket_gain.py` 的生产库 FR 实测、全库重算质心前后行数变化。
+>    它是 **M2「识别复现 S0」** 的前提 —— 桶口径说了算，不能只凭"代码写完了"就认为结论能复现。
+>    要补就单独贴 **「修正步骤 R2」**。⚠️ 该节在本文里有**两份重复**（文件被多次追加过），
+>    粘贴前先确认你拿到的是完整的那一份。
+> 3. **确认人脸**：`pb_face` 3647 张里只有 **67 张有归属**，`pb_person` 2029 个里只有 **20 个有照片**。
+>    「人物 × 地点」交叉目前几乎是空的（有地点的 663 张照片里仅 **1 张**关联到人）——
+>    R5 做出来的「在场的人」区块会长期空着，直到你在待确认队列里把归属做起来。
+> 4. 可选：**批量旋转**（R9 只做单张，见该步「完成后必须输出」第 8 条）。
+> 5. 可选：地图视图（R5 明确未做，前提是解决「11/28 个地点无坐标」——
+>    目录名地点占 663 张里的 598 张，没有 `lat/lon`）。
+>
+> ⚠️ **本文档已有重复章节**（多轮追加导致）：`R5` 出现 **3 次**、`R4b` **2 次**、`R2` **2 次**，
+> 其中 `R5` 的两份旧版内容仍是**废弃的「人物 → 地点列表 → 时间线」**形态。
+> 使用前请**只认最新那份**；建议在有空时清理一次（本步不做）。
+>
+> **步骤 12 实际落地时的偏差（供以后回看）**
+> - 步骤 12 提示语里说「补齐 4 个 views」，实际情况是**补齐 5 个**（`OverviewView` 也接了真数据）
+>   并新建了 **2 个**组件：`PersonCard.vue`（提示语点名的那个）**与 `DuplicateCompare.vue`**
+>   —— 后者是因为「重复照片」筛选已经摆在照片流里，只给筛选不给对比就是半成品。
+> - 后端**多建了 `api/settings.py`**（提示语没提）：浏览层刻意不 import 引擎层，
+>   「唯一会写配置态的 api 模块」单放一处，才不破 `api/browse.py`「纯只读」那条纪律。
+> - 修了一个**提示语没提到的既有缺陷**：人物桶内 `photoCount` 恒为 0
+>   （`GROUP BY substr(takenAt,1,7)` 却拿桶键去查字典，键的形状不同）。这类"不报错的恒为 0"
+>   是最贵的缺陷类型 —— 接口 200、结构齐全、字段在。
+> - **撤销候选集的口径也修了**：一次合并会写 1 主 + N 成员日志，
+>   原先 `/review/revertible` 把 N 条成员行也列成候选（合并 3 张脸 = 4 个"可撤销"）。
+>   现在按「一次用户操作 = 一条」收敛。
+> - **备份/恢复故意没做进 HTTP**：见 DR-24。WAL 中间态会让「备份成功、零报错、恢复后少数据」。
+>   设置页给只读清单 + 可照抄的命令行。

@@ -58,6 +58,7 @@ from config import basicSettings as basicSettings                 # noqa: E402
 from database import queryCommon as query                         # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
 from processor.scanner import runner as scanRunner                # noqa: E402
+from schedule import faceScheduler as faceSched                 # noqa: E402
 from schedule import scanScheduler as scanSched                   # noqa: E402
 
 from fastapi import APIRouter, Query                              # noqa: E402
@@ -87,12 +88,60 @@ def _scheduler() -> scanSched.ScanScheduler:
             return _SCHEDULER["instance"]
         try:
             _SCHEDULER["instance"] = scanSched.ScanScheduler(
-                dbFile=paths.db_file(), verbose=False)
+                dbFile=paths.db_file(), verbose=False,
+                onFinished=_autoFaceHook)
         except Exception as e:
             # 最典型：pb_photo / pb_scan_job 还没建（没跑 build_db.py）
             raise dto.ApiError(dto.CODE_DB_ERROR,
                                "扫描表未就绪：%s（先跑 tools\\build_db.py）" % e)
         return _SCHEDULER["instance"]
+
+
+def _autoFaceHook(jobCode: str, summary: dict, jobRow: dict) -> dict:
+    """扫描跑完（DONE）之后自动发起人脸识别。
+
+    为什么需要这个钩子
+    ------------------
+      扫描的产物是 pb_photo 的行，而**侧栏「待确认」数的是 pb_face**。
+      两步之间原本没有任何衔接，于是「扫了 1000 张、待确认 0 张」是必然结果，
+      而且界面上看不出任何异常（进度条 100%、任务 DONE、一切正常）。
+      把第二步默认接上，"扫描"才真的是一个完整的入库动作。
+
+      钩子由 `ScanScheduler.runUntilDone` 在**真的跑完**（done=True）时调用；
+      maxBatches 用完 / 收到停止 / 批次失败都不触发 —— 那些情况下
+      照片还没扫完，提取出来的库是半截的。
+
+    为什么钩子里失败只记日志不抛
+    ------------------------------
+      扫描本身已经成功落库了。人脸识别起不来（模型没下载、内存不足）
+      是另一个问题，不该把一个 DONE 的扫描任务改成 FAILED ——
+      那会让用户以为照片没扫进去，而库里的照片明明都在。
+    """
+    if not scanSched.isAutoFaceJob(jobRow or {}):
+        _LOG.info("autoFace: 任务 %s 未勾选自动识别人脸，跳过", jobCode)
+        return {"ok": True, "skipped": True, "reason": "任务未勾选自动识别人脸"}
+    try:
+        from api import face as faceApi
+        sched = faceApi._scheduler()
+        pending = faceSched.countPendingPhotos()
+        if pending <= 0:
+            # 全部照片都提取过了：不该再起一个空任务把界面搞成"有任务在跑"
+            _LOG.info("autoFace: 没有待识别的照片（%s），跳过", jobCode)
+            return {"ok": True, "skipped": True, "reason": "没有待识别的照片",
+                    "pendingPhotos": pending}
+        job = sched.createJob(countTotal=True)
+        started = sched.startBackground(str(job.get("jobCode") or ""))
+        if not started.get("ok"):
+            raise RuntimeError(started.get("errMsg") or "启动失败")
+        _LOG.info("autoFace: 扫描 %s 完成，已自动启动人脸识别 %s（待识别 %d 张）",
+                  jobCode, job.get("jobCode"), pending)
+        return {"ok": True, "skipped": False, "faceJobCode": job.get("jobCode"),
+                "pendingPhotos": pending,
+                "poll": "/api/face/status/%s" % job.get("jobCode")}
+    except Exception as e:
+        errText = "%s: %s" % (type(e).__name__, e)
+        _LOG.error("autoFace: 扫描 %s 跑完后启动人脸识别失败: %s", jobCode, errText)
+        return {"ok": False, "skipped": True, "errMsg": errText}
 
 
 def resetScheduler(timeout: float = 10.0) -> bool:
@@ -199,8 +248,10 @@ def _statusBody(jobCode: str) -> dict:
         "pendingCount": int(job.get("pendingCount") or 0),
         "percent": (min(100.0, round(processed * 100.0 / total, 2))
                     if total > 0 else 0.0),
-        "batchSize": int(job.get("batchSize") or 0),
-        "batchIndex": int(job.get("batchIndex") or 0),
+        # batchSize / batchIndex / **本批真实计数** 一起给
+        # （推导规则见 browse.batchProgressOf；**必须与列表页同一个函数**，
+        #  否则同一时刻任务列表显示「62/100」、轮询显示「0/100」，用户无从判断哪个是真的）
+        **browse.batchProgressOf(job),
         "lastCursor": job.get("lastCursor") or None,
         "startedYMDHMS": job.get("startedYMDHMS") or None,
         "finishedYMDHMS": job.get("finishedYMDHMS") or None,
@@ -254,7 +305,8 @@ def startScan(body: dto.ScanStartBody = None) -> dict:
         #    先数一遍纯属白花两秒。要精确总数让它跑起来自然会填上。
         job = sched.createJob(root=scanRoot, batchSize=payload.batchSize,
                               jobCode=payload.jobCode,
-                              countTotal=bool(payload.countTotal))
+                              countTotal=bool(payload.countTotal),
+                              autoFace=bool(payload.autoFace))
     except FileNotFoundError as e:
         raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
     except ValueError as e:
@@ -272,6 +324,12 @@ def startScan(body: dto.ScanStartBody = None) -> dict:
                       jobStatus=str(job.get("jobStatus") or comGD.JOB_IDLE),
                       batchSize=int(job.get("batchSize") or 0),
                       maxBatches=payload.maxBatches, running=True,
+                      # 扫描跑完后会自动接人脸识别（除非 autoFace=false）——
+                      # 前端要能提前告诉用户，不然会以为"扫完就完事了"
+                      autoFace=bool(payload.autoFace),
+                      note=("扫描完成后会自动开始识别人脸"
+                            if payload.autoFace
+                            else "只清点不入脸库：待确认数不会变化（它数的是人脸）"),
                       poll="/api/scan/status/%s" % jobCode)
 
 
@@ -436,8 +494,9 @@ def listJobs(page: int = Query(default=1, ge=1),
     p, s = dto.clampPage(page, size, defaultSize=20)
     at = dto.offsetOf(p, s)
 
-    where = ["delFlag = %s"]
-    values = [comGD.DEL_FLAG_NO if jobStatus is None else "*"]
+    where = ["delFlag = %s", "jobType = %s"]
+    values = [comGD.DEL_FLAG_NO if jobStatus is None else "*",
+              str(comGD.JOB_TYPE_SCAN)]
     if jobStatus:
         if jobStatus not in comGD.JOB_STATUS_ALL:
             raise dto.ApiError(dto.CODE_PARAM_INVALID,
@@ -449,7 +508,8 @@ def listJobs(page: int = Query(default=1, ge=1),
 
     rows = sqliteCommon.query_pb_scan_job(
         "pb_scan_job", delFlag=comGD.DEL_FLAG_NO if jobStatus is None else "*",
-        jobStatus=jobStatus or "", orderBy="recID", descFlag=True,
+        jobStatus=jobStatus or "", jobType=str(comGD.JOB_TYPE_SCAN),
+        orderBy="recID", descFlag=True,
         limitNum=s, offsetNum=at)
     items = []
     for row in rows:

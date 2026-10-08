@@ -45,8 +45,10 @@ import { useReviewStore } from '@/store/review'
 import { useSettingsStore } from '@/store/settings'
 import { batchFix, mergePersons } from '@/api/review'
 import { faceUrl, thumbUrl } from '@/api/static'
-import { faceBoxStyle, faceStateOf } from '@/utils/faceState'
+import { confidenceOf, faceBoxStyle, faceStateOf } from '@/utils/faceState'
 import { EMPTY, baseName, formatBucketKey, formatCount } from '@/utils/format'
+// 进照片详情要**声明来源**：详情页的「返回」才知道该回哪（见 utils/photoReturn.js）
+import { photoDetailLink } from '@/utils/photoReturn'
 
 const review = useReviewStore()
 const settings = useSettingsStore()
@@ -86,6 +88,15 @@ const currentFaceRow = computed(() => {
 })
 
 const currentMeta = computed(() => faceStateOf(currentFaceRow.value || current.value))
+
+/**
+ * 当前这张脸「最高相似度」的档位（高可靠 / 待判断 / 大概不是 / 基本不是）。
+ * 光给数字不行：0.22 和 0.05 都是两位小数，含义却差着一档 ——
+ * 用户要的是「敢不敢直接按确认处理」，那就把机器的把握程度说出来。
+ */
+const currentConfidence = computed(() =>
+  confidenceOf(current.value?.similarity, { low: T_LOW.value, high: T_HIGH.value }),
+)
 const photoLabel = computed(
   () => baseName(currentPhoto.value?.relPath) || current.value?.photoCode || '',
 )
@@ -94,11 +105,13 @@ function faceBoxOf(face) {
   return faceBoxStyle(face?.bbox) || {}
 }
 
-/** 进度：「剩余 N · 共 M 条」 */
-const progressText = computed(
-  () =>
-    `剩余 ${formatCount(review.remaining)} 条 · 共 ${formatCount(review.pendingTotal)} 条待确认`,
-)
+/** 进度：「剩余 N · 共 M 条」（跳过的是排到最后、不是完成，所以计入剩余） */
+const progressText = computed(() => {
+  const base = `剩余 ${formatCount(review.remaining)} 条 · 共 ${formatCount(review.pendingTotal)} 条待确认`
+  return review.deferredCount
+    ? `${base} · 已跳过 ${formatCount(review.deferredCount)} 条（排到最后）`
+    : base
+})
 
 // ============================================================
 // 确认 / 跳过 / 忽略
@@ -592,7 +605,13 @@ watch(activeTab, (tab) => {
         </p>
       </div>
       <div class="flex items-center gap-2">
-        <el-button :disabled="!current" @click="onSkip">跳过这张</el-button>
+        <el-button
+          :disabled="!current"
+          title="跳过这张 = 把它排到待确认队列的最后，不会马上又问你一次"
+          @click="onSkip"
+        >
+          跳过这张
+        </el-button>
         <el-button type="danger" plain :disabled="!current" @click="onIgnore">
           <X class="mr-1 h-4 w-4" aria-hidden="true" />忽略此人脸
         </el-button>
@@ -611,14 +630,22 @@ watch(activeTab, (tab) => {
           </span>
         </template>
 
-        <p
-          v-if="!current && !review.pendingLoading"
-          class="py-10 text-center text-body text-ink-weak"
-        >
-          待确认队列已清空 —— 所有未归属的人脸都已被人工确认或标记为陌生人。
-        </p>
+        <div v-if="!current && !review.pendingLoading" class="py-10 text-center">
+          <p class="text-body text-ink-weak">
+            待确认队列已清空 —— 所有未归属的人脸都已被人工确认或标记为陌生人。
+          </p>
+          <template v-if="review.deferredCount">
+            <p class="pb-hint mt-2">
+              另有 <b class="tabular-nums">{{ formatCount(review.deferredCount) }}</b>
+              条是你<b>跳过</b>的，已按「排到最后」放在队列末尾。
+            </p>
+            <el-button size="small" class="mt-3" @click="review.showDeferred()">
+              重新显示已跳过的 {{ formatCount(review.deferredCount) }} 条
+            </el-button>
+          </template>
+        </div>
 
-        <div v-else class="grid grid-cols-1 gap-6 pt-2 md:grid-cols-[300px_minmax(0,1fr)]">
+        <div v-else class="grid grid-cols-1 gap-6 pt-2 md:grid-cols-[340px_minmax(0,1fr)]">
           <!-- 左：未知人脸（并排比对的第一半） -->
           <section aria-label="待确认的人脸">
             <p class="pb-hint">未知人脸</p>
@@ -643,11 +670,12 @@ watch(activeTab, (tab) => {
               正在加载…
             </p>
 
-            <!-- 脸裁剪图（160px 正方形，可直接看五官） -->
+            <!-- 脸裁剪图（160px 正方形 = 后台 FACE_CROP_SIZE 原生尺寸，可直接看五官；
+                 再放大只会糊，所以不上到 200+） -->
             <div v-if="current" class="mt-3 flex items-center gap-3">
               <img
                 :src="faceUrl(current.faceCode)"
-                class="h-20 w-20 shrink-0 rounded-thumb border border-line object-cover"
+                class="h-40 w-40 shrink-0 rounded-thumb border border-line object-cover"
                 alt="待确认人脸的裁剪图"
               />
               <div class="min-w-0 text-caption text-ink-weak">
@@ -656,13 +684,19 @@ watch(activeTab, (tab) => {
                   {{ currentMeta.hint }}
                 </p>
                 <p v-if="current.shotBucket" class="mt-1 tabular-nums">
-                  年代桶 {{ formatBucketKey(current.shotBucket) }}
+                  年代档 {{ formatBucketKey(current.shotBucket) }}
                 </p>
                 <p v-if="current.detScore" class="mt-1 tabular-nums">
                   检测置信度 {{ Number(current.detScore).toFixed(2) }}
                 </p>
                 <p v-if="current.similarity !== null" class="mt-1 tabular-nums">
-                  最高相似度 {{ Number(current.similarity).toFixed(2) }}
+                  最高相似度
+                  <b :class="currentConfidence.textClass">{{
+                    Number(current.similarity).toFixed(2)
+                  }}</b>
+                  <span :class="currentConfidence.textClass" :title="currentConfidence.hint"
+                    >（{{ currentConfidence.label }}）</span
+                  >
                 </p>
                 <p v-else class="mt-1 text-warning-ink">
                   库里还没有可比质心（质心只由人工确认的样本生成）
@@ -674,7 +708,7 @@ watch(activeTab, (tab) => {
               来源：{{ photoLabel || EMPTY }}
               <RouterLink
                 v-if="current?.photoCode"
-                :to="`/photos/${current.photoCode}`"
+                :to="photoDetailLink(current.photoCode, { path: '/review', name: '待确认' })"
                 class="ml-1 text-brand-ink hover:underline"
                 >在照片里看这张脸 →</RouterLink
               >
@@ -707,7 +741,13 @@ watch(activeTab, (tab) => {
                 <el-button size="small" :disabled="!mergeFrom" @click="openMerge">
                   <Merge class="mr-1 h-3.5 w-3.5" aria-hidden="true" />与某人合并
                 </el-button>
-                <el-button size="small" :disabled="!current" @click="openFixForCurrent">
+                <el-button
+                  size="small"
+                  type="primary"
+                  title="常用操作：把这张脸改判给别的人"
+                  :disabled="!current"
+                  @click="openFixForCurrent"
+                >
                   <ArrowRightLeft class="mr-1 h-3.5 w-3.5" aria-hidden="true" />改判到…
                 </el-button>
               </div>
@@ -782,7 +822,7 @@ watch(activeTab, (tab) => {
           <kbd class="rounded border border-line px-1">2</kbd> /
           <kbd class="rounded border border-line px-1">3</kbd>
           选择候选 · <kbd class="rounded border border-line px-1">N</kbd> 新建人物 ·
-          <kbd class="rounded border border-line px-1">S</kbd> 跳过 ·
+          <kbd class="rounded border border-line px-1">S</kbd> 跳过（排到队列最后） ·
           <kbd class="rounded border border-line px-1">I</kbd> 忽略
           <span class="w-full">
             输入框里打字时快捷键自动让位；任何确认浮层打开时也不响应。
@@ -836,6 +876,7 @@ watch(activeTab, (tab) => {
       :faces="fixFaces"
       :siblings="fixSiblings"
       :candidates="fixCandidates"
+      :search-fn="review.searchPersons"
       :mode="fixMode"
       :loading="fixLoading"
       :photo-label="fixPhotoLabel"
@@ -875,6 +916,7 @@ watch(activeTab, (tab) => {
       :faces="splitFaces"
       :candidates="[]"
       :persons="splitPersons"
+      :search-fn="review.searchPersons"
       :loading="splitLoading"
       :photo-label="splitPhotoLabel"
       @submit="onSplitSubmit"

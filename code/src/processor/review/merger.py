@@ -74,6 +74,7 @@ if _SRC_DIR not in sys.path:
 
 from common import globalDefinition as comGD                      # noqa: E402
 from common import miscCommon as misc                             # noqa: E402
+from common import pinyin as pinyin                               # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
 from database.auto_generated import sqliteCommon                  # noqa: E402
 from engine.match import centroid as centroid                     # noqa: E402
@@ -501,12 +502,15 @@ def split(faceCode: str, newPersonCode: str = "", displayName: str = "",
             [{"personCode": target, "displayName": name,
               "birthday": (None if not birthday else str(birthday)),
               "avatarFaceCode": code,          # 拆出来的那张脸就是他的头像
+              # 拼音检索串（服务端派生）。「未命名-xxxxxxxx」这种兜底名
+              # 也要算 —— 它同样是一个能被搜到的名字。
+              "displayNamePinyin": pinyin.personPinyin(name) or None,
               "source": comGD.PERSON_SOURCE_MANUAL,
               "isConfirmed": 0,                # 档案本身还没被用户确认过
               "modifyYMDHMS": misc.getTime()}],
             conflictColumns=("personCode",),
             updateColumns=("displayName", "birthday", "avatarFaceCode",
-                           "modifyYMDHMS"),
+                           "displayNamePinyin", "modifyYMDHMS"),
             fillStandard=True, forceColumns=("birthday", "avatarFaceCode"))
         if rtn == -2:                    # sqliteHandle.RET_ERROR
             raise MergeError("pb_person 建档失败: %s"
@@ -547,31 +551,56 @@ def revertibleList(limit: int = 20) -> list:
     """「可撤销且未撤销」的日志列表 = 撤销按钮的候选集（不写库）。
 
     口径与 §五 的部分索引 `WHERE isRevertible=1 AND revertedByLogCode IS NULL` 一致。
+
+    ⚠️ **只返回主记录，不返回成员行**（步骤 12 实测发现）
+    ---------------------------------------------
+      一次合并会写 1 条主日志 + **N 条成员日志**（每张脸一条，logCode 形如
+      `<主码>.<faceCode>`，见 logOperation 的说明）。成员行是给 `undo` 精确
+      还原用的**记账**，不是一次独立的用户操作。
+      而它们同样是 `isRevertible=1` 且未撤销 —— 于是「撤销上次合并」的候选集
+      里会一次冒出 1+N 条：合并 3 张脸就看到 4 个「可撤销」，
+      用户完全分不清哪条是哪条，而且撤销其中任一条的结果**都一样**
+      （`undo` 内部按 detail 里的 op 标记找主记录）。
+      ⇒ 候选集按「一次用户操作 = 一条」收敛。成员行仍可作为 `undo` 的入参
+      （那是刻意的幂等设计），只是**不作为按钮候选**。
     """
     out = []
+    # ⚠️ **必须超额取**：一次合并会写 1 主 + N 成员行，而过滤发生在取回之后。
+    #    按 limit 原样取，一次合并 50 张脸时取回的 20 行全是成员行 ->
+    #    候选集变成空 -> 「撤销上次合并」按钮无故变灰，而它其实有得撤。
+    overFetch = max(int(limit or 0) * 4, int(limit or 0) + 20)
     for row in sqliteCommon.query_pb_review_log(
             "pb_review_log", orderBy="recID", descFlag=True,
-            limitNum=int(limit or 0)):
+            limitNum=overFetch):
         if int(row.get("isRevertible") or 0) != 1:
             continue
         if str(row.get("revertedByLogCode") or ""):
             continue
+        if "." in str(row.get("logCode") or ""):
+            continue                     # 成员行（记账），不是一次独立操作
         out.append({"logCode": row.get("logCode"), "opType": row.get("opType"),
                     "faceCount": int(row.get("faceCount") or 0),
                     "fromPersonCode": row.get("fromPersonCode"),
                     "toPersonCode": row.get("toPersonCode"),
+                    # DR-42：年代修正（BUCKET_FIX）没有 from/to 人可用
+                    # （一次修正可能牵动多人，也可能一个人都没有），
+                    # 前端要靠 photoCode 才能说清「撤的是哪张照片的年代」。
+                    "photoCode": row.get("photoCode"),
                     "opYMDHMS": row.get("opYMDHMS"),
                     "detail": row.get("detail")})
     return out
 
 
 def undo(logCode: str) -> dict:
-    """撤销一条**可撤销**的日志（只有 SPLIT / MERGE）。
+    """撤销一条**可撤销**的日志（SPLIT / MERGE / BUCKET_FIX）。
 
     四道闸门（任一不满足就抛错，**绝不"尽力而为地做一半"**）
     ----------------------------------------------------
       ① 日志存在
-      ② opType ∈ {SPLIT, MERGE}（普通确认 isRevertible=0，明确拒绝）
+      ② opType ∈ {SPLIT, MERGE, BUCKET_FIX}（普通确认 isRevertible=0，明确拒绝）
+         ⚠️ BUCKET_FIX（DR-42 年代修正）在下面第一步就被分流给
+            processor/photoTimeFix.revertFromLog —— 它不搬人脸，
+            「撤销」做的是把 shotYearOverride 写回原值再重刷桶。
       ③ isRevertible = 1
       ④ revertedByLogCode IS NULL（还没被撤销过）
     为什么这么严：撤销会**搬动人脸归属**，而人脸归属是用户逐张核对过的事实。
@@ -595,9 +624,24 @@ def undo(logCode: str) -> dict:
         raise MergeError("logCode=%s 在 pb_review_log 里不存在" % code)
     row = rows[0]
     opType = str(row.get("opType") or "")
+    # ---- DR-42：年代修正的撤销是**另一条路径**（改 pb_photo.shotYearOverride
+    #      -> 重刷这张照片全部人脸的 shotBucket -> 重算涉及人物质心），
+    #      不搬动任何归属，所以委托给 processor/photoTimeFix。
+    #      分流放在下面那道 opType 白名单之前：两道闸门（isRevertible /
+    #      revertedByLogCode）在 revertFromLog 里**一模一样地**做着，
+    #      这里只负责把它导到正确的实现上。
+    if opType == assigner.OP_BUCKET_FIX:
+        from processor import photoTimeFix
+        try:
+            return photoTimeFix.revertFromLog(row)
+        except photoTimeFix.PhotoTimeFixError as e:
+            # ⚠️ 必须转成 MergeError：api/review.py 的 /review/undo 只按
+            #    MergeError 映射 HTTP 码（_codeOf 按**文本**判别）。
+            #    直接抛 PhotoTimeFixError 会变成 500 —— 「撤销两次」本该是 409。
+            raise MergeError(str(e))
     if opType not in (assigner.OP_SPLIT, assigner.OP_MERGE):
-        raise MergeError("opType=%s 不可撤销（只有 SPLIT / MERGE 能撤销，"
-                         "普通确认的逆操作是再点一次改判）" % opType)
+        raise MergeError("opType=%s 不可撤销（只有 SPLIT / MERGE / BUCKET_FIX "
+                         "能撤销，普通确认的逆操作是再点一次改判）" % opType)
     if int(row.get("isRevertible") or 0) != 1:
         raise MergeError("日志 %s 的 isRevertible=0，不可撤销" % code)
     if str(row.get("revertedByLogCode") or ""):

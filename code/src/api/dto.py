@@ -264,6 +264,10 @@ class ScanStartBody(BaseModel):
                                          "**缺省 false**：那是一次 scandir"
                                          "（10 万张 0.3~2s），第一批本来就会重数")
     jobCode: Optional[str] = Field(default=None, description="指定则幂等复用该任务")
+    autoFace: bool = Field(default=True,
+                           description="扫描跑完后**自动接着识别人脸**（缺省 true）。"
+                                       "关掉它就只清点不入脸库 —— 待确认数会一直是 0，"
+                                       "因为它数的是 pb_face 而不是 pb_photo")
 
 
 class AssignBody(BaseModel):
@@ -312,7 +316,7 @@ class SplitBody(BaseModel):
     personCode: Optional[str] = Field(default=None,
                                       description="拆给谁；不给 = 置为未归属（回待确认队列）")
     displayName: Optional[str] = Field(default=None, description="personCode 不存在时自动建档用的姓名")
-    birthday: Optional[str] = Field(default=None, description="同上，生日（直接影响分桶）")
+    birthday: Optional[str] = Field(default=None, description="同上，生日（直接影响年代档划分）")
 
 
 class UndoBody(BaseModel):
@@ -329,6 +333,30 @@ class MarkDuplicateBody(BaseModel):
     """
     dupOfPhotoCode: str = Field(...,
                                 description="主照片的 photoCode（不能是它自己）")
+
+
+class ShotYearFixBody(BaseModel):
+    """POST /api/photos/{photoCode}/shot-year-fix（DR-42）
+
+    `shotYear` 给值 = 人工修正；**给 null = 恢复自动**（回到 EXIF/文件名/mtime）。
+
+    ⚠️ 为什么「恢复自动」与「修正」共用一个字段而不是两个端点：
+       它们改的是**同一列**（pb_photo.shotYearOverride），只是取值不同；
+       拆成两个端点会让前端需要自己判断"现在该调哪个"，而判断依据
+       （当前有没有 override）本来就在照片详情的响应里（`shotYearOverride`）。
+
+    ⚠️ 路由里用 `model_dump(exclude_unset=True)` 判"到底传没传 shotYear"：
+       不传 = 参数漏了（400），传 null = 恢复自动 —— 两者都是 None，
+       只能靠字段是否在 `model_fields_set` 里区分。混在一起的话，
+       前端漏传一个字段就会**静默把用户的修正清掉**。
+    """
+    shotYear: Optional[int] = Field(
+        default=None,
+        description="修正后的拍摄年份；传 null = 恢复自动（回到 EXIF/文件名/mtime）")
+    # ⚠️ 这里**刻意不加** ge/le 这类区间约束：pydantic 的越界会回 422，
+    #    而本项目所有错误都是 `{code, message}` + 400/404/409 的形状（见本文件
+    #    顶部说明）。年份区间由 `bucket.validShotYear` 校验（它同时管着
+    #    SHOT_YEAR_MIN/MAX 这一处真相），越界时由路由映射成 400。
 
 
 class ContactCreateBody(BaseModel):
@@ -349,8 +377,13 @@ class ContactPatchBody(BaseModel):
     """PATCH /api/contacts/{personCode} —— **部分字段**更新（只写传了的字段）
 
     ⚠️ birthday 是唯一需要重算质心的字段（DR-18）。其余字段（displayName /
-       familyName / familyGroupCode / relation / email / phone / 分类）改了
-       **什么都不用做** —— 它们不参与任何分桶与匹配。
+       familyName / familyGroupCode / relation / email / phone / 分类 /
+       avatarFaceCode）改了**什么都不用做** —— 它们不参与任何划分年代档与匹配。
+
+    ⚠️ `avatarFaceCode`（DR-41）是**展示**字段，不进质心、不写 `pb_review_log`：
+       · 给一个属于**这个人**的 faceCode = 设为默认头像
+       · 给空串 / null = 清空（卡片与详情回退到「代表脸」，见 DR-40）
+       · 给了**别人的** faceCode → 400（校验在路由里，因为它要查库）
 
     ⚠️ `extra="allow"`（而不是默认的 ignore，也不是 forbid）
        -----------------------------------------------
@@ -370,6 +403,9 @@ class ContactPatchBody(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     birthday: Optional[str] = None
+    avatarFaceCode: Optional[str] = Field(
+        default=None,
+        description="默认头像的人脸编码（必须是**这个人**的脸）；空串/null = 清空回退代表脸")
     categories: Optional[List[str]] = Field(
         default=None,
         description="给值 = 以本次为准（空列表会清空分类）；**不给该键 = 一个都不动**")

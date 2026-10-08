@@ -32,17 +32,41 @@ export function listPersons(params = {}) {
   return request.get('/persons', { params })
 }
 
-/** 人物详情：含各年代桶分组统计（P-05 时间轴） */
+/** 人物详情：含各年代档分组统计（P-05 时间轴） */
 export function getPerson(personCode) {
   return request.get(`/persons/${encodeURIComponent(personCode)}`)
 }
 
-/** 地点聚合（筛选下拉 / 后续离线地图） */
-export function listPlaces(params = {}) {
-  return request.get('/places', { params })
+/** 某人的全部人脸样本（P-05 Tab2）
+ *  state = confirmed | disputed | pending | stranger（不给则四态全给）
+ *  ⚠️ counts 是**两段各自的真实条数**，界面上「人工确认 N / 自动 M」取这里，
+ *     不要取 items.length —— 有 limit 时两个数会不一样。 */
+export function listPersonFaces(personCode, params = {}) {
+  return request.get(`/persons/${encodeURIComponent(personCode)}/faces`, { params })
 }
 
-/** 重建地点字典（幂等；必须 POST，用 GET 会拿到 405 METHOD_NOT_ALLOWED） */
-export function rebuildPlaces() {
-  return request.post('/places/rebuild')
+/** 某人的照片按年代档分组（P-05 Tab1 时间轴；年代档键就是 pb_face.shotBucket）
+ *  每个年代档只给 limitPerBucket 张 + photoTotal，其余由 BucketTimeline 折成「+N」 */
+export function getPersonTimeline(personCode, params = {}) {
+  return request.get(`/persons/${encodeURIComponent(personCode)}/timeline`, { params })
 }
+
+/** 重复照片分组（按内容指纹聚合）
+ *  kind=copy 是「复制了一份」，kind=moved 是「这其实是被改过名的同一张」——
+ *  两者在库里长得一样（isDuplicate=1），混着说会让用户去删错文件。 */
+export function listDuplicates(params = {}) {
+  return request.get('/duplicates', { params })
+}
+
+/** 两张重复照片的并排对比：sameContent + 逐项 diff + 人脸配对 */
+export function compareDuplicates(photoCode, otherCode) {
+  return request.get('/duplicates/compare', {
+    params: { photoCode, otherCode },
+  })
+}
+
+/* ⚠️ R5：`/api/places*` 的封装**整套搬到了 `api/place.js`**（含显示名契约
+ *    `placeDisplayName`）。两个模块各写一份请求封装的后果不是"重复一点代码"，
+ *   而是「改了一处、另一处静默过期」——本文件里再留一份，它迟早会与
+ *    place.js 的参数名/默认值漂开，而两边都还能跑。
+ *    （后端同理：`/api/places*` 整个命名空间只在 `api/place.py` 一处注册。） */

@@ -190,6 +190,25 @@ def _printSummary(sched, jobCode: str, summary) -> None:
               % counts.get("moveLinked", 0))
         print("  标缺失    : %s（回来了 %s，**记录一律没删**）"
               % (counts.get("missing", 0), counts.get("recovered", 0)))
+        # ---- 地点侧收尾（R4b）：只在真的跑完（DONE）时有这一段 ----
+        place = summary.get("placeFinalize")
+        if place:
+            if place.get("skipped"):
+                print("  地点收尾  : 跳过（%s）" % place.get("reason"))
+            else:
+                print("  地点收尾  : 填 placeNameDir %s 行｜地点数 %s｜归零 %s｜"
+                      "中文名 %s｜用时 %ss%s"
+                      % (place.get("filled"), place.get("placeCount"),
+                         place.get("zeroed"), place.get("nameZhFilled"),
+                         place.get("elapsed"),
+                         "" if place.get("ok") else "  ⚠️ 有失败步骤: %s"
+                         % place.get("errors")))
+                if place.get("driftCount"):
+                    print("    ⚠️ 目录改名漂移 %d 行（**只报告不覆盖**）：%s"
+                          % (place.get("driftCount"), place.get("driftTop")))
+                if place.get("suspectCount"):
+                    print("    ⚠️ 疑似地点 %d 个（判据没认出的新写法）：%s"
+                          % (place.get("suspectCount"), place.get("suspectTop")))
     print("  " + sched.describe(jobCode)["text"])
 
 

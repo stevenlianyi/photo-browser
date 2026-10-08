@@ -43,21 +43,21 @@
 # ----------------------------------------------
 #   **匹配相关**（改了必须 centroid.recomputePerson）：
 #       birthday
-#     它决定 `bucket.bucketKeyAdaptive()` 的桶键（0–18 岁 3 年 / 18+ 10 年），
-#     一改全套桶键都变、旧质心全部作废。
+#     它决定 `bucket.bucketKeyAdaptive()` 的年代档键（0–18 岁 3 年 / 18+ 10 年），
+#     一改全套年代档键都变、旧质心全部作废。
 #     ⚠️⚠️ **只调 recomputePerson 是不够的** —— 质心是**按 pb_face.shotBucket
-#       分桶**算出来的，而 shotBucket 是**存���在脸表上**的。所以顺序必须是：
+#       划分年代档**算出来的，而 shotBucket 是**存���在脸表上**的。所以顺序必须是：
 #           ① 改 pb_person.birthday
-#              ② rebucket.rebucketPerson()   <- 重刷 pb_face.shotBucket（新桶键）
-#              ③ centroid.recomputePerson()  <- 按新桶键重建全部质心
-#       少做 ② 就是「改生日等于没改」：桶键根本没变，重算出来的质心
+#              ② rebucket.rebucketPerson()   <- 重刷 pb_face.shotBucket（新年代档键）
+#              ③ centroid.recomputePerson()  <- 按新年代档键重建全部质心
+#       少做 ② 就是「改生日等于没改」：年代档键根本没变，重算出来的质心
 #       和改之前**逐位相同**，而用户的直觉是「他忽然认不准了」。
 #       （好在 ③ 自己会先跑 `_assertBucketOrder` 前置检查并抛错 ——
 #        顺序反了它宁可拒绝执行，也不让你静默失配。）
 #   **纯资料**（改了什么都不用做）：
 #       displayName / familyName / familyGroupCode / relation / email / phone
 #       pb_person_category
-#     它们不参与任何分桶与匹配，所以 PATCH 它们**绝不**碰质心
+#     它们不参与任何划分年代档与匹配，所以 PATCH 它们**绝不**碰质心
 #     （验收第 18 条：改 email 后质心的 modifyYMDHMS 必须一模一样）。
 
 import os
@@ -74,6 +74,7 @@ from api import dto                                               # noqa: E402
 from common import globalDefinition as comGD                      # noqa: E402
 from common import miscCommon as misc                             # noqa: E402
 from common import paths as paths                                 # noqa: E402
+from common import pinyin as pinyin                               # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
 from database import queryCommon as query                         # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
@@ -114,6 +115,46 @@ def _requirePerson(personCode: str, withDeleted: bool = False) -> dict:
         raise dto.ApiError(dto.CODE_NOT_FOUND,
                            "personCode=%s 在 pb_person 里不存在" % personCode)
     return row
+
+
+def _assertAvatarFace(person: dict, faceCode, given: bool) -> None:
+    """校验「默认头像」的人脸编码（DR-41）。**只读，一行都不写**。
+
+    三种情况
+    --------
+      · **没给该键** -> 直接返回（PATCH 语义：不给 = 一个都不动）
+      · **给了空串 / None** -> 合法（= 清空，卡片与详情回退到代表脸，DR-40）
+      · **给了非空** -> 必须存在、未软删，且 `pb_face.personCode == 这个人`
+
+    ⚠️ 为什么「别人的脸」要拦在这里：库里一旦出现「头像指向别人的脸」这种
+       矛盾行，**界面上完全看不出来** —— 它照样渲染成一张人脸照片，只是
+       那张脸不是你选的那个人。这类错误只能靠写入口挡住。
+    ⚠️ 用 404（`CODE_NOT_FOUND`）而不是 400 报「不存在」：与本项目其余
+       「编码查不到」同构（dto.CODE_NOT_FOUND 的说明里就列了 faceCode）。
+    ⚠️ **不校验 `isConfirmed`**：头像是**展示**不是归属，自动归属（未确认）
+       的样本同样可以用 —— 没必要逼用户先去确认那张脸。
+    ⚠️ 报错文案里**不写 `**加粗**`**：它会被原样 Toast 出来（本项目的
+       message 是**给人看的一句话**，不是 Markdown）。
+    """
+    if not given:
+        return
+    code = str(faceCode or "").strip()
+    if not code:
+        return                                     # 清空：合法
+    row = browse.faceRow(code)
+    if not row:
+        raise dto.ApiError(dto.CODE_NOT_FOUND,
+                           "faceCode=%s 在 pb_face 里不存在（或已软删）" % code)
+    personCode = str((person or {}).get("personCode") or "")
+    owner = str(row.get("personCode") or "")
+    if owner != personCode:
+        mine = str((person or {}).get("displayName") or personCode)
+        theirs = str((browse.personRow(owner, withDeleted=True) or {})
+                     .get("displayName") or owner or "（未归属）")
+        raise dto.ApiError(
+            dto.CODE_PARAM_INVALID,
+            "这张脸不属于「%s」（它归属于「%s」）—— 默认头像只能用他自己的人脸样本"
+            % (mine, theirs))
 
 
 def _contactStatsOf(codes: list) -> dict:
@@ -215,7 +256,7 @@ def _syncCategoriesOf(personCode: str, categories: list) -> dict:
 def listContacts(page: int = Query(default=1, ge=1),
                  size: int = Query(default=dto.DEFAULT_PAGE_SIZE),
                  keyword: str = Query(default=None,
-                                      description="姓名 / 邮箱 / 电话 / 备注 模糊匹配"),
+                                      description="姓名 / 拼音 / 邮箱 / 电话 / 备注 模糊匹配"),
                  category: str = Query(default=None, description="分类筛选"),
                  familyGroupCode: str = Query(default=None, description="家庭组筛选"),
                  delFlag: str = Query(default=None,
@@ -258,10 +299,14 @@ def listContacts(page: int = Query(default=1, ge=1),
         where.append("p.source = %s")
         values.append(int(source))
     if keyword:
-        where.append("(p.displayName LIKE %s OR p.familyName LIKE %s"
-                     " OR p.email LIKE %s OR p.phone LIKE %s OR p.memo LIKE %s)")
+        # displayNamePinyin = 派生拼音检索串（见 common/pinyin.py）：
+        # 联系人页的搜索框与人物网格必须一致，否则同一批人在两个页面
+        # 一个搜得到、一个搜不到。
+        where.append("(p.displayName LIKE %s OR p.displayNamePinyin LIKE %s"
+                     " OR p.familyName LIKE %s OR p.email LIKE %s OR p.phone LIKE %s"
+                     " OR p.memo LIKE %s)")
         like = "%%%s%%" % str(keyword)
-        values.extend([like, like, like, like, like])
+        values.extend([like, like, like, like, like, like])
     if category:
         where.append("EXISTS (SELECT 1 FROM pb_person_category c"
                      " WHERE c.personCode = p.personCode AND c.category = %s"
@@ -289,6 +334,7 @@ def listContacts(page: int = Query(default=1, ge=1),
 
     codes = [str(r.get("personCode") or "") for r in rows]
     stats = _contactStatsOf(codes)
+    covers = browse.personCoversOf(rows)      # 封面脸，批量解析（DR-40）
     items = []
     for row in rows:
         code = str(row.get("personCode") or "")
@@ -296,7 +342,8 @@ def listContacts(page: int = Query(default=1, ge=1),
         summary = browse.personSummary(row, one.get("photoCount", 0),
                                        one.get("faceCount", 0),
                                        one.get("confirmedFaceCount", 0),
-                                       one.get("yearLow"), one.get("yearHigh"))
+                                       one.get("yearLow"), one.get("yearHigh"),
+                                       coverFaceCode=covers.get(code))
         summary["vcardUid"] = row.get("vcardUid") or None
         summary["categories"] = one.get("categories") or []
         items.append(summary)
@@ -340,6 +387,7 @@ def createContact(body: dto.ContactCreateBody) -> JSONResponse:
                         % (name, displayName))
     personCode = contact.makePersonCode(PERSON_CODE_PREFIX_UI, name, index, takenCodes)
 
+    familyName = str(body.familyName or "").strip() or None
     groupCode = str(body.familyGroupCode or "").strip()
     if groupCode and not sqliteCommon.query_pb_family("pb_family", familyCode=groupCode,
                                                       limitNum=1):
@@ -350,12 +398,17 @@ def createContact(body: dto.ContactCreateBody) -> JSONResponse:
     dataSet = {
         "personCode": personCode,
         "displayName": displayName,
-        "familyName": str(body.familyName or "") or None,
+        "familyName": familyName,
         "familyGroupCode": groupCode or None,
         "relation": str(body.relation or "") or None,
         "email": str(body.email or "") or None,
         "phone": str(body.phone or "") or None,
         "birthday": str(body.birthday or "") or None,
+        # 拼音检索串：**服务端派生**，不接受前端传入。
+        # ⚠️ 用的是**避让重名后的最终 displayName**，不是用户原填的名字 ——
+        #    否则库里是「张三(2)」而拼音是「zhangsan」，
+        #    用户搜 zhangsan2 零结果，看着就像搜索坏了。
+        "displayNamePinyin": pinyin.personPinyin(displayName, familyName) or None,
         "vcardUid": None,                 # ⚠️ 刻意为空（见函数头）
         "source": comGD.PERSON_SOURCE_MANUAL,
         "isConfirmed": 0,
@@ -366,8 +419,8 @@ def createContact(body: dto.ContactCreateBody) -> JSONResponse:
     recID = sqliteCommon.insertManyTableGeneral(
         "pb_person", [dataSet], conflictColumns=("personCode",),
         updateColumns=("displayName", "familyName", "familyGroupCode", "relation",
-                       "email", "phone", "birthday", "vcardUid", "source",
-                       "isConfirmed", "memo", "modifyYMDHMS"),
+                       "email", "phone", "birthday", "displayNamePinyin",
+                       "vcardUid", "source", "isConfirmed", "memo", "modifyYMDHMS"),
         fillStandard=True,
         forceColumns=("familyName", "familyGroupCode", "relation", "email",
                       "phone", "birthday", "vcardUid", "avatarFaceCode", "memo"))
@@ -379,9 +432,9 @@ def createContact(body: dto.ContactCreateBody) -> JSONResponse:
     if categories:
         _syncCategoriesOf(personCode, body.categories or [])
     if str(body.birthday or ""):
-        # 新建时桶键只影响**将来**的归属（此刻他一张脸都没有），
+        # 新建时年代档键只影响**将来**的归属（此刻他一张脸都没有），
         # 所以这里不需要 rebucket —— 没有脸可刷。
-        warnings.append("已填生日：这个人**将来**被认领人脸时会按自适应分桶"
+        warnings.append("已填生日：这个人**将来**被认领人脸时会按自适应划分年代档"
                         "（0–18 岁 3 年 / 18+ 10 年）建质心")
 
     _LOG.info("新建联系人 %s（%s，source=%d）", personCode, displayName,
@@ -401,8 +454,12 @@ def createContact(body: dto.ContactCreateBody) -> JSONResponse:
 
 #: PATCH 允许改的字段 -> pb_person 列。**白名单**：
 #:   多写一个键就多一条「前端能改但没想过后果」的路。
+#: ⚠️ `avatarFaceCode`（DR-41）是名单里**唯一「值不是自由文本」**的字段：
+#:   它必须指向一张**属于这个人**的 `pb_face` 行 —— 所以进白名单的同时，
+#:   patchContact 里配了一道 `_assertAvatarFace` 前置校验（写库前查库）。
 CONTACT_PATCH_COLUMNS: tuple = ("displayName", "familyName", "familyGroupCode",
-                                "relation", "email", "phone", "birthday", "memo")
+                                "relation", "email", "phone", "birthday",
+                                "avatarFaceCode", "memo")
 
 
 @router.patch("/contacts/{personCode}", summary="部分字段更新（birthday 变更自动重算质心）")
@@ -415,19 +472,27 @@ def patchContact(personCode: str, body: dto.ContactPatchBody) -> dict:
         变更时按三步走，**顺序不可颠倒**：
           ① 写 pb_person.birthday
           ② `rebucket.rebucketPerson()` —— 重刷 pb_face.shotBucket
-          ③ `centroid.recomputePerson()` —— 按**新桶键**重建全部质心
+          ③ `centroid.recomputePerson()` —— 按**新年代档键**重建全部质心
         ⚠️ 少做 ② 就是「改生日等于没改」：`centroid.recomputePerson`
-           是**按脸表里已存的 shotBucket 分桶**的（见 centroid.loadFaceVectors
-           的注释与 rebucket.expectedBucketOf），桶键不刷，重算出来的质心
+           是**按脸表里已存的 shotBucket 划分年代档**的（见 centroid.loadFaceVectors
+           的注释与 rebucket.expectedBucketOf），年代档键不刷，重算出来的质心
            与改之前逐位相同 —— 而用户的直觉是「他忽然认不准了」。
            （③ 自己会先跑 `_assertBucketOrder` 前置检查并抛错，
             所以真把顺序做反了，这里会**报错**而不是静默失配。）
-        响应带 `centroidRebuilt: true` + 新旧桶清单 + 受影响的脸数。
+        响应带 `centroidRebuilt: true` + 新旧年代档清单 + 受影响的脸数。
       **纯资料：displayName / familyName / familyGroupCode / relation /
-        email / phone / 分类**
+        email / phone / 分类 / `avatarFaceCode`**
         改了**什么都不用做** —— 响应里 `centroidRebuilt` 缺席或 false，
         且该人 `pb_person_centroid` 的 `modifyYMDHMS` 一个字都不变
         （验收第 18 条）。
+
+    默认头像（DR-41）
+    -----------------
+      `avatarFaceCode` 给一个**属于这个人**的 faceCode = 设为默认头像；
+      给空串 = 清空（卡片回退到代表脸）。⚠️ 它是**展示**字段：
+      不重算质心、不 rebucket、**不写 `pb_review_log`**
+      （操作历史回答的是「这张脸当初怎么被认成这个人的」，与头像无关）。
+      校验见 `_assertAvatarFace`：**别人的脸一律 400**。
 
     重名（displayName）
     ------------------
@@ -465,6 +530,10 @@ def patchContact(personCode: str, body: dto.ContactPatchBody) -> dict:
             value = given[column]
             patch[column] = (None if value in ("", None) else str(value))
 
+    # ---- 默认头像预检（**必须在写之前**：见 _assertAvatarFace 的说明）----
+    _assertAvatarFace(row, given.get("avatarFaceCode"),
+                      "avatarFaceCode" in given)
+
     # ---- 重名预检（**必须在写之前**：撞 UNIQUE 的写会整条失败）----
     if patch.get("displayName"):
         wantName = str(patch["displayName"])[:128]
@@ -480,6 +549,20 @@ def patchContact(personCode: str, body: dto.ContactPatchBody) -> dict:
     if newBirthday is not None:
         newBirthday = str(patch.get("birthday") or "").strip()
     birthdayChanged = (newBirthday is not None and newBirthday != oldBirthday)
+
+    # ---- 姓名/姓氏变了 -> 拼音必须跟着重算（否则拼音检索会静默失真）----
+    # ⚠️ 只能在**写成功之后**再谈「以哪个为准」，而这里算的是补丁后的值：
+    #    displayName 走 patch（可能被截到 128 字），familyName 走
+    #    patch → 库里旧值 的顺序取第一个非空。
+    newName = patch.get("displayName") or row.get("displayName")
+    #⚠️ 不能写 `patch.get("familyName") or row.get("familyName")`：
+    #    「把姓氏清空」时 patch["familyName"] 是 None，会又捡回旧姓氏，
+    #    拼音里就永远留着那个姓的 token —— 搜「wang」还能命中一个已经没有
+    #    姓王的人。这里按 key 是否存在来取，而不是按真值。
+    newFamily = (patch["familyName"] if "familyName" in patch
+                 else row.get("familyName")) or ""
+    if patch.get("displayName") or "familyName" in patch:
+        patch["displayNamePinyin"] = pinyin.personPinyin(newName, newFamily) or None
 
     if patch:
         patch["modifyYMDHMS"] = misc.getTime()
@@ -504,7 +587,7 @@ def patchContact(personCode: str, body: dto.ContactPatchBody) -> dict:
     if "categories" in given:
         categories = _syncCategoriesOf(code, given.get("categories") or [])["categories"]
 
-    # ---- 匹配相关副作用：改生日 ->刷桶 -> 重算质心 ----
+    # ---- 匹配相关副作用：改生日 ->刷新年代档 -> 重算质心 ----
     rebuilt = None
     if birthdayChanged:
         person = _requirePerson(code)          # 重读：拿到新 birthday
@@ -524,20 +607,21 @@ def patchContact(personCode: str, body: dto.ContactPatchBody) -> dict:
             "centroidEnabled": int(stat.get("enabled") or 0),
             "samples": reb.get("samples") or [],
         }
-        _LOG.info("PATCH %s: birthday %s -> %s，刷桶 %d/%d 张，质心 %d 桶（启用 %d）",
+        _LOG.info("PATCH %s: birthday %s -> %s，刷新年代档 %d/%d 张，质心 %d 年代档（启用 %d）",
                   code, oldBirthday or "(空)", rebuilt["birthdayTo"] or "(空)",
                   rebuilt["facesRebucketed"], rebuilt["facesChecked"],
                   len(rebuilt["centroidBuckets"]), rebuilt["centroidEnabled"])
         if not rebuilt["facesChecked"]:
             warnings.append("这个人还没有任何脸，改生日**当前**不产生质心变化；"
-                            "但将来归属人脸时会按新生日分桶")
+                            "但将来归属人脸时会按新生日划分年代档")
 
     fresh = _requirePerson(code)
     stats = _contactStatsOf([code]).get(code, {})
     out = browse.personSummary(fresh, stats.get("photoCount", 0),
                                stats.get("faceCount", 0),
                                stats.get("confirmedFaceCount", 0),
-                               stats.get("yearLow"), stats.get("yearHigh"))
+                               stats.get("yearLow"), stats.get("yearHigh"),
+                               coverFaceCode=browse.personCoversOf([fresh]).get(code))
     out["vcardUid"] = fresh.get("vcardUid") or None
     out["categories"] = stats.get("categories") or browse.categoriesOf(code)
     return dto.okBody(personCode=code, changedFields=sorted(given.keys()),
@@ -692,7 +776,7 @@ def listDuplicates(page: int = Query(default=1, ge=1),
         （家庭共用座机、公司总机），自动合并会把两个不同的人并成一个
         （这是 contactCommon.planContact 早就定下的规矩）。
 
-    ⚠️ 刻意**不按人脸相似度/桶距离**推荐合并：那是 merger 的活；
+    ⚠️ 刻意**不按人脸相似度/年代档距离**推荐合并：那是 merger 的活；
        而且自动合并比自动拆分安全得多（合错了能再拆，拆错了用户
        看不出哪个才对）。
     """
@@ -949,6 +1033,7 @@ def getFamily(familyCode: str):
                                            mode="light", orderBy="displayName")
     codes = [str(m.get("personCode") or "") for m in members]
     stats = browse.personStatsOf(codes)
+    covers = browse.personCoversOf(members)   # 封面脸，批量解析（DR-40）
 
     def _member(one):
         code = str(one.get("personCode") or "")
@@ -956,7 +1041,8 @@ def getFamily(familyCode: str):
         return browse.personSummary(one, one_stat.get("photoCount", 0),
                                     one_stat.get("faceCount", 0),
                                     one_stat.get("confirmedFaceCount", 0),
-                                    one_stat.get("yearLow"), one_stat.get("yearHigh"))
+                                    one_stat.get("yearLow"), one_stat.get("yearHigh"),
+                                    coverFaceCode=covers.get(code))
 
     return {"ok": True,
             "familyCode": str(rows[0].get("familyCode") or ""),

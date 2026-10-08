@@ -37,6 +37,14 @@ import PersonForm from '@/components/common/PersonForm.vue'
 import { faceUrl } from '@/api/static'
 import { faceStateOf, similarityText } from '@/utils/faceState'
 import { baseName } from '@/utils/format'
+import { relationLabelOf, usePersonsStore } from '@/store/persons'
+
+/**
+ * ⚠️ 变量名不能叫 `persons`：本组件的 props 里就有一个 `persons`
+ *    （mode="split" 的全库人物）。同名的话 `props.persons` 与 store
+ *    在模板里长得一模一样，改一行就可能取错。
+ */
+const personsStore = usePersonsStore()
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -48,6 +56,14 @@ const props = defineProps({
   candidates: { type: Array, default: () => [] },
   /** 全库人物（**仅 mode="split" 用**）：「它属于谁」的答案常常不在候选里 */
   persons: { type: Array, default: () => [] },
+  /**
+   * 全库人物搜索（可选注入，形如 `(keyword) => Promise<Person[]>`）。
+   *
+   * ⚠️ 为什么必须有它：picker 在改判模式下只是**相似度前 5 名**的候选。
+   *    用户在这 5 条里搜名字，几乎必然搜不到 —— 那不是搜索坏了，是搜索范围错了。
+   *    传进来就查全库（GET /persons?keyword=）；不传则退化为纯前端过滤。
+   */
+  searchFn: { type: Function, default: null },
   /** 打开时的默认动作 */
   mode: { type: String, default: 'assign' },
   /** 对话框形态：fix = 改判；split = 拆出（多一段「从谁拆到谁」的复述） */
@@ -80,17 +96,36 @@ const ACTIONS = computed(() => {
 
 const action = ref(props.mode)
 const pickedPerson = ref('')
+/** 已选中的那个人（选中那一刻的对象，见下方 picked 的说明） */
+const pickedItem = ref(null)
 const keyword = ref('')
 const alsoSiblings = ref(false)
 const confirmStranger = ref(false)
 const showNewPerson = ref(false)
 
+/** 服务端搜索的结果（全库）与状态 */
+const searchHits = ref([])
+const searching = ref(false)
+/** 本次关键词是否已经问过服务端（决定"没找到"该说谁的话） */
+const searched = ref(false)
+let searchTimer = null
+let searchSeq = 0
+
 watch(
   () => props.modelValue,
   (open) => {
+    clearTimeout(searchTimer)
+    searchSeq += 1
+    searchHits.value = []
+    searching.value = false
+    searched.value = false
     if (!open) return
+    // 「新建人物并归属」里的家庭组下拉要有内容（store 失败时静默降级成空列表，
+    // 不会拦住主流程）；建组动作本身由 PersonForm 直接调 store，不用管刷新
+    personsStore.fetchFamilies()
     action.value = props.mode
     pickedPerson.value = ''
+    pickedItem.value = null
     keyword.value = ''
     alsoSiblings.value = false
     confirmStranger.value = false
@@ -122,11 +157,109 @@ const picker = computed(() => {
   return (props.persons || []).filter((p) => p.personCode !== self)
 })
 
-const filteredCandidates = computed(() => {
-  const text = String(keyword.value || '').trim().toLowerCase()
+/**
+ * 列表内容：**有关键词 = 纯搜索结果；没关键词 = 相似度候选**。
+ *
+ * ⚠️⚠️ 这里原来写成「候选在前、搜索结果补在后面」，是错的：
+ *   用户输入 luwen 之后看到的仍然是一张**按相似度降序**的候选表
+ *   （Steven Lian 0.15 / ZhongWen Lian 0.10 / BaoRui Zhang 0.04 …），
+ *   搜索框像是完全没起作用 —— 而它明明已经搜到 8 个人了。
+ *   「搜索」的意义就是**换掉那张表**，不是往表里加几行。
+ *
+ * 但命中的人如果本来就在候选里，要把他的 similarity / relation **借过来**：
+ *   「我搜到的这个人，机器也认，而且只有 0.15」是这条列表里最有用的一句话，
+ *   抹掉它等于把搜索结果降级成一张通讯录。
+ */
+const options = computed(() => {
+  const text = String(keyword.value || '').trim()
   if (!text) return picker.value
-  return picker.value.filter((c) => String(c.displayName || '').toLowerCase().includes(text))
+
+  const self = isSplit.value ? primary.value?.personCode || '' : ''
+  const byCode = new Map(picker.value.map((c) => [c.personCode, c]))
+  const out = []
+  for (const one of searchHits.value) {
+    if (!one?.personCode) continue
+    // 拆分不能「拆给自己」：picker 已经剔掉本人，搜索结果也要跟同一把尺
+    if (self && one.personCode === self) continue
+    const hit = byCode.get(one.personCode)
+    out.push(
+      hit
+        ? { ...one, similarity: hit.similarity, relation: one.relation || hit.relation }
+        : { similarity: null, ...one },
+    )
+  }
+  return out
 })
+
+const filteredCandidates = computed(() => {
+  const text = String(keyword.value || '').trim()
+  if (!text) return picker.value
+
+  // 服务端已经按关键词搜过全库：结果即列表，**不要再按候选池过滤一遍**，
+  // 否则「机器没排进前 5 但用户认识」的人会被二次筛掉，搜索又白做了。
+  if (searched.value) return options.value
+
+  // 没注入 searchFn 时的兜底：只在候选池里筛，但**要说清**筛的是候选
+  // 关系两个形态都进匹配串：库里是 `sibling`，用户想敲的是「兄弟」
+  const low = text.toLowerCase()
+  return picker.value.filter((c) =>
+    [c.displayName, c.familyName, c.personCode, c.relation, relationLabelOf(c.relation)].some(
+      (field) =>
+        String(field || '')
+          .toLowerCase()
+          .includes(low),
+    ),
+  )
+})
+
+/** 「没找到」与「候选池本来就是空的」是两回事，文案必须分开 */
+const noMatchByKeyword = computed(() => {
+  const text = String(keyword.value || '').trim()
+  return Boolean(text) && !searching.value && !filteredCandidates.value.length
+})
+const emptyPicker = computed(() => !picker.value.length && !String(keyword.value || '').trim())
+
+/**
+ * 搜索请求：防抖 200ms + **序号丢弃过期响应**。
+ * 不丢弃的话慢的那次会覆盖快的那次 —— 输入「王小明」时结果会来回跳。
+ */
+async function runSearch(text) {
+  if (typeof props.searchFn !== 'function') {
+    searched.value = false
+    return
+  }
+  const seq = ++searchSeq
+  searching.value = true
+  try {
+    const list = await props.searchFn(text)
+    if (seq !== searchSeq) return
+    searchHits.value = Array.isArray(list) ? list : []
+    searched.value = true
+  } catch {
+    if (seq !== searchSeq) return
+    searchHits.value = []
+    searched.value = false
+  } finally {
+    if (seq === searchSeq) searching.value = false
+  }
+}
+
+watch(keyword, (value) => {
+  clearTimeout(searchTimer)
+  const text = String(value || '').trim()
+  searchSeq += 1
+  if (!text) {
+    searchHits.value = []
+    searching.value = false
+    searched.value = false
+    return
+  }
+  searchTimer = setTimeout(() => runSearch(text), 200)
+})
+
+function clearKeyword() {
+  keyword.value = ''
+}
 
 function inGreyZone(similarity) {
   if (similarity === null || similarity === undefined) return false
@@ -141,9 +274,19 @@ const canSubmit = computed(() => {
   return true
 })
 
-const picked = computed(
-  () => picker.value.find((c) => c.personCode === pickedPerson.value) || null,
-)
+/**
+ * 已选中的那个人。
+ * ⚠️ 不能只从 options 里 find：搜索结果会在用户点完主按钮前就可能被下一次输入顶掉，
+ *    那时 submitLabel 会退化成「改判到某人」—— 用户按下按钮前才发现刚才选的人不见了。
+ * 所以把选中那一刻的对象存下来。
+ */
+const picked = computed(() => {
+  const code = pickedPerson.value
+  if (!code) return null
+  return pickedItem.value?.personCode === code
+    ? pickedItem.value
+    : options.value.find((c) => c.personCode === code) || null
+})
 const pickedName = computed(() => picked.value?.displayName || '')
 
 /** 主按钮的动词必须与动作一致（设计稿：动词按钮） */
@@ -173,8 +316,15 @@ const sourceStats = computed(() => {
 
 const sourceLabel = computed(() => baseName(props.photoLabel) || '这张照片')
 
-function pick(personCode) {
-  pickedPerson.value = pickedPerson.value === personCode ? '' : personCode
+function pick(option) {
+  const code = typeof option === 'string' ? option : option?.personCode
+  if (pickedPerson.value === code) {
+    pickedPerson.value = ''
+    pickedItem.value = null
+    return
+  }
+  pickedPerson.value = code
+  pickedItem.value = typeof option === 'string' ? null : option
 }
 
 function submit() {
@@ -299,20 +449,37 @@ function close() {
 
     <!-- ① 它属于谁 / 改判到某人 -->
     <section v-if="action === 'assign'" class="mt-4 space-y-2" aria-label="选择改判给谁">
-      <el-input
-        v-model="keyword"
-        :placeholder="isSplit ? '搜索人物（他可能没有质心，不在相似度候选里）' : '搜索人物'"
-        clearable
-        size="small"
-        aria-label="搜索候选人物"
-      >
-        <template #prefix>
-          <Search class="h-3.5 w-3.5 text-ink-weak" aria-hidden="true" />
-        </template>
-      </el-input>
+      <!-- 搜索是这个浮层里**唯一能突破候选前 5 名**的入口（表弟、外婆压根没有质心，
+           不会出现在相似度候选里），所以它要比下面的列表更显眼：
+           带标题的独立区块 + 大号输入框，而不是一行和列表同级的小输入框。 -->
+      <div class="rounded-btn border border-line bg-surface p-3">
+        <div class="flex items-baseline justify-between gap-2">
+          <label class="text-body font-medium text-ink" for="fx-person-search">搜索人物</label>
+          <span class="pb-hint">
+            {{ isSplit ? '搜全库' : '搜全库，不受相似度前 5 名限制' }}
+          </span>
+        </div>
+        <el-input
+          id="fx-person-search"
+          v-model="keyword"
+          class="mt-2"
+          size="large"
+          placeholder="例：王小明 / wangxiaoming / wxm"
+          clearable
+          aria-label="搜索候选人物"
+        >
+          <template #prefix>
+            <Search class="h-4 w-4 text-ink-weak" aria-hidden="true" />
+          </template>
+          <template v-if="searching" #suffix>
+            <span class="text-caption text-ink-weak">搜索中…</span>
+          </template>
+        </el-input>
+      </div>
 
+      <!-- 空态分三种，不能共用一句话：候选池本来就空 / 搜了没搜到 / 有结果 -->
       <p
-        v-if="!picker.length"
+        v-if="emptyPicker"
         class="rounded-btn bg-warning-soft px-3 py-2 text-caption text-warning-ink"
       >
         <template v-if="isSplit">
@@ -322,64 +489,94 @@ function close() {
         <template v-else>
           这张脸没有可比对的人物档案 —— 库里还没有任何人的质心（质心只由
           <b>人工确认</b>的样本生成，还没确认过就一个都没有）。
-          用下面的「新建人物」建一个档案并归属，之后同类照片就能自动比对了。
+          <b>但你可以直接搜索全库姓名</b>：没进过相似候选的人（表弟、外婆…）照样搜得到。
+          确实没有的话，用下面的「新建人物」建一个档案并归属，之后同类照片就能自动比对了。
         </template>
       </p>
 
-      <ul
-        v-else
-        class="max-h-64 divide-y divide-line overflow-y-auto rounded-btn border border-line"
+      <p
+        v-else-if="noMatchByKeyword"
+        class="rounded-btn bg-warning-soft px-3 py-2 text-caption text-warning-ink"
       >
-        <li v-for="candidate in filteredCandidates" :key="candidate.personCode">
-          <button
-            type="button"
-            class="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-surface"
-            :aria-pressed="pickedPerson === candidate.personCode"
-            @click="pick(candidate.personCode)"
-          >
-            <img
-              v-if="candidate.avatarFaceCode"
-              :src="faceUrl(candidate.avatarFaceCode)"
-              class="h-8 w-8 shrink-0 rounded-full border border-line object-cover"
-              alt=""
-            />
-            <span
-              v-else
-              class="h-8 w-8 shrink-0 rounded-full border border-line bg-surface"
-              aria-hidden="true"
-            />
-            <span class="min-w-0 flex-1">
-              <span class="block truncate text-body text-ink">{{ candidate.displayName }}</span>
+        {{ searched ? '全库里' : '候选里' }}没有匹配「<b class="break-all">{{
+          String(keyword || '').trim()
+        }}</b
+        >」的人物。检查一下拼写，或只输姓氏试试；搜索支持汉字、全拼与拼音首字母
+        （王小明 → wangxiaoming / wxm）。确认这个人确实还没建档的话，用下面的「新建人物」建一个并归属。
+        <el-button
+          link
+          size="small"
+          class="ml-1 !h-auto !p-0 align-baseline"
+          @click="clearKeyword"
+        >
+          清空搜索
+        </el-button>
+      </p>
+
+      <template v-else>
+        <p v-if="String(keyword || '').trim()" class="pb-hint">
+          <template v-if="searched">
+            「{{ String(keyword).trim() }}」在全库搜到 <b>{{ filteredCandidates.length }}</b> 人
+            —— 这里<b>只列搜索结果</b>，相似度候选不再混进来。带相似度的是恰好也在机器候选里的那个。
+          </template>
+          <template v-else>
+            在相似候选里筛到 <b>{{ filteredCandidates.length }}</b> 人（没接全库搜索，只能筛候选）。
+          </template>
+        </p>
+        <ul
+          class="max-h-64 divide-y divide-line overflow-y-auto rounded-btn border border-line"
+        >
+          <li v-for="candidate in filteredCandidates" :key="candidate.personCode">
+            <button
+              type="button"
+              class="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-surface"
+              :aria-pressed="pickedPerson === candidate.personCode"
+              @click="pick(candidate)"
+            >
+              <img
+                v-if="candidate.avatarFaceCode"
+                :src="faceUrl(candidate.avatarFaceCode)"
+                class="h-8 w-8 shrink-0 rounded-full border border-line object-cover"
+                alt=""
+              />
               <span
-                v-if="candidate.relation"
-                class="block truncate text-caption text-warning-ink"
-              >
-                {{ candidate.relation }}，注意区分
+                v-else
+                class="h-8 w-8 shrink-0 rounded-full border border-line bg-surface"
+                aria-hidden="true"
+              />
+              <span class="min-w-0 flex-1">
+                <span class="block truncate text-body text-ink">{{ candidate.displayName }}</span>
+                <span
+                  v-if="candidate.relation"
+                  class="block truncate text-caption text-warning-ink"
+                >
+                  {{ relationLabelOf(candidate.relation) }}，注意区分
+                </span>
               </span>
-            </span>
-            <!-- 改判看相似度；拆分看规模（相似度对「它属于谁」这个问题没有意义） -->
-            <span
-              v-if="!isSplit"
-              class="w-12 text-right text-body tabular-nums"
-              :class="inGreyZone(candidate.similarity) ? 'text-warning-ink' : 'text-ink-sub'"
-            >
-              {{ similarityText(candidate.similarity) }}
-            </span>
-            <span
-              v-else
-              class="w-14 text-right text-caption tabular-nums text-ink-weak"
-            >
-              {{ candidate.photoCount ?? 0 }} 张照片
-            </span>
-            <span
-              class="w-12 text-right text-caption"
-              :class="pickedPerson === candidate.personCode ? 'text-brand-ink' : 'text-ink-weak'"
-            >
-              {{ pickedPerson === candidate.personCode ? '已选' : '选TA' }}
-            </span>
-          </button>
-        </li>
-      </ul>
+              <!-- 改判看相似度；拆分看规模（相似度对「它属于谁」这个问题没有意义） -->
+              <span
+                v-if="!isSplit"
+                class="w-12 text-right text-body tabular-nums"
+                :class="inGreyZone(candidate.similarity) ? 'text-warning-ink' : 'text-ink-sub'"
+              >
+                {{ similarityText(candidate.similarity) }}
+              </span>
+              <span
+                v-else
+                class="w-14 text-right text-caption tabular-nums text-ink-weak"
+              >
+                {{ candidate.photoCount ?? 0 }} 张照片
+              </span>
+              <span
+                class="w-12 text-right text-caption"
+                :class="pickedPerson === candidate.personCode ? 'text-brand-ink' : 'text-ink-weak'"
+              >
+                {{ pickedPerson === candidate.personCode ? '已选' : '选TA' }}
+              </span>
+            </button>
+          </li>
+        </ul>
+      </template>
 
       <el-button size="small" @click="showNewPerson = true">
         <UserPlus class="mr-1 h-3.5 w-3.5" aria-hidden="true" />
@@ -461,11 +658,13 @@ function close() {
   >
     <p class="pb-hint mb-3">
       建完会<b>自动把「{{ sourceLabel }}」里的 {{ targetFaceCodes.length }} 张脸归属给他</b>，
-      不用建完再回去点一次确认。生日会直接决定分桶，能填就填。
+      不用建完再回去点一次确认。生日会直接决定年代档划分，能填就填。
     </p>
+    <!-- families 走同一个 store：以前传的是空数组，这个对话框里
+         「家庭组」下拉永远是空的（连刚建的组也看不见） -->
     <PersonForm
       :person="null"
-      :families="[]"
+      :families="personsStore.families"
       @cancel="showNewPerson.value = false"
       @submit="submitNewPerson"
     />
