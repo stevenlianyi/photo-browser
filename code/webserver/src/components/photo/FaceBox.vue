@@ -53,6 +53,15 @@
     displayName: { type: String, default: '' },
     /** 相似度（没有可比质心时为 null —— 必须显示「—」而不是 0.00） */
     similarity: { type: Number, default: null },
+    /**
+     * 「这张脸是照片里第几张**未归属**的脸」（1 起；0 / 不传 = 不显示编号）。
+     *
+     * 由外层算好传进来，**组件自己绝不排序 / 计数** —— 侧栏那个「未归属」清单
+     * 用的是同一个 Map，编号一旦在这里重算就会与清单错位（错位比没有编号更坏：
+     * 用户会照着错号去改判**另一张**脸）。
+     * 只有 pending 才传：已归属的框上已经有人名，再编一套号只是往脸上堆字。
+     */
+    ordinal: { type: Number, default: 0 },
     /** 悬停是否出「✗ 不是他」（关掉 = 纯展示模式，如只读预览） */
     actionable: { type: Boolean, default: true },
   })
@@ -155,7 +164,8 @@ const labelSide = computed(() => {
   // 量不到容器（bbox 无效 / 环境没有 ResizeObserver）-> 退回旧行为
   if (!b || !fw || !fh) return 'top'
 
-  const need = estimateLabelWidth(`${meta.value.icon}${whoText.value}`) + GAP
+  const labelText = `${meta.value.icon}${props.ordinal ? `#${props.ordinal}` : ''}${whoText.value}`
+  const need = estimateLabelWidth(labelText) + GAP
   const leftSpace = b.x * fw
   const rightSpace = fw - (b.x + b.w) * fw
   if (rightSpace >= need) return 'right'
@@ -186,9 +196,11 @@ const fixSide = computed(() => {
   return 'bottom'
 })
 
-const ariaLabel = computed(
-  () => `人脸框：${hintText.value}${canFix.value ? '，激活后可改判' : ''}`,
-)
+const ariaLabel = computed(() => {
+  // 编号也要读得出来：只画在标签上等于对视障用户没有编号
+  const num = props.ordinal ? `第 ${props.ordinal} 张未归属人脸，` : ''
+  return `人脸框：${num}${hintText.value}${canFix.value ? '，激活后可改判' : ''}`
+})
 </script>
 
 <template>
@@ -213,6 +225,8 @@ const ariaLabel = computed(
       class="pointer-events-none absolute z-10 inline-flex max-w-[220px] items-center gap-1 whitespace-nowrap rounded-btn px-1.5 py-0.5 text-caption shadow-pop"
       :class="[meta.softClass, meta.textClass, SIDE_CLASS[labelSide]]"
     >
+      <!-- 未归属的框带编号，侧栏「未归属的人脸」清单用同一个号 -->
+      <span v-if="ordinal" class="font-medium tabular-nums">#{{ ordinal }}</span>
       <span aria-hidden="true">{{ meta.icon }}</span>
       <span class="truncate">{{ whoText }}</span>
       <span

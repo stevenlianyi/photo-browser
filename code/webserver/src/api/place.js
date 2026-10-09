@@ -64,7 +64,8 @@ export function getPlace(placeCode, params = {}) {
   return request.get(`/places/${encodeURIComponent(placeCode)}`, { params })
 }
 
-/** 该地点的照片（分页；years[] 是整个地点的按年计数） */
+/** 该地点的照片（分页；years[] 是整个地点的按年计数）
+ *  `anchorPhotoCode` 与 `/photos` 同义：返回**它所在的那一页**（scope 翻页定位） */
 export function listPlacePhotos(placeCode, params = {}) {
   return request.get(`/places/${encodeURIComponent(placeCode)}/photos`, { params })
 }

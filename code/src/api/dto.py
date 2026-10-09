@@ -359,6 +359,21 @@ class ShotYearFixBody(BaseModel):
     #    SHOT_YEAR_MIN/MAX 这一处真相），越界时由路由映射成 400。
 
 
+class RotateBody(BaseModel):
+    """POST /api/photos/{photoCode}/rotate（DR-43）
+
+    只支持 0 / 90 / 180 / 270（顺时针为正：90 = 右转、270 = 左转）。
+    ⚠️ 类型写 `Any` 而不是 `int`：前端传 `"90"`（字符串）是常态，而 pydantic
+       会先按 int 强转失败再回 422 —— 那是本项目里**唯一**会出现的 422，
+       与「所有错误都是 {code, message} + 400」的约定冲突。所以这里原样收，
+       由 `photoRotate.normalizeAngle` 校验并让路由映射成 400。
+    ⚠️ 这里**不加** ge/le / 枚举约束，理由同上（越界 = 400，不是 422）。
+    """
+
+    rotateDeg: Any = Field(default=None,
+                           description="目标角度：0 / 90 / 180 / 270（顺时针为正）")
+
+
 class ContactCreateBody(BaseModel):
     """POST /api/contacts —— 界面新建手工档案（source=0，vcardUid 空）"""
     displayName: str = Field(..., description="显示名（**UNIQUE**；重名会自动加 (2) 后缀并记警告）")

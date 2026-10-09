@@ -7,10 +7,10 @@
 #   改表 = 改 pb_*.txt + 重跑生成器；直接改这里会在下次生成时被覆盖，
 #   且 .txt 与本文件会静默不一致（字段/索引/长度全部对不上）。
 #
-#   生成时间 : 2026-10-08 17:29:30
+#   生成时间 : 2026-10-09 10:05:44
 #   生成器   : database/sqliteCodeGenerator.py v20261005
 #   数据源   : pb_family.txt, pb_person.txt, pb_person_category.txt, pb_place.txt, pb_photo.txt, pb_face.txt, pb_person_centroid.txt, pb_photo_person.txt, pb_scan_job.txt, pb_review_log.txt
-#   表数量   : 10 张，字段 186 个，索引 27 个
+#   表数量   : 10 张，字段 187 个，索引 27 个
 #
 #   上层：processor / engine / api —— **业务层禁止裸 SQL，一律调本文件**（数据库设计.md §1.2）
 #   下层：common/sqliteHandle.py（读写双连接 + PRAGMA + %s->? 占位符转换）
@@ -382,6 +382,10 @@ TABLE_COLUMNS = {
             "sqliteType": 'INTEGER', "length": None, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
             "autoIncrement": False, "default": None, "comment": 'EXIF方向'},
+        {"name": 'rotateDeg', "type": 'SMALLINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": '人工旋转角度 0/90/180/270 仅影响显示 不改原图 不改EXIF (DR-43)'},
         {"name": 'takenAt', "type": 'VARCHAR(32)',
             "sqliteType": 'TEXT', "length": 32, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
@@ -2442,6 +2446,7 @@ def createTableSQL_pb_photo(tableName):
         "width INTEGER,"
         "height INTEGER,"
         "orientation INTEGER,"
+        "rotateDeg INTEGER NOT NULL DEFAULT 0,"
         "takenAt TEXT,"
         "shotYear INTEGER,"
         "shotYearOverride INTEGER,"

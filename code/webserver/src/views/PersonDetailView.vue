@@ -719,8 +719,8 @@ async function setDefaultAvatar(sample) {
                   人工确认
                   <span class="tabular-nums text-ink-weak">{{ formatCount(countConfirmed) }}</span>
                 </h3>
-                <ul v-if="facesConfirmed.length" class="mt-3 flex flex-wrap gap-3">
-                  <li v-for="sample in facesConfirmed" :key="sample.faceCode" class="w-16">
+                <ul v-if="facesConfirmed.length" class="mt-4 flex flex-wrap gap-4">
+                  <li v-for="sample in facesConfirmed" :key="sample.faceCode" class="w-24">
                     <RouterLink
                       :to="photoDetailLink(sample.photoCode, photoSource)"
                       class="block"
@@ -729,11 +729,11 @@ async function setDefaultAvatar(sample) {
                       <img
                         :src="sample.thumbUrl"
                         :alt="`已人工确认的人脸样本${sample.shotYear ? `，${sample.shotYear} 年` : ''}`"
-                        class="h-16 w-16 rounded-full border-2 border-solid border-success object-cover"
+                        class="mx-auto h-16 w-16 rounded-full border-2 border-solid border-success object-cover"
                         :class="isDefaultAvatar(sample) ? 'ring-2 ring-brand' : ''"
                         loading="lazy"
                       />
-                      <span class="mt-1 block text-center text-caption tabular-nums text-ink-weak">
+                      <span class="mt-1.5 block text-center text-body tabular-nums text-ink-weak">
                         {{ similarityText(sample.similarity) }}
                       </span>
                     </RouterLink>
@@ -742,7 +742,7 @@ async function setDefaultAvatar(sample) {
                          用它表示「这是默认」会把两种语义混成一种。 -->
                     <button
                       type="button"
-                      class="mt-0.5 block w-full rounded-btn px-1 py-0.5 text-caption transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                      class="mt-1 block w-full rounded-btn px-2 py-1 text-body transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
                       :class="
                         isDefaultAvatar(sample)
                           ? 'bg-brand-soft font-medium text-brand-ink'
@@ -781,8 +781,8 @@ async function setDefaultAvatar(sample) {
                   自动归属
                   <span class="tabular-nums text-ink-weak">{{ formatCount(countAuto) }}</span>
                 </h3>
-                <ul v-if="facesAuto.length" class="mt-3 flex flex-wrap gap-3">
-                  <li v-for="sample in facesAuto" :key="sample.faceCode" class="w-16">
+                <ul v-if="facesAuto.length" class="mt-4 flex flex-wrap gap-4">
+                  <li v-for="sample in facesAuto" :key="sample.faceCode" class="w-24">
                     <RouterLink
                       :to="photoDetailLink(sample.photoCode, photoSource)"
                       class="block"
@@ -791,20 +791,29 @@ async function setDefaultAvatar(sample) {
                       <img
                         :src="sample.thumbUrl"
                         :alt="`机器自动归属的人脸样本${sample.shotYear ? `，${sample.shotYear} 年` : ''}`"
-                        class="h-16 w-16 rounded-full border-2 border-dashed border-success object-cover"
+                        class="mx-auto h-16 w-16 rounded-full border-2 border-dashed border-success object-cover"
                         :class="isDefaultAvatar(sample) ? 'ring-2 ring-brand' : ''"
                         loading="lazy"
                       />
-                      <span class="mt-1 block text-center text-caption tabular-nums text-ink-weak">
+                      <span class="mt-1.5 block text-center text-body tabular-nums text-ink-weak">
                         {{ similarityText(sample.similarity) }}
                       </span>
                     </RouterLink>
-                    <div class="mt-1 flex flex-wrap gap-1">
+                    <!--
+                      三个动作**竖排、各自占满整列宽**：
+                      横排时三个按钮挤在 56px 宽的列里会折成三行且参差不齐
+                      （「确认」「移除」只差一个字、位置又错开），既难点又容易点错。
+                      竖排后每个按钮都是 84×32 的整块点击目标，字号回到 14px、
+                      图标同步到 14px —— 与「移除」的红 ✕ 对称，见下。
+                      ⚠️ `!ml-0` 抵消 EP 的 `.el-button+.el-button{margin-left:12px}`
+                         —— 竖排下第二个/第三个会被推右 12px 而溢出这一列。
+                    -->
+                    <div class="mt-1.5 flex flex-col gap-1.5">
                       <!-- 机器认的也能当默认头像（DR-41）：头像只管展示，
                            与「这张脸是不是他」是两件事，不必先确认再选 -->
                       <el-button
                         v-if="!isDefaultAvatar(sample)"
-                        size="small"
+                        class="!ml-0 !w-full"
                         text
                         :loading="settingFaceCode === sample.faceCode"
                         :aria-label="`把这张脸设为默认头像（${sample.shotYear || '未知年份'}）`"
@@ -814,28 +823,32 @@ async function setDefaultAvatar(sample) {
                       </el-button>
                       <span
                         v-else
-                        class="inline-flex items-center gap-0.5 px-1 text-caption text-brand-ink"
+                        class="flex w-full items-center justify-center gap-1 px-1 text-body text-brand-ink"
                       >
                         <span aria-hidden="true">★</span>默认
                       </span>
+                      <!-- 确认 = 正动作，与「移除」对称：绿色对号 + 图标色沿用
+                           `faceStateOf` 的 success 语义（人工确认那一档），
+                           不是另起一套配色 -->
                       <el-button
-                        size="small"
+                        class="!ml-0 !w-full"
+                        type="success"
                         text
                         :loading="confirmingFaceCode === sample.faceCode"
                         :aria-label="`确认这张脸确实是他（${sample.shotYear || '未知年份'}）`"
                         @click="confirmAutoSample(sample)"
                       >
-                        确认
+                        <CircleCheck class="mr-1 h-3.5 w-3.5" aria-hidden="true" />确认
                       </el-button>
                       <el-button
-                        size="small"
+                        class="!ml-0 !w-full"
                         text
                         type="danger"
                         :loading="removingFaceCode === sample.faceCode"
                         :aria-label="`把这张脸的归属移除（${sample.shotYear || '未知年份'}）`"
                         @click="removeAutoSample(sample)"
                       >
-                        <X class="mr-1 h-3 w-3" aria-hidden="true" />移除
+                        <X class="mr-1 h-3.5 w-3.5" aria-hidden="true" />移除
                       </el-button>
                     </div>
                   </li>

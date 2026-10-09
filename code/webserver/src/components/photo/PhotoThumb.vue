@@ -106,6 +106,23 @@ const src = computed(() => {
   return thumbUrl(code, props.thumbSize)
 })
 
+/**
+ * DR-43：人工旋转角度（0/90/180/270）。
+ *
+ * 这里**只转 <img>**，因为格子恒为正方形（`aspect-square`，实测全项目没有一处
+ * 传 `ratio="fourThree"`）—— 正方形转 90° 还是正方形，**没有空隙**，不需要
+ * 外层换比例，也不需要 scale 补边。
+ * ⚠️ **角标（👤/⚠/📷）与年份底衬、失败占位都不许转** —— 它们与照片内容无关，
+ *    转了只会变成斜的。所以 transform 加在 img 上，不加在 frame 上。
+ * ⚠️ `object-cover` 是「先按正方形裁、再整体旋转」，与「先旋转、再按正方形裁」
+ *    取到的区域**不完全相同**（正方形旋转不变，所以不会有空隙，只是取景范围
+ *    略有差别）。缩略图尺度上可接受 —— **不要为此去改缓存或做双份生成**。
+ */
+const rotateDeg = computed(() => ((Number(props.photo?.rotateDeg) || 0) % 360 + 360) % 360)
+const imgStyle = computed(() =>
+  rotateDeg.value ? { transform: `rotate(${rotateDeg.value}deg)` } : {},
+)
+
 const faceCount = computed(() => Number(props.photo?.faceCount) || 0)
 const hasGps = computed(() => Boolean(props.photo?.hasGps))
 const isDuplicate = computed(() => Number(props.photo?.isDuplicate) === 1)
@@ -173,6 +190,7 @@ function onError() {
         :src="src"
         :alt="altText"
         class="block h-full w-full object-cover"
+        :style="imgStyle"
         decoding="async"
         draggable="false"
         @load="onLoad"

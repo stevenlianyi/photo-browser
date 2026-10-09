@@ -13,19 +13,45 @@
   ③ **「✗ 不是他」一次点击可达**（P0-6）：人脸框悬停即出，不绕到人物详情。
   ④ **不可逆操作复述 + 二次确认**（P0-3）：软删除、标记陌生人。
 
-  左右翻页（DR-31，A 档：纯前端）
+  左右翻页（DR-31）
   ----------------------------------------
   ⑤ `←` `→` 与两侧浮动箭头，**默认**翻的是 `store.photos.items` 里相邻的那一张 ——
-     入口仍然只有 `/photos/:photoCode`（可分享、可刷新），**没有新接口**。
+     入口仍然只有 `/photos/:photoCode`（可分享、可刷新）。
      分母用**已加载条数**而不是后端 `total`；到头**不循环**。
      ⚠️ 从人物 / 地点详情进来时，入口会带 `?scope=`，翻的是**那一批照片**
      （按需分页，往下翻自动续下一页），而不是全库 —— 否则在「白瑞琴的照片」里
      翻两张就翻到陌生人的照片上，界面上没有任何东西提示这件事发生了。
      约定见 `utils/photoReturn.js` 顶部；没有 `scope` 的入口（待确认 / 概览 /
      重复对比）行为一字不变，那几种情况仍走「不在列表里就禁用 + 给说明」。
+     ⚠️ **首屏带锚点**（服务端唯一为此新增的入参 `anchorPhotoCode`）：这一批按
+     `takenAt DESC` 分页，而点进来的常常是一张**老照片**（某个人的 2000 多张里
+     排在第 40 页往后）。只拉第 1 页的话它不在列表里 ⇒ 两个箭头全禁用、键盘也
+     不响应 —— 症状是「从人物库进来之后左右翻页坏了」而且不报错。
+     服务端算出它所在的那一页，窗口从那一页向两边长（`append` / `prepend`）。
+
+  侧栏「出现的人」（§4.4）
+  ----------------------------------------
+  ⑥ 每行三个出口：**详情**（去看 TA 的档案）/ **确认**（人工确认）/ **改判**
+     （认错了）。「确认」把这个人在这张照片里**机器认的**（`state=disputed`）
+     脸一次确认为人工归属 —— 这是浏览时最常发生的一步，原来在这张照片上
+     没有入口（pending 队列里没有它们，人物详情要一页页翻才找得到）。
+     ⚠️ 只在还有机器认的脸时出现：全都确认过时它点了没有任何变化，那是假入口。
+     ⚠️ 走 `/review/fix` 的 `assign`（与改判同一端点、同一套重算），并且**二次确认**：
+     确认会立即参与质心重算，认错了就是把质心往偏里带（见 P-05 横幅那句话）。
      ⚠️ **改判进行中禁翻**：改判会改掉这张脸的人脸框三态与侧栏「出现的人」，
-     请求没回来就跳走 ⇒ 回来时状态陈旧，**而且不报错**。所以 busy 覆盖
-     改判 / 确认 / 标记重复 / 软删除 / 翻页，成功后先 `reloadPhoto()` 再解禁。
+       请求没回来就跳走 ⇒ 回来时状态陈旧，**而且不报错**。所以 busy 覆盖
+       改判 / 确认 / 忽略 / 标记重复 / 软删除 / 旋转 / 翻页，成功后先 `reloadPhoto()` 再解禁。
+
+     侧栏「未归属的人脸」（§4.4）
+     ----------------------------------------
+     ⑦ 每行两个出口：**改判**（认给某人 —— 与「出现的人」那个改判是同一个浮层，
+        候选 / 全库搜索 / 新建人物都在里面）/ **忽略**（= 标记陌生人，永久排除）。
+        原先并列的「确认归属」已删除：它与改判是同一件事的两套实现，能力却更少
+        （不能新建人物），详见脚本里那段说明。
+        每行还带 **#编号**，与图上人脸框标签上的编号**同源**（`pendingOrdinal`）——
+        否则「第 2 行」在图上找不到是哪一张，清单只剩「知道有几张」的信息量。
+        ⚠️ 忽略是四态里唯一**不可逆**的一档（陌生人不再进任何队列），
+        所以必须二次确认（P0-3），且只做**单张**：不提供「这张照片全忽略」。
 
   关于 Range
   ---------
@@ -43,10 +69,14 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   ArrowLeft,
+  Check,
+  CircleSlash,
   Copy,
   Download,
   Maximize2,
   Pencil,
+  RotateCcw,
+  RotateCw,
   Search,
   Trash2,
   Undo2,
@@ -67,11 +97,14 @@ import { listPlacePhotos, placeDisplayName, placeRawName } from '@/api/place'
 import {
   getDeleteImpact,
   markDuplicate,
+  resetRotate,
+  rotatePhoto,
   softDelete,
   unmarkDuplicate,
 } from '@/api/photoAction'
-import { faceUrl, originalUrl, thumbUrl } from '@/api/static'
-import { similarityText } from '@/utils/faceState'
+import { originalUrl, thumbUrl } from '@/api/static'
+// 「确认」= 人工确认（与改判同一端点，action=assign）—— 见 confirmPersonFaces
+import { fixFace } from '@/api/review'
 // 「返回」与「翻页范围」的约定（入口声明来源 / 详情页回退）——见文件顶部说明
 import {
   goBackOr,
@@ -131,6 +164,32 @@ const faces = computed(() => photo.value?.faces || [])
 const pendingFaces = computed(() => faces.value.filter((f) => f.state === 'pending'))
 
 /**
+ * 未归属人脸的**编号**（1 起）：`faceCode -> 序号`。
+ *
+ * 为什么必须有一份编号
+ * -------------------
+ *   侧栏「还有 N 张未归属的人脸」逐行列出这些脸，图上也有 N 个点线框，
+ *   但两边**没有任何共同的标识** —— 缩略图只有 24px，合影里几张侧脸几乎
+ *   长得一样，用户没法回答「我说的第 2 行是图上哪一张」。于是这个清单
+ *   只剩「知道有 2 张」的信息量，无法**就地下手**（要改判它得先在图上找到它）。
+ *
+ * 为什么编号只给 pending
+ * --------------------
+ *   disputed / confirmed 的脸在图上已经带着**人名**，侧栏「出现的人」也按人名
+ *   成组，靠名字就能对照；给它们再编一套号只是往框上堆字（框本来就紧贴脸）。
+ *
+ * ⚠️ 序号**只依赖 `faces[]` 的数组顺序**（服务端给的顺序，同一张照片每次一样），
+ *    图上标签与侧栏列表取的是同一个 Map ⇒ 两边不可能错位。
+ *    这也是为什么不在模板里用 `index`：`FaceBox` 渲染的是**全部**脸（含已归属的），
+ *    v-for 的 index 是「第几张脸」而不是「第几张待确认」，直接拿来当编号会跳号。
+ */
+const pendingOrdinal = computed(() => {
+  const map = new Map()
+  pendingFaces.value.forEach((face, i) => map.set(face.faceCode, i + 1))
+  return map
+})
+
+/**
  * 这张脸的候选。
  * 能在已加载的待确认队列里对上就**用真候选**（带相似度）；对不上就退回
  * 「全部人物按姓名列出来」—— 因为任意一张脸都没有现成的相似度可给，
@@ -149,15 +208,107 @@ function candidatesOf(face) {
   )
 }
 
-/** 主图容器比例必须等于**显示**方向的比例，否则人脸框的百分比会整体偏移 */
+/** 当前照片的人工旋转角度（DR-43）：0/90/180/270，0 = 未修正 */
+const rotateDeg = computed(() => Number(photo.value?.rotateDeg) || 0)
+/** 旋转请求在飞（成功前禁第二下 —— 连点两次会发两个请求、后到的赢，角度就错了） */
+const rotateSaving = ref(false)
+
+/**
+ * 主图**外层**比例必须等于**显示**方向的比例（= 旋转后），否则人脸框会整体偏移。
+ * `displaySize(photo, rotateDeg)` 是唯一的几何入口（DR-43）：
+ * 它内部按 ①EXIF orientation ②人工旋转 依次转置宽高。
+ */
 const frameStyle = computed(() => {
-  const size = displaySize(photo.value)
+  const size = displaySize(photo.value, rotateDeg.value)
   if (!size.width || !size.height) return { width: '100%' }
   return {
     aspectRatio: `${size.width} / ${size.height}`,
     width: `min(100%, calc(70vh * ${size.width} / ${size.height}))`,
   }
 })
+
+/**
+ * 主图**内层**（真正被旋转的那一层）样式 —— DR-43 最关键的一处结构。
+ *
+ * ⚠️ 为什么必须两层（只给 <img> 加 transform 是错的）
+ * ---------------------------------------------------
+ *   人脸框的 `pb_face.bbox` 是**归一化 x,y,w,h**（`faceState.js` 的 parseBbox ->
+ *   faceBoxStyle 转成百分比），`FaceBox` **绝对定位**叠在图上，百分比基座是
+ *   它的 offsetParent。如果只转 <img>、FaceBox 留在外面 ⇒ 百分比基座没变
+ *   ⇒ **框全部错位**（在 90/270 上错得最狠）。
+ *   所以这里把 **img 与全部 FaceBox 一起**放进 inner，只转 inner：
+ *     outer（吃旋转后比例，撑开布局）
+ *       └ inner（吃未旋转比例，居中 + rotate）
+ *            ├ <img>          ← 自己不单独加 transform
+ *            └ <FaceBox> × N  ← 跟着一起转，百分比基座恒为未旋转的画布
+ *   ⇒ bbox 语义**一个字都不用改**，一行坐标数学都不写。
+ *
+ * ⚠️ 90/270 时 inner 要比 outer **宽**（用未旋转的横边去覆盖旋转后的竖边）：
+ *   inner.width = outer 宽度 × (未旋转宽/高)，配合 aspect-ratio 得到
+ *   inner 高 = outer 宽度，转 90° 后包围盒正好 = outer 的（宽, 高）。
+ *   只写 `width: 100%` 的话旋转后会**两边留空**（露出卡片底色）。
+ */
+const innerStyle = computed(() => {
+  const deg = rotateDeg.value
+  const base = displaySize(photo.value)          // 未旋转（含 EXIF 折算）
+  if (!base.width || !base.height) return {}
+  const style = {
+    aspectRatio: `${base.width} / ${base.height}`,
+    transform: `translate(-50%, -50%) rotate(${deg}deg)`,
+  }
+  style.width = deg === 90 || deg === 270
+    ? `calc(100% * ${base.width / base.height})`
+    : '100%'
+  return style
+})
+
+/** 旋转后的宽高（「尺寸」那一行必须显示**旋转后**的值，与容器同源） */
+const shownSize = computed(() => displaySize(photo.value, rotateDeg.value))
+
+/**
+ * 左转 / 右转 90°：角度累加 mod 360，**乐观更新 + 失败回滚**。
+ *
+ * ⚠️ 为什么不做单独的 180° 按钮：连点两次左转就是 180°，多一个按钮只是
+ *    让「到底转了哪边」多一种可能。
+ * ⚠️ 成功后写回 store 而**不整页 reload**：详情页的图/尺寸/人脸框都读
+ *    `photos.current`，`setRotateDeg` 按 photoCode 命中才改 —— 这同时保证了
+ *    **翻页不串角度**（翻到下一张时读的是那一张自己的值）。
+ */
+async function doRotate(delta) {
+  if (rotateSaving.value || busy.value) return
+  const previous = rotateDeg.value
+  const next = ((previous + delta) % 360 + 360) % 360
+  if (next === previous) return
+  rotateSaving.value = true
+  // 乐观更新：先让画面转起来（失败再回滚），旋转是纯显示、没有副作用可担心
+  photos.setRotateDeg(photoCode.value, next)
+  try {
+    const data = await rotatePhoto(photoCode.value, next)
+    photos.setRotateDeg(photoCode.value, Number(data?.rotateDeg ?? next))
+  } catch (error) {
+    photos.setRotateDeg(photoCode.value, previous)
+    ElMessage.error(`旋转失败：${error?.message || '未知错误'}`)
+  } finally {
+    rotateSaving.value = false
+  }
+}
+
+/** 重置方向（只在 rotateDeg !== 0 时出现）：写回 0，恢复扫描件自己的方向 */
+async function doResetRotate() {
+  if (rotateSaving.value || busy.value || rotateDeg.value === 0) return
+  const previous = rotateDeg.value
+  rotateSaving.value = true
+  photos.setRotateDeg(photoCode.value, 0)
+  try {
+    await resetRotate(photoCode.value)
+    photos.setRotateDeg(photoCode.value, 0)
+  } catch (error) {
+    photos.setRotateDeg(photoCode.value, previous)
+    ElMessage.error(`重置方向失败：${error?.message || '未知错误'}`)
+  } finally {
+    rotateSaving.value = false
+  }
+}
 
 const fileLabel = computed(() => baseName(photo.value?.relPath) || photoCode.value)
 
@@ -221,6 +372,59 @@ function openFixForPerson(person) {
   fixVisible.value = true
 }
 
+/**
+ * 本照片里这个人的**机器自动归属、还没人工确认**的脸（四态里的 `disputed`）。
+ *
+ * ⚠️ 只有这些脸才让「确认」出现：全都确认过时那个按钮点了也不会有任何变化，
+ *    那是一个**假入口**（用户点两次才发现它什么都没干）。
+ */
+function autoFacesOf(person) {
+  return faces.value.filter(
+    (face) => face.personCode === person.personCode && face.state === 'disputed',
+  )
+}
+
+/** 正在确认的那个人（按钮 loading + 挡翻页，见 busy） */
+const confirmingPerson = ref('')
+
+/**
+ * 「确认」= **人工确认**：把这个人在这张照片里机器认的脸一次性确认为人工归属。
+ *
+ * 为什么这一格必须有（设计稿 §4.4「出现的人」）
+ * ----------------------------------------
+ *   这一栏原来只有「详情」（去看 TA 的档案）与「改判」（认错了）。而**最常发生的
+ *   那一步 —— 「机器认得对，我确认一下」 —— 在这张照片上根本没有入口**：
+ *     · 待确认队列里没有它（pending 是**没有归属**的脸，disputed 已经挂在人上了）；
+ *     · 人物详情页的人脸样本要一页页翻才能对上这一张。
+ *   ⇒ 结果只能「放着不管」，而「机器认的」与「人工确认的」差别是
+ *     **质心要不要算它**（确认完立即重算）：放着越久，识别越按没核实的样本漂。
+ *
+ * ⚠️ 走 `/review/fix` 的 `assign`（isConfirmed=1 + 立即重算质心 + 落日志），
+ *    与「改判」同一个端点、同一套重算 —— 另写一套是漂移的来源。
+ * ⚠️ 二次确认（popconfirm）：它**立刻参与质心重算**，认错了就是把质心往偏里带
+ *    （P-05 横幅那句话），所以先复述「确认谁、几张」，再动手。
+ */
+async function confirmPersonFaces(person) {
+  const targets = autoFacesOf(person)
+  if (!targets.length) return
+  confirmingPerson.value = person.personCode
+  try {
+    const data = await fixFace({
+      faceCodes: targets.map((face) => face.faceCode),
+      action: 'assign',
+      personCode: person.personCode,
+    })
+    review.applyCounts(data)
+    // 与改判同序：**先刷当前图，再解禁** —— 否则人脸框仍是旧的三态（实线/虚线）
+    await reloadPhoto()
+    ElMessage.success(
+      `已人工确认：${person.displayName} 在这张照片里的 ${targets.length} 张脸`,
+    )
+  } finally {
+    confirmingPerson.value = ''
+  }
+}
+
 async function submitFix({ action, faceCodes, personCode }) {
   fixLoading.value = true
   try {
@@ -254,90 +458,52 @@ async function createPersonAndAssign({ form, faceCodes }, onDone) {
   }
 }
 
-// ---- 确认归属（未归属的脸）----
-const confirmVisible = ref(false)
-const confirmFace = ref(null)
-const confirmCandidates = ref([])
-const confirmKeyword = ref('')
-const confirmLoading = ref(false)
-/** 与改判浮层同一个毛病：候选池只有 topN 条，搜名字几乎必然搜不到 → 补全库搜索结果 */
-const confirmHits = ref([])
-/** 本次关键词是否已经问过服务端（决定列表是「搜索结果」还是「候选的本地筛选」） */
-const confirmSearched = ref(false)
-let confirmTimer = null
-let confirmSeq = 0
-
-watch(confirmKeyword, (value) => {
-  clearTimeout(confirmTimer)
-  confirmSeq += 1
-  const text = String(value || '').trim()
-  if (!text) {
-    confirmHits.value = []
-    confirmSearched.value = false
-    return
-  }
-  confirmTimer = setTimeout(async () => {
-    const seq = ++confirmSeq
-    try {
-      const list = await review.searchPersons(text)
-      if (seq !== confirmSeq) return
-      confirmHits.value = list
-    } catch {
-      if (seq !== confirmSeq) return
-      confirmHits.value = []
-    }
-    confirmSearched.value = true
-  }, 200)
-})
+// ---- 忽略 = 标记陌生人（未归属的脸）----
+/** 正在忽略的那一张（按钮级 loading，避免一排一起转圈） */
+const strangerFaceCode = ref('')
 
 /**
- * 列表内容：**有关键词 = 纯搜索结果；没关键词 = 相似度候选**。
- * ⚠️ 不能把候选与搜索结果混排（那是「输入了字却还是一张按相似度排的表」，
- *    搜索框看着像坏了）；命中的人如果本来在候选里，借用他的 similarity。
+ * 「忽略」= 标记陌生人：这张脸**永久排除**，不再出现在任何队列里。
+ *
+ * 为什么未归属那行必须有这个出口
+ * ----------------------------
+ *   合影里的路人、背景里被误检的一张脸，既不属于库里任何一个人，也不该
+ *   一直占着待确认队列 —— 原来这两条出路（改判 / 忽略）一条都没有：
+ *   只能去「待确认」页逐条否决，或者干脆放着不管，而队列是**每天要过的**。
+ *
+ * ⚠️ 走 `/review/fix` 的 `stranger`（与改判同一个端点、同一条日志），
+ *    它是四态里唯一**不可逆**的一档（`faceStateOf` 里陌生人不进任何队列、
+ *    也不参与聚类），所以按钮上必须挂二次确认 —— 见模板里的 el-popconfirm。
+ * ⚠️ **只做单张**：不做「这张照片全忽略」。这一栏里几张脸往往是不同的陌生人，
+ *    一次点掉整张照片会把「其实是他本人、只是还没认出来」的那张也排除掉。
+ * ⚠️ 与改判同序：**先 reloadPhoto() 刷当前图，再解禁**（否则人脸框还是旧态）。
  */
-const confirmList = computed(() => {
-  const text = String(confirmKeyword.value || '').trim()
-  if (!text) return confirmCandidates.value
-  // 还没拿到服务端结果（或这次搜了 0 个）之前，先在候选池里本地筛一次，
-  // 别让搜索框看起来是死的
-  if (!confirmSearched.value) {
-    const low = text.toLowerCase()
-    return confirmCandidates.value.filter((c) =>
-      String(c.displayName || c.personCode || '').toLowerCase().includes(low),
-    )
-  }
-  const byCode = new Map(confirmCandidates.value.map((c) => [c.personCode, c]))
-  return confirmHits.value
-    .filter((one) => one?.personCode)
-    .map((one) => {
-      const hit = byCode.get(one.personCode)
-      return hit ? { ...one, similarity: hit.similarity } : { similarity: null, ...one }
-    })
-})
-
-function openConfirm(face) {
-  clearTimeout(confirmTimer)
-  confirmHits.value = []
-  confirmSearched.value = false
-  confirmFace.value = face
-  confirmCandidates.value = candidatesOf(face)
-  confirmKeyword.value = ''
-  confirmVisible.value = true
-}
-
-async function doConfirm(candidate) {
-  if (!confirmFace.value || !candidate?.personCode) return
-  confirmLoading.value = true
+async function ignoreFace(face) {
+  if (!face?.faceCode) return
+  strangerFaceCode.value = face.faceCode
   try {
-    const data = await review.fix('assign', [confirmFace.value.faceCode], candidate.personCode)
+    const data = await review.fix('stranger', [face.faceCode])
     review.applyCounts(data)
     await reloadPhoto()
-    confirmVisible.value = false
-    ElMessage.success(`已确认为「${candidate.displayName}」，照片数与角标已更新`)
+    ElMessage.success('已忽略：这张脸标记为陌生人，不再出现在任何队列里')
   } finally {
-    confirmLoading.value = false
+    strangerFaceCode.value = ''
   }
 }
+
+// ============================================================
+// 为什么这里**没有**「确认归属」浮层（原先有，已整段移除）
+// ============================================================
+// 它和 `FixFaceDialog` 的 `assign` 模式是同一件事的两套实现：同一个端点
+// （`/review/fix` action=assign，都会写 isConfirmed=1 + 立即重算质心 + 落日志），
+// 同样要用户「搜人名字 → 选一个人」。
+//
+// 两套实现的直接后果不是代码冗余，而是**能力漂移**：改判浮层里能「新建人物并归属」
+// （库里还没有这个人时的唯一出路），而确认归属浮层里没有 —— 于是「未归属那行点哪个
+// 按钮」竟然决定了能不能建人；反过来，确认归属的搜索框/空态文案又是第三份。
+//
+// ⇒ 未归属的脸（pending）与机器认的脸（disputed）现在走**同一个**浮层：
+//   侧栏那行的「改判」→ FixFaceDialog(assign)，候选 + 全库搜索 + 新建人物都在里面。
 
 // ---- 标记重复（选一张作为主照片）----
 const dupVisible = ref(false)
@@ -455,7 +621,16 @@ async function onShotYearFixed(data) {
 // ---- 缩放查看（CSS 缩放 + 原生滚动，不再发请求）----
 const zoomVisible = ref(false)
 const zoomPercent = ref(100)
-const zoomStyle = computed(() => ({ width: `${zoomPercent.value}%` }))
+// DR-43：放大弹窗里**没有**人脸框（裸 <img>），所以这里可以只转 img 自己 ——
+// 与主图区那套「外层吃旋转后比例 + 内层包住 img 与脸框」不同，两者不能互相抄：
+// 主图区若照这里只转 img，人脸框的百分比基座就错了（框全错位）。
+// ⚠️ 这里转的是**同一张原图**（同一份字节），所以下载原图仍是原始方向 ——
+//    弹窗看到的方向 = 用户在界面上选的方向，与原图字节无关。
+const zoomStyle = computed(() => ({
+  width: `${zoomPercent.value}%`,
+  transform: `rotate(${rotateDeg.value}deg)`,
+  transformOrigin: 'center center',
+}))
 
 // ============================================================
 // 左右翻页（DR-31）
@@ -471,10 +646,27 @@ const SCOPE_PREFETCH_MARGIN = 12
 const scopeSpec = computed(() => parseScope(route.query.scope))
 const scopeItems = ref([])
 const scopeTotal = ref(0)
-const scopePage = ref(0)
+/**
+ * 已加载窗口的**第一页 / 最后一页**（页码，1 基）。
+ *
+ * ⚠️ 为什么是「窗口」而不是「从第 1 页开始的累计」（DR-31 补，本页最容易再漏的一条）
+ *   这一批照片由服务端按 `takenAt DESC` 分页，而入口点进来的是**某一张具体的照片**：
+ *   从人物详情的时间轴点开的很可能是一张**老照片**（2005 年），它在这个人的
+ *   2686 张里排在第 40 页往后。旧实现只拉「第 1 页起」，于是当前照片
+ *   **不在已加载列表里** ⇒ `currentIndex = -1` ⇒ 两个箭头全禁用、键盘也不响应，
+ *   而界面上只有一行小字 —— 用户看到的就是「从人物库进来之后左右翻页坏了」。
+ *   ⇒ 首屏用 `anchorPhotoCode` 让服务端**直接给「它所在的那一页」**（'anchor'），
+ *     窗口从那一页向两边按需长出去（'append' / 'prepend'）。
+ */
+const scopeStartPage = ref(1)
+const scopeEndPage = ref(0)
 const scopeLoading = ref(false)
 /** 这一批没取到（接口失败）：翻页退回全库列表，而不是留一个全禁用的空列表 */
 const scopeFailed = ref(false)
+
+/** 这一批的总页数（锚点定位拿到 total 之后才知道） */
+const scopePageCount = computed(() =>
+  Math.max(1, Math.ceil(scopeTotal.value / SCOPE_PAGE_SIZE)))
 
 /** 翻页用的列表：有作用域就用那一批，否则用全库照片流 */
 const pagerItems = computed(() =>
@@ -484,25 +676,44 @@ const pagerItems = computed(() =>
 /**
  * 作用域列表按需分页：一个人可能有几千张照片，一次拉完既慢，也把「翻页」
  * 变成一次全表扫描。翻到接近末尾再补一页（见 ensureScopeWindow）。
+ *
+ * @param page 页码（1 基）
+ * @param mode `anchor` 首屏（带锚点，服务端定位到当前照片所在页）
+ *             `append` 往后补一页 / `prepend` 往前补一页
  */
-async function loadScopePage(page) {
+async function loadScopePage(page, mode = 'append') {
   const spec = scopeSpec.value
   if (!spec || scopeLoading.value) return
   scopeLoading.value = true
   try {
     const params = { page, size: SCOPE_PAGE_SIZE, orderBy: 'takenAt', desc: 1 }
+    // ⚠️ 锚点只用于**首屏**：翻页时列表里已经有它了，再传是白算一次
+    if (mode === 'anchor') params.anchorPhotoCode = photoCode.value
     const data = spec.type === 'person'
       ? await listPhotos({ ...params, personCode: spec.code })
       : await listPlacePhotos(spec.code, { ...params, placeCodes: spec.extra || undefined })
     const list = data?.items ?? []
-    scopeItems.value = page <= 1 ? list : [...scopeItems.value, ...list]
+    // 服务端算出来的页（锚点定位时由它给出；不适用时就是入参 page）
+    const got = Number(data?.page) || page
+    if (mode === 'append' && scopeItems.value.length) {
+      scopeItems.value = [...scopeItems.value, ...list]
+      scopeEndPage.value = Math.max(scopeEndPage.value, got)
+    } else if (mode === 'prepend' && scopeItems.value.length) {
+      scopeItems.value = [...list, ...scopeItems.value]
+      scopeStartPage.value = Math.min(scopeStartPage.value, got)
+    } else {
+      scopeItems.value = list
+      scopeStartPage.value = got
+      scopeEndPage.value = got
+    }
     scopeTotal.value = Number(data?.total) || scopeItems.value.length
-    scopePage.value = Number(data?.page) || page
   } catch (e) {
     // ⚠️ 失败**不能静默**：列表空着时两个箭头全禁用，看起来就是「坏了」。
     //    标记失败 → 翻页退回全库列表，并如实说明。
     scopeFailed.value = true
     scopeItems.value = []
+    scopeStartPage.value = 1
+    scopeEndPage.value = 0
     ElMessage.warning('这一批照片没取到，左右翻页已退回全库列表')
   } finally {
     scopeLoading.value = false
@@ -517,27 +728,31 @@ watch(
   async (key) => {
     scopeItems.value = []
     scopeTotal.value = 0
-    scopePage.value = 0
+    scopeStartPage.value = 1
+    scopeEndPage.value = 0
     scopeFailed.value = false
     if (!key) return
-    await loadScopePage(1)
-    // 从深链直接进来时可能已经在第 50 张：第一批到手就顺势补下一页
+    // ⚠️ 首屏必须带锚点：不带的话「当前照片不在第 1 页」时这里是死路 ——
+    //    后面所有补页逻辑都要求列表非空（见 ensureScopeWindow）。
+    await loadScopePage(1, 'anchor')
+    // 锚点页到手就顺势补下一页，避免第一下按 → 时才等请求
     ensureScopeWindow()
   },
   { immediate: true },
 )
 
 /**
- * 翻到接近末尾时补下一页。
- * ⚠️ 只在**已经进入这一批**（列表非空）时补：否则一个不在列表里的 photoCode
- *    会触发一次没人要的请求。
+ * 翻到接近已加载窗口末尾时补下一页。
+ * ⚠️ 只在**已经进入这一批**（列表非空 + 当前照片在列表里）时补：
+ *    否则一个不在列表里的 photoCode 会触发一次没人要的请求
+ *    （锚点定位失败时就是这种情形 —— 那一页确实没有它，补页也找不到）。
  */
 async function ensureScopeWindow() {
   if (!scopeSpec.value || scopeFailed.value || scopeLoading.value) return
-  if (!scopeItems.value.length) return
-  if (scopeItems.value.length >= scopeTotal.value) return
+  if (!scopeItems.value.length || currentIndex.value < 0) return
+  if (scopeEndPage.value >= scopePageCount.value) return
   if (scopeItems.value.length - 1 - currentIndex.value > SCOPE_PREFETCH_MARGIN) return
-  await loadScopePage(scopePage.value + 1)
+  await loadScopePage(scopeEndPage.value + 1, 'append')
 }
 
 /**
@@ -552,11 +767,22 @@ const currentIndex = computed(() =>
   pagerItems.value.findIndex((one) => one.photoCode === photoCode.value),
 )
 
-const canPrev = computed(() => currentIndex.value > 0)
+/**
+ * 有上一张吗。
+ * ⚠️ 作用域模式下标在窗口首条（index=0）但**窗口左边界之前还有页**时，
+ *    仍算「有上一张」—— 由 gotoOffset() 去 prepend 一页。
+ */
+const canPrev = computed(() => {
+  if (currentIndex.value > 0) return true
+  return currentIndex.value === 0
+    && Boolean(scopeSpec.value)
+    && !scopeFailed.value
+    && scopeStartPage.value > 1
+})
 
 /**
  * 有下一张吗。
- * ⚠️ 作用域模式下列表是**按需分页**的：下标到了末尾不代表真到头，可能只是
+ * ⚠️ 作用域模式下列表是**按需分页**的：下标到了窗口末尾不代表真到头，可能只是
  *    下一页还没取 —— 此时仍算「有下一张」，由 gotoOffset() 去补一页。
  */
 const canNext = computed(() => {
@@ -564,15 +790,34 @@ const canNext = computed(() => {
   if (currentIndex.value < pagerItems.value.length - 1) return true
   return Boolean(scopeSpec.value)
     && !scopeFailed.value
-    && scopeItems.value.length < scopeTotal.value
+    && scopeEndPage.value < scopePageCount.value
 })
 
 /**
- * 分母是**已加载条数**而不是后端 `total`（DR-31 纪律③）。
- * 只加载 60 张而 total=2137 时显示「12 / 2137」，用户会以为后面还能翻 2125 张，
- * 结果翻两下就到头 —— 那不叫「到头了」，那叫「被骗了」。
+ * 分子：**在这一批里的绝对序号**（scope 模式）/ 已加载列表里的序号（全库模式）。
+ *
+ * ⚠️ 为什么 scope 模式要换算成绝对序号（而不是 `currentIndex + 1`）
+ *   锚点定位之后窗口可能从第 40 页开始，此时「1 / 60」会被读成「这是这批的
+ *   第 1 张」—— 那是一句假话，用户对「我在哪」的判断会整体错位。
  */
-const pagerTotal = computed(() => pagerItems.value.length)
+const pagerIndex = computed(() => {
+  if (currentIndex.value < 0) return 0
+  if (scopeSpec.value && !scopeFailed.value) {
+    return (scopeStartPage.value - 1) * SCOPE_PAGE_SIZE + currentIndex.value + 1
+  }
+  return currentIndex.value + 1
+})
+
+/**
+ * 分母（DR-31 纪律③）。
+ * · 全库模式（照片流 / 待确认…）：**已加载条数**。只加载 60 张而 total=2137 时
+ *   写「12 / 2137」，用户会以为后面还能翻 2125 张，翻两下就到头 ——
+ *   那不叫「到头了」，那叫「被骗了」。
+ * · scope 模式：**这一批的真实总数**（可以按需加载到任意位置，所以它不骗人），
+ *   与上面换算过的绝对序号配成「2341 / 2686」。
+ */
+const pagerTotal = computed(() =>
+  (scopeSpec.value && !scopeFailed.value ? scopeTotal.value : pagerItems.value.length))
 
 /** 补充提示：不在列表里 / 只加载了一部分（到上限时说实话，不写「可继续加载」） */
 const pagerHint = computed(() => {
@@ -585,10 +830,14 @@ const pagerHint = computed(() => {
     return '这张照片不在当前已加载的列表里，无法连续翻页（可回照片流或待确认队列重新进入）'
   }
   const loaded = pagerItems.value.length
-  // 作用域模式：这一批有它自己的 total，滚动不参与，往下翻会自动续下一页
+  // 作用域模式：说**已载入哪一段**，而不是「已加载 N / total」——
+  // 窗口可能从锚点那一页开始（比如第 40 页），此时「60 / 2686」会被读成
+  // 「后面还有 2626 张没载」，其实前面的 2340 张也没载。往下翻会自动续下一页。
   if (scopeSpec.value && !scopeFailed.value) {
-    if (loaded >= scopeTotal.value) return ''
-    return `已加载 ${loaded} / ${scopeTotal.value}，往下翻会自动继续加载`
+    const from = (scopeStartPage.value - 1) * SCOPE_PAGE_SIZE + 1
+    const to = Math.min(scopeTotal.value, scopeEndPage.value * SCOPE_PAGE_SIZE)
+    if (from <= 1 && to >= scopeTotal.value) return ''
+    return `这批共 ${scopeTotal.value} 张，已载入第 ${from}–${to} 张（左右翻页会自动续）`
   }
   if (loaded >= photos.total) return ''
   return photos.appendCapped
@@ -607,7 +856,7 @@ const navigating = ref(false)
  *   ⇒ 人脸框描边（实线/虚线/点线三态）与侧栏「出现的人」列表**都必须重画**。
  *   改判请求还没回来就按 → 跳走，回来时看到的是**陈旧状态，而且不报错** ——
  *   症状是「我明明改判了，人脸框还是绿的」。
- *   ⇒ 改判 / 确认归属 / 标记重复 / 软删除 / 翻页期间一律 busy：
+ *   ⇒ 改判 / 忽略（陌生人）/ 标记重复 / 软删除 / 旋转 / 翻页期间一律 busy：
  *     两个箭头禁用 + 键盘不响应；改判成功后**先 reloadPhoto() 刷当前图，再解禁**
  *     （submitFix 里已经是这个顺序，不要把它挪到 reloadPhoto 之前）。
  */
@@ -615,9 +864,16 @@ const busy = computed(
   () =>
     navigating.value ||
     fixLoading.value ||
-    confirmLoading.value ||
+    // 「忽略」与改判同一端点，同样会改掉人脸框的三态与侧栏那两个清单
+    Boolean(strangerFaceCode.value) ||
+    // 「确认」（人工确认）与改判一样会改掉人脸框的三态与侧栏「出现的人」：
+    // 请求没回来就翻走，回来看到的是陈旧状态而且不报错
+    Boolean(confirmingPerson.value) ||
     dupSaving.value ||
-    delLoading.value,
+    delLoading.value ||
+    // 旋转请求在飞时也禁翻：角度要落到**这张**照片上，
+    // 没回来就跳走会让乐观更新与后到的响应错位（症状是「转完一张按 →，下一张也躺着」）
+    rotateSaving.value,
 )
 
 /** 延后到浏览器空闲时再发预取；没有 requestIdleCallback 就退化成 setTimeout */
@@ -659,9 +915,16 @@ async function gotoOffset(delta) {
   navigating.value = true
   try {
     let target = pagerItems.value[currentIndex.value + delta]
-    // 作用域列表按需分页：往后翻到已加载的末尾时，先把下一页取回来再判断
-    if (!target && delta === 1 && scopeSpec.value && !scopeFailed.value) {
-      await loadScopePage(scopePage.value + 1)
+    // 作用域列表按需分页：翻到窗口的两端时先把**邻页**取回来再判断
+    // （往回补是 prepend：锚点定位后窗口可能从第 40 页开始，往左同样要能续）
+    if (!target && scopeSpec.value && !scopeFailed.value) {
+      if (delta === 1) {
+        await loadScopePage(scopeEndPage.value + 1, 'append')
+      } else if (scopeStartPage.value > 1) {
+        await loadScopePage(scopeStartPage.value - 1, 'prepend')
+      }
+      // ⚠️ 补页后 currentIndex 会跟着列表重算（prepend 时整体后移），
+      //    所以这里必须**重新取**一次，不能用补页前的下标
       target = pagerItems.value[currentIndex.value + delta]
     }
     if (!target) return
@@ -691,7 +954,7 @@ function isTypingTarget(target) {
   return tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable
 }
 
-/** 任何 EP 浮层打开时都不响应（放大查看 / 改判 / 确认归属打开时按 ← 不该翻页） */
+/** 任何 EP 浮层打开时都不响应（放大查看 / 改判浮层打开时按 ← 不该翻页） */
 function overlayOpen() {
   return Boolean(document.querySelector('.el-overlay:not([style*="display: none"])'))
 }
@@ -710,6 +973,16 @@ function onKeydown(event) {
   if (event.key === 'ArrowRight' && canNext.value) {
     event.preventDefault()
     gotoOffset(1)
+    return
+  }
+  // DR-43：`[` 左转 90° / `]` 右转 90°。
+  // ⚠️ 纪律照抄上面两条（与 ReviewView 同款）：组合键让位、输入框内不响应、
+  //    浮层打开不响应 —— 少一条就会出现「在搜索框里打 [ 把照片转了」。
+  // ⚠️ 与 ← / → 不同，这里没有 canPrev 那种前置条件，但 busy 必须在：
+  //    旋转请求在飞时连按两次会发两个请求，后到的赢，角度就错了。
+  if (event.key === '[' || event.key === ']') {
+    event.preventDefault()
+    doRotate(event.key === '[' ? -90 : 90)
   }
 }
 
@@ -805,23 +1078,32 @@ watch(photoCode, (code) => {
                人脸框的标签与「不是他」按钮要溢出框外，否则会被裁掉 -->
           <!-- group/photo：PhotoPager 的箭头靠它 hover 显形（⚠️ 用具名 group，
                不能用 group —— FaceBox 已经占了 group/face，具名 group 互不干扰） -->
+          <!-- DR-43 旋转容器（结构见脚本里 innerStyle 的注释）：
+               outer 吃**旋转后**的比例撑开布局；inner 吃**未旋转**的比例、
+               居中并整体 rotate —— img 与全部 FaceBox 都在 inner 里，
+               所以 bbox 的百分比基座恒为未旋转的画布，框永远贴脸。
+               ⚠️ inner **绝不能加 overflow-hidden**：人脸框的标签与「不是他」
+                  要溢出框外（与这层不套 .pb-photo-frame 同一个理由）。 -->
           <div class="group/photo relative mx-auto" :style="frameStyle">
-            <img
-              :src="originalUrl(photo.photoCode)"
-              :alt="`照片 ${fileLabel} 的原图`"
-              class="block h-full w-full rounded-thumb border border-line object-cover"
-              draggable="false"
-            />
-            <FaceBox
-              v-for="face in faces"
-              :key="face.faceCode"
-              :face="face"
-              :display-name="nameOf(face)"
-              @fix="openFix($event, 'assign')"
-            />
+            <div class="absolute left-1/2 top-1/2" :style="innerStyle">
+              <img
+                :src="originalUrl(photo.photoCode)"
+                :alt="`照片 ${fileLabel} 的原图`"
+                class="block h-full w-full rounded-thumb border border-line object-cover"
+                draggable="false"
+              />
+              <FaceBox
+                v-for="face in faces"
+                :key="face.faceCode"
+                :face="face"
+                :display-name="nameOf(face)"
+                :ordinal="pendingOrdinal.get(face.faceCode)"
+                @fix="openFix($event, 'assign')"
+              />
+            </div>
             <!-- 左右翻页：DR-31。不在列表里时两个箭头自动禁用并给说明 -->
             <PhotoPager
-              :index="currentIndex + 1"
+              :index="pagerIndex"
               :total="pagerTotal"
               :can-prev="canPrev"
               :can-next="canNext"
@@ -858,6 +1140,46 @@ watch(photoCode, (code) => {
             <el-button size="small" @click="zoomVisible = true">
               <Maximize2 class="mr-1 h-3.5 w-3.5" aria-hidden="true" />放大
             </el-button>
+            <!-- DR-43 人工旋转：只改显示，原图不动。
+                 ⚠️ 不做单独的 180° 按钮 —— 连点两次左转就是 180°。 -->
+            <div class="ml-auto flex items-center gap-1" role="group" aria-label="旋转方向">
+              <el-button
+                size="small"
+                :loading="rotateSaving"
+                aria-label="向左旋转 90 度"
+                title="向左旋转 90 度（快捷键 [）"
+                @click="doRotate(-90)"
+              >
+                <RotateCcw class="h-3.5 w-3.5" aria-hidden="true" />
+              </el-button>
+              <el-button
+                size="small"
+                :loading="rotateSaving"
+                aria-label="向右旋转 90 度"
+                title="向右旋转 90 度（快捷键 ]）"
+                @click="doRotate(90)"
+              >
+                <RotateCw class="h-3.5 w-3.5" aria-hidden="true" />
+              </el-button>
+              <el-button
+                v-if="rotateDeg !== 0"
+                size="small"
+                text
+                :loading="rotateSaving"
+                aria-label="重置方向（恢复原方向）"
+                title="重置方向：恢复照片自己的方向"
+                @click="doResetRotate"
+              >
+                重置方向
+              </el-button>
+              <!-- 角度**可见**（不只靠图标）：色盲/灰度下也能回答"现在转了多少" -->
+              <span
+                class="text-caption tabular-nums text-ink-weak"
+                :aria-label="`当前显示角度 ${rotateDeg} 度`"
+              >
+                {{ rotateDeg === 0 ? '未旋转' : `已旋转 ${rotateDeg}°` }}
+              </span>
+            </div>
           </div>
           <p class="pb-hint mt-1">
             悬停人脸框即出「✗ 不是他」，<b>一次点击</b>就能改判。照片按真实色彩呈现，
@@ -918,7 +1240,9 @@ watch(photoCode, (code) => {
               <div class="flex justify-between gap-3">
                 <dt class="shrink-0 text-ink-weak">尺寸</dt>
                 <dd class="text-right tabular-nums text-ink">
-                  {{ displaySize(photo).width || EMPTY }} × {{ displaySize(photo).height || EMPTY }}
+                  <!-- DR-43：这里显示的是**最终显示方向**的宽高（含 EXIF 与人工旋转
+                       两次折算）—— 与主图容器同源（shownSize），不能各算一份。 -->
+                  {{ shownSize.width || EMPTY }} × {{ shownSize.height || EMPTY }}
                   <span class="text-ink-weak">（{{ formatFileSize(photo.fileSize) }}）</span>
                 </dd>
               </div>
@@ -1004,6 +1328,28 @@ watch(photoCode, (code) => {
                   class="shrink-0 text-caption text-brand-ink hover:underline"
                   >详情</RouterLink
                 >
+                <!--
+                  「确认」= 人工确认（机器认的那些脸）——详情 / 改判之间缺的那一步。
+                  ⚠️ 只在**还有机器认的脸**时出现：全都确认过时它点了也没有任何变化。
+                -->
+                <el-popconfirm
+                  v-if="autoFacesOf(person).length"
+                  :title="`把 ${person.displayName} 在这张照片里机器认的 ${autoFacesOf(person).length} 张脸确认为人工确认？确认后立即参与质心重算`"
+                  confirm-button-text="确认"
+                  cancel-button-text="取消"
+                  :width="300"
+                  @confirm="confirmPersonFaces(person)"
+                >
+                  <template #reference>
+                    <el-button
+                      size="small"
+                      :loading="confirmingPerson === person.personCode"
+                      :aria-label="`人工确认 ${person.displayName} 在这张照片里机器认的 ${autoFacesOf(person).length} 张脸`"
+                    >
+                      <Check class="h-3.5 w-3.5" aria-hidden="true" />确认
+                    </el-button>
+                  </template>
+                </el-popconfirm>
                 <el-button
                   size="small"
                   text
@@ -1017,9 +1363,19 @@ watch(photoCode, (code) => {
             </ul>
             <p v-else class="pb-hint mt-2">这张照片里还没有已归属的人。</p>
 
-            <!-- 未归属的脸：单独列出并给「确认归属」入口 -->
+            <!--
+              未归属的脸：单独列出。
+              **改判** = 认给某人（与「出现的人」那个改判是同一个浮层：候选 /
+              全库搜索 / 新建人物都在里面）；**忽略** = 标记陌生人（永久排除，
+              见脚本里的 ignoreFace）。原先并列的「确认归属」已删除 ——
+              它与改判是同一件事的两套实现，能力却更少（不能新建人物）。
+            -->
             <div v-if="pendingFaces.length" class="mt-3 border-t border-line pt-3">
-              <p class="pb-hint">还有 {{ pendingFaces.length }} 张未归属的人脸</p>
+              <p class="pb-hint">
+                还有 {{ pendingFaces.length }} 张未归属的人脸 ——
+                <b>#编号与图上人脸框的编号一致</b>，照着编号就能找到是哪一张。
+                认不出是谁（路人 / 误检）就点<b>忽略</b>。
+              </p>
               <ul class="mt-2 space-y-1.5">
                 <li
                   v-for="face in pendingFaces"
@@ -1032,16 +1388,57 @@ watch(photoCode, (code) => {
                     class="h-6 w-6 shrink-0 rounded-full border border-line object-cover"
                     alt=""
                   />
+                  <!-- 编号与图上标签同源（pendingOrdinal），不是另算一遍 -->
+                  <span class="shrink-0 text-caption font-medium tabular-nums text-warning-ink"
+                    >#{{ pendingOrdinal.get(face.faceCode) }}</span
+                  >
+                  <!--
+                    行内只留 ⚠ + 年代档：这行现在要同时容下两个按钮，再把
+                    「待确认」三个字写进来的话，整个年代档会被挤成省略号
+                    （「（2000–…」比不显示更难看）。而状态在这一栏里已经说了两遍 ——
+                    小节标题「还有 N 张未归属的人脸」+ 整行 warning 底色，逐行重复一遍
+                    换来的只是把**年代档**挤掉。⚠ 保留：它与图例「⚠ 待确认」、
+                    图上标签「⚠ 未归属」是同一个字形。
+                  -->
                   <span class="min-w-0 flex-1 truncate text-caption text-warning-ink">
-                    <span aria-hidden="true">⚠</span> 待确认
+                    <span aria-hidden="true">⚠</span>
                     <span v-if="face.shotBucket" class="ml-1 tabular-nums"
                       >（{{ formatBucketKey(face.shotBucket) }}）</span
                     >
                   </span>
-                  <el-button size="small" :loading="confirmLoading" @click="openConfirm(face)">
-                    确认归属
+                  <el-button
+                    size="small"
+                    :loading="fixLoading"
+                    :aria-label="`改判第 ${pendingOrdinal.get(face.faceCode)} 张未归属的人脸`"
+                    @click="openFix(face, 'assign')"
+                  >
+                    改判
                   </el-button>
-                  <el-button size="small" text @click="openFix(face, 'assign')">改判</el-button>
+                  <!--
+                    忽略 = 标记陌生人（不可逆语义，P0-3 要求先复述再动手）。
+                    用 popconfirm 而不是 ReviewView 那种整块弹窗：这里一次只处理
+                    一张脸、而且常常要连着点好几张，弹窗会变成一路「确认」的噪声。
+                    标题里**必须**写清「永久排除」——它是四态里唯一回不去的一档。
+                  -->
+                  <el-popconfirm
+                    :title="`把第 ${pendingOrdinal.get(face.faceCode)} 张脸标为陌生人？它会永久排除：不再出现在任何队列、也不参与聚类。认错人请用「改判」`"
+                    confirm-button-text="确认忽略"
+                    cancel-button-text="取消"
+                    :width="300"
+                    @confirm="ignoreFace(face)"
+                  >
+                    <template #reference>
+                      <el-button
+                        size="small"
+                        text
+                        type="danger"
+                        :loading="strangerFaceCode === face.faceCode"
+                        :aria-label="`忽略第 ${pendingOrdinal.get(face.faceCode)} 张未归属的人脸（标记为陌生人，永久排除）`"
+                      >
+                        <CircleSlash class="mr-1 h-3.5 w-3.5" aria-hidden="true" />忽略
+                      </el-button>
+                    </template>
+                  </el-popconfirm>
                 </li>
               </ul>
             </div>
@@ -1107,74 +1504,6 @@ watch(photoCode, (code) => {
       :photo="photo"
       @done="onShotYearFixed"
     />
-
-    <!-- ============ 确认归属（未归属的脸）============ -->
-    <el-dialog v-model="confirmVisible" title="确认这张脸属于谁" width="480px">
-      <!-- 与「改判人脸」里的搜索同一形态（独立区块 + 大号输入框）：
-           确认归属靠的也是**搜全库**，候选那前几条常常不是要找的人 -->
-      <div class="rounded-btn border border-line bg-surface p-3">
-        <div class="flex items-baseline justify-between gap-2">
-          <label class="text-body font-medium text-ink" for="pd-confirm-search">搜索人物</label>
-          <span class="pb-hint">搜全库，不受相似度前 5 名限制</span>
-        </div>
-        <el-input
-          id="pd-confirm-search"
-          v-model="confirmKeyword"
-          class="mt-2"
-          size="large"
-          placeholder="例：王小明 / wangxiaoming / wxm"
-          clearable
-          aria-label="搜索人物"
-        >
-          <template #prefix>
-            <Search class="h-4 w-4 text-ink-weak" aria-hidden="true" />
-          </template>
-        </el-input>
-      </div>
-      <!-- 空态两种：候选池本来就是空 / 搜了没搜到。合成一句话会出现
-           「库里还没有任何人物档案可对照」这种完全误导的话。 -->
-      <p
-        v-if="!confirmList.length && String(confirmKeyword || '').trim() && confirmSearched"
-        class="mt-3 rounded-btn bg-warning-soft px-3 py-2 text-caption text-warning-ink"
-      >
-        全库里没有匹配「<b class="break-all">{{ String(confirmKeyword).trim() }}</b>」的人物。
-        检查拼写，或只输姓氏试试；确认这个人还没建档的话，用「改判 → 新建人物」建一个并归属。
-      </p>
-      <p
-        v-else-if="!confirmCandidates.length"
-        class="mt-3 rounded-btn bg-warning-soft px-3 py-2 text-caption text-warning-ink"
-      >
-        库里还没有任何人物档案可对照。先用「改判 → 新建人物」建一个并归属，
-        之后同类照片就能自动比对了。
-      </p>
-      <ul
-        v-else-if="confirmList.length"
-        class="mt-3 max-h-72 divide-y divide-line overflow-y-auto rounded-btn border border-line"
-      >
-        <li v-for="candidate in confirmList" :key="candidate.personCode">
-          <button
-            type="button"
-            class="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-surface"
-            @click="doConfirm(candidate)"
-          >
-            <img
-              v-if="candidate.avatarFaceCode"
-              :src="faceUrl(candidate.avatarFaceCode)"
-              class="h-7 w-7 shrink-0 rounded-full border border-line object-cover"
-              alt=""
-            />
-            <span class="min-w-0 flex-1 truncate text-body text-ink">{{ candidate.displayName }}</span>
-            <span class="shrink-0 text-caption tabular-nums text-ink-sub">{{
-              similarityText(candidate.similarity)
-            }}</span>
-            <span class="shrink-0 text-caption text-brand-ink">确认</span>
-          </button>
-        </li>
-      </ul>
-      <p class="pb-hint mt-2">
-        确认后会立即重算这个人的年代档质心，并<b>自动前进到队列的下一条</b>。
-      </p>
-    </el-dialog>
 
     <!-- ============ 标记重复（选一张作为主照片）============ -->
     <el-dialog v-model="dupVisible" :title="`把「${fileLabel}」标成谁的副本？`" width="560px">

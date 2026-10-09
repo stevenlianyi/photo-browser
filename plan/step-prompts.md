@@ -1,16 +1,83 @@
-# photo-browser 分步开发提示语（12 步）
+# photo-browser 分步开发提示语 · 总览
 
 > 配套：`plan/开发计划.md`（总纲）｜`plan/数据库设计.md`（表定义）｜`plan/UI/photo-browser UI 设计.md`（信息架构）
 >
 > **使用方法**：每一步**单独开一个新对话**，把下面对应的提示语整段复制粘贴进去。
 > 前一步验收未通过，不要开始下一步。
 > 每步结束统一输出：**改动文件清单 + 验收结果 + 遗留问题**。
->
-> ⚠️ **当前进度：12 步编码全部完成。M1~M3 已过；M4 = 自己真正用一周（步骤 12 已交付 2026-10-07）。**
-> 进度以文末「附录 A」的状态表为准。**M4 剩下的不是继续写代码，而是真实使用一周** ——
-> 一周自测清单见 `开发计划.md` 步骤 12 的输出与 §八 里程碑。
-> 唯一还欠的技术性报告是 **R2 的验收证据**（见文末提醒），它不影响 M4 的使用。
->
+
+---
+
+## 当前状态（2026-10-09）
+
+| 部分 | 范围 | 状态 |
+|---|---|---|
+| 第一部分 | 修正步骤 R 系列（R / R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 / R9 / R10） | 10 项已完成，**R9、R10 待做** |
+| 第二部分 | 主线 12 步 | ✅ 全部完成（2026-10-07） |
+| 第三部分 | 附录 A/B/C | 状态表 / 输出格式 / **待办** |
+
+**下一步**：R9（照片旋转）→ **R10（打包分发）** → M4 一周自测 → 补 R2 的验收证据。详见 **附录 C**。
+
+---
+
+## 目录
+
+**一、修正步骤（R 系列）**
+
+- R · 返工修正步骤 1–6（纠错闭环 DR-16）
+- R2 · 分桶口径修复（自适应分桶从未生效 · DR-20/21/22）
+- R3 · 修 `(0,0)` 占位坐标（DR-25）
+- R4 · 地点数据层（geohash 归并 + 目录名抽取 + API）
+- R4a · 地点中文名（DR-28/29）
+- R4b · 目录名线索接入（DR-25/30/32/33/34/35）
+- R5 · 地点界面（地点 → 照片流 + 人物「去过的地方」）
+- R6 · 照片详情左右翻页（A 档 · DR-31）
+- R7 · 人物头像（卡片显示照片 + 样本设默认 · DR-40/41）
+- R8 · 照片年代修正（人工修正拍摄年 · DR-42）
+- R9 · 照片旋转
+- R10 · 打包分发（Windows exe / 安装包）（左右转 90°）
+
+**二、主线 12 步（已完成留档）**
+
+- 步骤 1 · 工程基线与配置骨架
+- 步骤 2 · SQLite 运行层 + 代码生成器 + 建库
+- 步骤 3 · 扫描器（遍历 / hash / EXIF / 去重 / 批次限流）
+- 步骤 4 · 缩略图与原图文件服务
+- 步骤 5 · 人脸引擎（检测 + 特征 + 质量过滤）
+- 步骤 6 · 分桶 + 质心 + 匹配决策
+- 步骤 7 · 聚类与待确认数据
+- 步骤 8 · 联系人导入（CSV / vCard）
+- 步骤 9 · 后端 API 全量
+- 步骤 10 · 前端骨架 + 双主题
+- 步骤 11 · 照片流 + 照片详情 + 待确认队列
+- 步骤 12 · 人物库/详情 + 扫描台 + 设置 + 打磨
+
+**三、附录**
+
+- 附录 A · 步骤与里程碑对照
+- 附录 B · 每步固定的输出格式
+- 附录 C · 当前待办与已知遗留
+
+---
+
+## 全局约定（每步都适用，已写进各提示语，此处仅备查）
+
+| 项 | 约定 |
+| --- | --- |
+| 代码根 | `d:/home/lianyi/git/photo-browser/code/` |
+| 文档根 | `d:/home/lianyi/git/photo-browser/plan/` |
+| Python | `C:\Users\NINGMEI\.workbuddy\binaries\python\versions\3.13.12\python.exe`（venv 建在 `code/.venv`） |
+| pip 源 | **必须官方源** `https://pypi.org/simple`（清华镜像在本机失效） |
+| photoRoot | `d:\PhotoLib`（可改，`code/src/config/local_settings.py`） |
+| 原图 | **绝对只读**：不写、不删、不改名 |
+| 业务层 | **禁止裸 SQL**，一律走 `sqliteCommon` |
+| 表定义 | `code/src/database/pb_*.txt` 是唯一数据源，**禁止手工改 `auto_generated/`** |
+| 网络 | 服务只绑 `127.0.0.1` |
+
+---
+
+## 历史沿革
+
 > 历史：步骤 1–6 执行后核对发现两处返工，顺序是 **R2 → R → 步骤 7**：
 > **R2 = 分桶口径修复**（`pb_face.shotBucket` 从来没被重写成自适应桶，**S0 的分桶结论一直在跑对照组**）
 > → **R = 纠错闭环**（DR-16）→ 步骤 7。两项均已完成并入。
@@ -28,12 +95,430 @@
 
 ---
 
-# 修正步骤 R3 · 修 `(0,0)` 占位坐标（DR-25）
+# 第一部分 · 修正步骤（R 系列）
+
+> 每一步**单独开一个新对话**执行；提示语在下面的 `text` 围栏里，整段复制。
+> 顺序无关的已在各节「什么时候做」里写明。**当前待做：R9**。
+
+## 修正步骤 R · 返工修正步骤 1–6（纠错闭环 DR-16）
+
+> **什么时候做**：现在。步骤 7 之前必须完成。
+> **为什么要返工**：新增了「用户浏览时改判认错的人脸」这条闭环（DR-16），核对现有代码发现 6 处冲突，
+> 其中 1 处是**根因**，不改则后续全部白做。
+
+````text
+【photo-browser · 修正步骤 R · 返工修正步骤 1–6】
+
+## 目标
+把已完成的步骤 1–6 对齐到最新的「纠错闭环」口径（plan/开发计划.md DR-16）：
+① 质心只用人工确认样本（防污染）；② 新增 ALL 兜底桶；③ 新增 isStranger 与 pb_review_log；
+④ 把「自动归属」与「人工确认」真正区分开（这是根因）；⑤ 存量数据修正与质心重建。
+
+## 前置
+步骤 1–6 已完成，并且**已有真实数据**（d:\PhotoLib\photo 有真实照片、正式库有真实记录，
+据开发计划 DR-12/DR-15 实测约 10 万行 pb_photo）。
+本步不新增业务功能，只做口径修正 + 数据迁移。
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 DR-16（本次要落地的全部口径）、第五节步骤 6/7 行
+- plan/数据库设计.md §4.5 pb_face（**四态语义表**）、§4.6 pb_person_centroid（质心三级启用）、
+  §4.9 pb_review_log（8 种 opType 与副作用表）、§五 索引清单、§六 D-4/D-9/D-10/D-11
+- plan/UI/photo-browser UI 设计.md 第 4.4 / 4.5 / 4.6 节（人脸框三态描边、P-06 双 Tab、P-05 样本分两段）
+
+## 一、先读现有代码，确认真实差距（不要凭我的描述改）
+重点读这 5 个文件，**逐条核对下面的「现状 → 应为」**：
+- code/src/processor/review/assigner.py
+- code/src/processor/review/merger.py
+- code/src/engine/match/centroid.py
+- code/src/engine/match/matcher.py
+- code/src/config/basicSettings.py
+
+已知差距（我已核对过源码，但你必须自己再确认一遍再动手）：
+
+| # | 文件 | 现状 | 应改为 |
+|---|---|---|---|
+| 1 | `assigner.py` 的 `assign()` | 无论人工还是自动，**都写 `isConfirmed=1`**（约 234 行硬编码） | `isConfirmed=1` **只表示经人工确认**；自动归属必须写 0 |
+| 2 | `assigner.py` 文件头 + `__main__` | 写着「待确认 = personCode IS NULL **OR isConfirmed=0**」 | 改为 `personCode IS NULL AND isStranger=0` |
+| 3 | `centroid.py` 的 `loadFaceVectors()` | 查回这个人的全部脸后只按 shotBucket 过滤，**无 isConfirmed 过滤** | 只取 `isConfirmed=1` 的样本（可开关，见 3.5） |
+| 4 | `centroid.py` | 无 `ALL` 兜底桶；桶样本不足直接不启用（约 215 行） | 桶确认样本 <3 时退到 `ALL`；总确认样本 <3 才是真不启用 |
+| 5 | `matcher.py` | 候选桶 = `bucket.neighborBucketKeys(...)`（约 407 行） | 候选集合 **∪ {ALL}**；`shotBucket` 为空的脸候选桶就是 `{ALL}` |
+| 6 | 全库 | 无 `pb_review_log` 表、`pb_face` 无 `isStranger` 列 | 建表 + 加列 + 补索引 |
+
+**第 1 条是根因**：自动归属也写 `isConfirmed=1`，导致
+(a) 无法区分「机器认的」与「人工确认的」，「我不同意」列表无从表达；
+(b) 质心全部由自动样本构成 → 防污染无从下手。
+
+## 二、表结构与数据迁移
+
+### 2.1 表定义（我已改好，你只需核对）
+- `code/src/database/pb_review_log.txt` —— **新建的第 9 张表**，22 字段，按该文件写
+- `code/src/database/pb_face.txt` —— 已加 `isStranger TINYINT NOT NULL DEFAULT 0`
+- `code/src/database/pb_person_centroid.txt` —— 注释已写明 `ALL` 兜底桶与「只统计确认样本」
+- `code/src/database/pb_photo_person.txt` —— `source` 注释已写明 0 自动 / 1 人工确认或改判
+
+**重跑生成器**（`python code/src/database/sqliteCodeGenerator.py`）→ 产物落
+`code/src/database/auto_generated/sqliteCommon.py`，**禁止手工改产物**。
+
+### 2.2 迁移（**用 `--migrate`，不要 `--drop`**）
+```
+python code/src/tools/build_db.py --migrate
+```
+- 只 `ALTER TABLE ADD COLUMN` 补缺的（加 `pb_face.isStranger`）+ 建 `pb_review_log` + 补 4 个新索引
+- **不删列、不改列类型、不动任何一行**（DR-13）
+- ⚠️ **动手前先备份**：`copy d:\PhotoLib\db\photolib.db d:\PhotoLib\db\photolib.db.bak-before-R`
+- 迁移后核对：`PRAGMA table_info(pb_face)` 有 `isStranger`；`sqlite_master` 有 `pb_review_log`
+  与 4 个新索引（`pb_face(personCode IS NULL)`、`pb_face(personCode, isConfirmed)` 部分索引、
+  `pb_review_log(isRevertible)` 部分索引、`pb_photo(movedToPhotoCode)`）
+- 迁移前后各记录一次逐表行数（`SELECT COUNT(*)`），**必须完全一致**
+
+### 2.3 存量数据修正（**必做，否则「我不同意」列表是空的**）
+现有自动归属的脸被写成了 `isConfirmed=1`，要按真实语义回改：
+
+写一次性脚本 `code/src/tools/fix_confirmed_flag.py`：
+- 依据 `pb_photo_person.source`：`source=0`（自动）→ 对应 `pb_face.isConfirmed` 回改为 **0**；
+  `source=1`（人工）→ 保持 1
+- ⚠️ 一张照片可能有多个 `pb_photo_person` 行、一个人脸只对应一个 `faceCode`。
+  **以 `pb_photo_person.faceCode` 为准**（那是判定来源那张脸）；`faceCode` 为空的行跳过并计数报告
+- 先 `--dry-run` 打印将要改的行数与样例，确认后再实跑
+- 跑完打印：回改行数、跳过行数、以及改后
+  `SELECT COUNT(*) FROM pb_face WHERE personCode IS NOT NULL AND isConfirmed=0` 的结果
+
+**重算全部质心**：旧质心是污染样本算出来的，必须作废。
+走 `centroid.recomputePerson()` 对库里每个有脸的 personCode 重算（**不删库**，只重算）。
+
+## 三、代码修正
+
+### 3.1 `assigner.py` —— 拆开「人工确认」与「自动归属」
+- `assign(faceCode, personCode, source, ...)` 的 `isConfirmed` 必须由 `source` 决定：
+  - `source == comGD.LINK_SOURCE_MANUAL` → `isConfirmed=1`
+  - `source == comGD.LINK_SOURCE_AUTO` → `isConfirmed=0`（**当前硬编码 1，要改**）
+- 建议同时提供两个语义明确的入口（内部共用 `_setBelong()`），避免调用方继续传错 `source`：
+  - `confirm(faceCode, personCode, confidence=None)` —— 人工确认，`isConfirmed=1`、link `source=1`
+  - `autoAssign(faceCode, personCode, confidence)` —— 自动归属，`isConfirmed=0`、link `source=0`
+- **`fix(faceCode, action, personCode=None)` 统一改判入口**：
+
+  | action | 效果 | 落 pb_face | 关联 | 重算质心 |
+  |---|---|---|---|---|
+  | `assign` | 改判到某人 | `personCode=新, isConfirmed=1` | 删旧 linkKey + 写新 `source=1` | **原人 + 新人**全部桶 |
+  | `unknown` | 置为未知 | `personCode=NULL, isConfirmed=0` | 删旧 linkKey | 原人全部桶 |
+  | `stranger` | 标记陌生人 | `personCode=NULL, isStranger=1` | 删旧 linkKey | 原人全部桶 |
+
+  - 现有 `unassign()` 保留，但**明确它 == `fix('unknown')`**，别留两套语义
+- `batchFix(faceCodes, action, personCode)`：同一 `clusterCode` 批量，一个事务 + 一次重算
+- 每次写操作**必须落一条 `pb_review_log`**（`logCode` 幂等键、`opType`、`faceCode`、`photoCode`、
+  `fromPersonCode`、`toPersonCode`、`similarity`、`faceCount`、`opYMDHMS`）
+- ⚠️ 写 `pb_review_log` 时**注意 upsert 写 NULL 的坑**（assigner 文件头已记录：`update_*` 写不进 NULL，
+  `fromPersonCode` 为空时必须走 upsert + `forceColumns`）
+- ⚠️ 纪律 ③（`pb_photo_person` 只在「这张照片里确实有人属于 P」时存在）**继续生效**，
+  改判/陌生人/置未知都要走 `_facesInPhotoFor()` 判断后再决定删不删关联
+
+### 3.2 `merger.py`
+- `merge()` 迁移脸时写 `isConfirmed=1` —— **保持不变**（用户主动合并就是人工确认）
+- `merge()` / `split()` 各自落一条 `pb_review_log`，**`isRevertible=1`**
+- 新增 `undo(logCode)`：
+  - 只允许撤销 `isRevertible=1 AND revertedByLogCode IS NULL` 的记录，否则抛错
+  - 反向恢复 `pb_face.personCode` 与 `pb_photo_person` 关联
+  - **重算涉及双方的质心**
+  - 回填原记录的 `revertedByLogCode`，并写一条 `opType=UNDO` 的新日志
+  - `merge` 撤销要恢复 `fromPerson`（软删的 `pb_person.delFlag` 也要恢复）
+
+### 3.3 `centroid.py` —— 防污染 + 兜底桶
+- `loadFaceVectors(personCode, bucketKey, confirmedOnly=True)`：加 `isConfirmed=1` 过滤
+  - ⚠️ 生成层 `query_pb_face` **没有 `isConfirmed` 查询参数**（只有 recID/faceCode/photoCode/
+    personCode + nullFields）。**不要为此改生成器加参数**（要重生成 + 全库迁移，代价与收益
+    不成比例）；按现有文件头的做法：查回这个人的脸，在 Python 里过滤
+- 新增 `ALL` 桶：`bucketKey = "ALL"` = 该人**全部确认样本**（不分桶）
+- `computeCentroid()` / `recompute()` 支持 `ALL`
+- **质心三级启用**（写进文件头）：
+
+  | 优先级 | 桶 | 启用条件 |
+  |---|---|---|
+  | 1 | 相邻年代桶 | 该桶**确认样本** ≥ 3 |
+  | 2 | `ALL` 兜底桶 | 总确认样本 ≥ 3 |
+  | 3 | 无 | 总确认样本 < 3 → **该人不参与自动匹配** |
+
+- `recomputePerson()` 重算时**也要算 `ALL` 桶**，并把已不存在的桶清掉（现有清僵尸桶逻辑保留）
+- ⚠️ **`listBucketsOf()` 要排除 `ALL`**（它是虚拟桶，不来自任何 `pb_face.shotBucket`），
+  否则 `recomputePerson` 会去算一个不存在的桶
+- `dropPerson()` / `dropBucket()` / `centroidOf()` 保持可用，`ALL` 走同一套
+
+### 3.4 `matcher.py` —— 候选桶并入 `ALL`
+- 候选桶 = `bucket.neighborBucketKeys(bucketKey, neighbor)` **∪ `["ALL"]`**
+- `shotBucket` 为空（截图、EXIF 缺失）的脸：`neighborBucketKeys("")` 返回 `[]`，
+  候选桶就是 `["ALL"]` —— **这类脸现在也能匹配了**，别让它直接掉进聚类
+- `candidateBuckets` 报告要如实反映实际参与的桶
+- 三段式判定、原因码、Top-5 降序、两次跑完全一致 —— 这些既有行为**不要动**
+
+### 3.5 `basicSettings.py` —— 冷启动开关
+新增：
+```
+CENTROID_CONFIRMED_ONLY: bool = True   # True=只用 isConfirmed=1 样本（防污染，默认）
+                                       # False=退回旧口径（全样本），仅用于回归对比与冷启动
+```
+⚠️ **为什么需要这个开关**：改成「只用确认样本」后，**在用户还没人工确认过任何脸之前，
+所有质心都不可用 → 自动归属数为 0 → 所有人脸进待确认队列**。
+这是**正确行为**（没有干净样本可用），但会让 S0 回归验证跑不出结果。
+所以留一个逃生口：验收第 21 条与 S0 回归对比用 `False`，日常跑 `True`。
+
+## 四、验收清单（逐条实际运行，不要只写代码就宣称通过）
+
+### A. 迁移
+1. 迁移前已备份 `photolib.db.bak-before-R`
+2. `build_db.py --migrate` 成功；**逐表行数迁移前后完全一致**（贴出前后对照）
+3. `PRAGMA table_info(pb_face)` 含 `isStranger`（默认 0）；`sqlite_master` 含 `pb_review_log`
+   与 4 个新索引
+4. `PRAGMA integrity_check` 返回 ok
+
+### B. 语义修正
+5. `fix_confirmed_flag.py --dry-run` 输出合理 → 实跑后：
+   `SELECT COUNT(*) FROM pb_face WHERE personCode IS NOT NULL AND isConfirmed=0` **> 0**
+   （这就是「我不同意」列表的条数，必须不为 0，否则说明回改没生效）
+6. 四态互斥性检查（写 SQL 验证）：
+   - 待确认 = `personCode IS NULL AND isStranger=0`
+   - 我不同意 = `personCode IS NOT NULL AND isConfirmed=0 AND isStranger=0`
+   - 人工确认 = `isConfirmed=1`
+   - 陌生人 = `isStranger=1`
+   - **四者之和 == `pb_face` 总行数**（不重不漏）
+
+### C. 质心防污染（**本步最核心的三条**）
+7. 造测试数据：某 person 某桶放 2 张 `isConfirmed=1` + 1 张 `isConfirmed=0`（属于别人的脸），
+   `recomputePerson` 后该桶 **`sampleCount == 2` 且 `centroid` 与只有那 2 张时逐字节相同**
+   —— 证明自动样本没进质心
+8. `ALL` 兜底：某 person 桶确认样本只有 1 张，但总确认样本 4 张 → 该桶不启用、
+   **`ALL` 桶启用且 sampleCount=4**，且该人能被匹配到
+9. 总确认样本 2 张的人 → **不启用任何质心**，`loadAllCentroids` 的索引里没有他
+10. `shotBucket` 为空的脸 → 候选桶 == `["ALL"]`，能拿到分数（不再直接掉聚类）
+11. 旧质心已全部重算（贴出重算前后 `pb_person_centroid` 行数与 `sampleCount` 变化）
+
+### D. 纠错链路
+12. `fix(action='assign')`：**原人与新人的质心都重算**（查两人 `modifyYMDHMS` 或质心内容，
+    只重算一边算不合格）；旧 `linkKey` 已删；新行 `source=1`
+13. `fix(action='unknown')` → 该脸进待确认队列；关联行按纪律 ③ 正确存废
+14. `fix(action='stranger')` → 该脸**既不在待确认、也不在「我不同意」、也不参与聚类**
+15. `merge` 后 `undo` 能完整还原（人脸归属 + `pb_photo_person` + 双方质心 + `fromPerson` 的
+    `delFlag`），且 `revertedByLogCode` 已回填
+16. `undo` 对 `isRevertible=0` 的记录（普通确认）**必须报错拒绝**
+17. 每次写操作都新增了一条 `pb_review_log`，`opType`/`fromPersonCode`/`toPersonCode` 正确
+18. `verifyLinks()` 仍然 `clean=True`（改判/陌生人之后不能留下幽灵关联）
+19. **纪律 ③ 回归**：同一张合影里 P 有 2 张脸，把其中 1 张改判给别人 →
+    `pb_photo_person` 里 P 的那行**必须还在**（还有 1 张脸属于 P）
+
+### E. 回归
+20. `pytest code/src/test` 全绿（含新增的防污染、兜底桶、改判、撤销单测）
+21. `CENTROID_CONFIRMED_ONLY=False` 时行为与修正前一致（**用旧口径跑一遍 S0 验证集，
+    给出 FR 数字**，与之前基线对比，确认代码改动没有意外改变匹配能力）
+22. `tools/backtest_s0.py` 跑通，给出准确率与耗时
+23. `tools/scan_cli.py --db <临时库>` 指向临时库跑一小批，确认**正式库行数不变**
+    （`--db` 是 DR-10 强调过的坑，务必验证）
+24. **photoDir 零风险**：扫描前后 `photoDir` 的文件数与总字节数完全一致
+
+## 五、硬约束
+- **原图绝对只读**：`d:\PhotoLib\photo` 一律只读，扫描前后文件数与字节数必须一致
+- **迁移只加不删**：`--migrate` 不删列不改类型不动数据；不删任何行
+- **业务层禁止裸 SQL**：一切读写经 `sqliteCommon`；新表走生成的
+  `query_pb_review_log` / `insert_pb_review_log` / `update_pb_review_log` / `delete_pb_review_log`
+- **禁止手工改 `auto_generated/`**：改表一律回 `pb_*.txt` 再重跑生成器
+- **单写入者**：所有写库在主进程；本步不引入子进程
+- 现有代码风格（文件头纪律说明、错误码、`_VERSION`、日志）保持一致，别把注释删了
+- 不要顺手重构与本步无关的代码
+
+## 六、完成后必须输出
+1. 改动文件清单（新增 / 修改，逐个列路径）
+2. 验收结果（上面 24 条**逐条**给命令与实际输出 / 数值）
+3. 遗留问题与需要我决策的点
+4. **存量数据修正后的统计**：四态各多少条、质心重算前后对比
+5. 步骤 7 可以开始的判断：以上 24 条是否全部通过
+````
+
+---
+
+## 修正步骤 R2 · 分桶口径修复（自适应分桶从未生效 · DR-20/21/22）
+
+> **什么时候做**：**先于修正步骤 R**（R 已经假设质心口径正确了；R2 修的是桶键来源）。
+> **为什么必须做**：`faceStore.makeShotBucket()` 写的是等宽 5 年**占位**桶，
+> 注释说「步骤 6 会用自适应规则重算覆盖」，**但步骤 6 从来没做这个覆盖**。
+> 全库 `bucketKeyAdaptive()` 只在验证脚本、CLI 报告与测试里被调用，**没有任何生产路径写回
+> `pb_face.shotBucket`**。而 `matcher.bucketKeyOfFace()` 明确「只认 `shotBucket` 这一列」。
+> 结果：生产库里所有脸都是等宽 5 年桶 → **S0 的「自适应分桶让 FR 32.75%→19%」一直在跑对照组**，
+> `bucket.py` 的自适应逻辑是死代码，**且 DR-18「改生日重算质心」完全无效**（桶键不依赖生日）。
+
+````text
+【photo-browser · 修正步骤 R2 · 分桶口径修复】
+
+## 目标
+三件事，缺一不可：
+① **补「重刷 shotBucket」过程**（方案 A，用户已定）：让 `pb_face.shotBucket` 真正按
+   「拍摄年 + 出生年」算出自适应桶（0–18 岁 3 年 / 18+ 10 年），而不是等宽 5 年占位；
+② **放宽未归属脸的候选桶**（DR-21）：否则跨口径对不上，等宽桶的脸一把质心都取不到；
+③ **确立「先刷桶，再重算质心」的硬顺序**（DR-22），并加前置检查。
+
+## 前置
+步骤 1–6 已完成，**真实数据已在库里**（10 万行 pb_photo、真实人脸与质心）。
+修正步骤 R 尚未开始（若已开始的，先停下做完 R2）。
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-20 / DR-21 / DR-22**（本次要落地的全部口径）
+- plan/数据库设计.md §4.5 pb_face.shotBucket、§4.6 pb_person_centroid
+- plan/MVP_plan.md S3 的分桶规则与匹配决策
+
+## 必须先读���现有代码（逐条核对「现状 → 应为」，不要凭我的描述改）
+| 文件 | 关键点 |
+|---|---|
+| `code/src/engine/face/faceStore.py` | `makeShotBucket()` 返回**等宽 5 年**（约 72–93 行），文件头与函数注释都写着「步骤 6 会重算覆盖」，**但没有任何代码做这件事** |
+| `code/src/engine/match/bucket.py` | `bucketKeyAdaptive(shotYear, birthYear)` / `bucketKeyOf(shotYear, birthday)` / `birthYearOf(birthday)` —— **已实现且正确**，但生产路径没调用 |
+| `code/src/engine/match/matcher.py` | `bucketKeyOfFace()`（约 293 行）**只认 `shotBucket` 列**，注释解释了「质心按 shotBucket 建、匹配必须按同一列取」——这个纪律是对的，**不要改成实时算** |
+| `code/src/engine/match/centroid.py` | `listBucketsOf()` 从脸表读 `shotBucket`；`loadFaceVectors()` 按桶过滤；`recomputePerson()` 重算各桶 |
+| `code/src/processor/review/assigner.py` | `assign()` 读 `face["shotBucket"]` 用于重算质心（约 397 行），**但从不重写它** |
+| `code/src/processor/review/merger.py` | `merge()` 用 `update_pb_face` 迁移 `personCode`，**没管 `shotBucket`** |
+| `code/src/tools/verify_bucket_gain.py` | 已能对比「等宽 vs 自适应」的收益，**R2 要用它给出真实数字** |
+
+## 一、新增 `code/src/engine/match/rebucket.py`（本步核心）
+
+```python
+SHOT_BUCKET_WIDTH_FALLBACK = 5      # 无生日时的降级等宽（沿用 faceStore 口径）
+
+def shotBucketFor(shotYear, birthday) -> str:
+    """(拍摄年, pb_person.birthday 原文) -> 自适应桶键；生日不可用 -> 降级等宽 5 年。
+    ⚠️ 薄封装，最终一律调 bucket.bucketKeyAdaptive()，**不在这里重写规则**"""
+
+def rebucketFace(faceRow, personRow=None) -> dict:
+    """单张脸：按 (pb_photo.shotYear, 该脸所属人的 birthday) 重算并写回 pb_face.shotBucket。
+    - personRow 为 None（未归属）→ 降级等宽桶
+    - **只改 shotBucket 一列**，走 upsert + forceColumns（注意 faceStore 已有 FACE_IDENTITY_COLUMNS 纪律）
+    - ⚠️ **绝不碰 personCode / isConfirmed / isStranger / clusterCode / embedding**
+    - 返回 {'faceCode','oldBucket','newBucket','changed'}"""
+
+def rebucketPerson(personCode) -> dict:      # 该人全部脸（分页，别一次取全）
+def rebucketPhoto(photoCode) -> dict:        # 该照片全部脸
+def rebucketAll(batchRows=None, progress=None, onlyAdaptive=False) -> dict:
+    """全库。**未归属的脸保持等宽桶**（没有生日可用），
+    所以 onlyAdaptive=True 时只刷「已归属 + 目标人有合法生日」的那些"""
+def auditBuckets() -> dict:
+    """一致性巡检（只读，不写）：
+    - bucketWidth 分布：宽 3 / 宽 10 = 自适应，宽 5 = 等宽降级
+    - 孤儿质心：pb_person_centroid 里的 bucketKey 在该人脸表中**没有任何脸**
+    - 失配脸：该人脸表的 shotBucket 集合与该人质心的 bucketKey 集合不相交
+    - 无主质心：bucketKey='ALL' 之外的桶，sampleCount>0 但该桶已无脸"""
+```
+
+**巡检是本步最有价值的产出** —— 它能把「桶口径不一致」这类静默失配变成一条明确结论。
+请把 `auditBuckets()` 的输出做成一目了然的表格（宽度分布用计数 + 举例）。
+
+## 二、把刷桶接进写入路径（**根治点：不要靠人记得跑脚本**）
+
+| 触发点 | 做什么 |
+|---|---|
+| **`assigner.assign()`** | 归属那一刻**生日才确定** → 先按新主人的 birthday 重刷这张脸的 `shotBucket`，**再**重算质心。⚠️ 这是最关键的一处 |
+| `assigner.unassign()` / `fix('unknown')` | 退回未归属 → 刷回**等宽降级桶**（生日不再是这个人的） |
+| `fix('stranger')` | 同上（该脸永远不会再匹配，刷成等宽即可） |
+| `merger.merge()` | 迁移到目标人后，按**目标人**的 birthday 重刷全部迁移的脸（源与目标的 birthday 可能不同 → 桶键不同） |
+| `merger.split()` | 拆出的人（新建档案）生日可能为空 → 刷成等宽降级桶 |
+| **联系人导入后** | `import_contacts` 落库完成 → 对**本次新建/更新的人**跑 `rebucketPerson` + `recomputePerson`（生日到位了，桶键才该变） |
+| 扫描提取后（`faceStore`） | 保持现状：仍写等宽占位桶（此时还不知道这张脸是谁），由 `assign` 负责刷。**但要在 faceStore 的函数注释里把「谁负责重刷」写清楚**，别再留「步骤 6 会覆盖」这种已经失效的承诺 |
+
+## 三、DR-21：未归属脸的候选桶放宽到「全部已启用桶」
+
+`matcher.py` 现在对所有脸都用 `bucket.neighborBucketKeys(bucketKey, neighbor)`。
+问题：**未归属脸的桶是等宽 5 年，而别人的质心是自适应桶（宽 3 / 宽 10），键根本不对齐**
+（等宽 `"2000-2004"` 的邻居是 `"1995-1999"`/`"2005-2009"`，而自适应童年桶可能是 `"1997-1999"`）
+→ **未归属脸一把质心都取不到，只能靠 `ALL` 兜底 → 等于退化成不分桶**，
+而这恰恰是最需要匹配的阶段。
+
+改法：
+```python
+def candidateBucketsOf(faceRow, index=None):
+    """faceRow['personCode'] 为空 -> 返回 None（表示"全部已启用的桶"）
+    已归属 -> bucket.neighborBucketKeys(shotBucket, neighbor)"""
+```
+调用侧：候选为 `None` 时用 `index.subset(index.全部桶键)`（**`CentroidSubset` 的按人连续段与
+`np.maximum.reduceat` 优化完整保留，不用重写**），并把 `ALL` 一并加入。
+
+**成本核算要给出实测数字**（别只说「可接受」）：
+- 质心行数 = Σ(人 × 每人启用桶数)，行数 × 512 × 4B = 内存
+- 单脸一次矩阵乘的耗时（ms）
+- 10 万张脸全量重匹配的 wall-clock
+
+**注意与 DR-12 的关系**：DR-12 说「按候选桶惰性加载，10 万 × 512 = 205MB 已超预算」。
+本条放宽后，未归属脸要全量 —— 但**质心行数远小于人脸行数**（质心 = 人数 × 桶数，几百到几千行，
+几 MB），人脸的 embedding 才是 205MB 那一项，而那部分**没有变化**。请在报告里把
+「质心矩阵」与「人脸向量矩阵」两笔内存分开列，别混成一个数字。
+
+## 四、DR-22：硬顺序 + 前置检查
+
+- `centroid.recomputePerson()` / `recompute()` 执行前**先做一致性检查**：
+  脸表实际 `shotBucket` 集合 vs 质心表 `bucketKey` 集合，不一致 → **抛错并提示先跑 rebucket**，
+  **不要默默按旧口径算**（那会造出僵尸质心 + 新桶无质心 → 匹配率归零且库里看不出异常）
+- 提供 `tools/rebucket_cli.py`：
+  `--all` / `--person <code>` / `--photo <code>` / `--audit` / `--dry-run` / `--recompute`
+  ⚠️ `--recompute` 必须是**刷完桶之后**才重算，不要提供一个「只重算」的路径让人跳过刷桶
+
+## 五、验收清单（逐条实际运行，不要只写代码就宣称通过）
+
+### A. 桶口径修好了
+1. `auditBuckets()` 改前 vs 改后的 **bucketWidth 分布**：改前宽 5 占比 ~100%；改后
+   宽 3 / 宽 10 出现（有生日的人），宽 5 只剩「无生日 + 未归属」那些
+2. 抽 3 个人，各挑一张有 `shotYear` 的脸，贴出 `shotBucket` 改前 → 改后的值，
+   并手算 `bucketKeyAdaptive(shotYear, birthYear)` 验证与库里的值一致
+3. `rebucketPerson` 对**已归属 + 有生日**的人：桶键集合与 `bucket.bucketKeyAdaptive` 逐条重算一致
+4. 未归属的脸：桶宽仍是 5（降级），**不被误改成自适应桶**
+
+### B. 写入路径已接上（**这是根治点，逐个测**）
+5. 新建一个人（有生日）→ `assign()` 一张脸 → **该脸 `shotBucket` 立即变成自适应桶**（不是等宽）
+6. `fix('unknown')` / `unassign()` → 该脸刷回等宽降级桶
+7. `fix('stranger')` → 同上
+8. `merge()`（源与目标 birthday 不同）→ **迁移后的脸按目标人生日重刷**，与目标人其他脸同口径
+9. `split()` 拆出的人 birthday 为空 → 脸刷成等宽降级桶
+10. 走查确认：`assign()` 里「先刷桶、后重算质心」的顺序不可颠倒
+
+### C. DR-21 生效
+11. 构造一张**未归属**脸 + 一个**有自适应桶质心**的人 → 该脸能拿到分数（改前拿不到，改前请先贴出对照）
+12. 已归属脸仍走相邻三桶（**不要被 R2 改成全量**）：贴出候选桶列表证明仍是 3 个桶 + `ALL`
+13. `candidateBucketsOf()` 对未归属脸返回 `None` → 调用侧正确转成「全部桶」
+14. `CentroidSubset` 的 reduceat 路径仍被使用（代码走查 + 与改前相同的打分结果对照）
+
+### D. 顺序纪律
+15. 故意先 `recompute` 再 `rebucket`（用 `--recompute` 单独跑一次制造）→ 确认
+    **前置检查抛错并提示先跑 rebucket**，而不是默默产出错误的质心
+
+### E. 一致性与回归
+16. `auditBuckets()` 改后：**孤儿质心 0 条、失配脸 0 条、无主质心 0 条**（贴出完整报告）
+17. `pytest code/src/test` 全绿
+18. **`tools/verify_bucket_gain.py` 给出自适应 vs 等宽的真实 FR 对比数字** ← 本步最硬的证据，
+    之前 S0 的结论是 32.75% → 19%，请给出**生产库口径下**的实测值
+19. `tools/run_match.py` 在真实库上跑一批脸，给出三段式分布（auto/review/cluster）与耗时
+20. 修完后**全库重算质心**（`--all --recompute`），给出重算前后 `pb_person_centroid` 行数变化
+21. `photoDir` 零风险：全程文件数与总字节数不变
+22. 迁移/备份口径不变：`backup.py` 仍可整库拷贝（本步不得让 `photo\` 变成可写）
+
+## 六、硬约束
+- **原图绝对只读**：`d:\PhotoLib\photo` 一律只读
+- **业务层禁止裸 SQL**：一律经 `sqliteCommon`
+- **不要改成「匹配时实时算桶键」**（方案 B）：`CentroidSubset` 的 reduceat 优化会被推翻、
+  匹配侧要重写。用户已定方案 A
+- **不要用 `update_pb_face` 写 `shotBucket`**：它写不进 NULL/变化不可靠，走 upsert +
+  `forceColumns`（faceStore/assigner 文件头已有该纪律的记录）
+- **不要动 `pb_face` 的这些列**：`personCode` / `isConfirmed` / `isStranger` / `clusterCode` /
+  `embedding` / `bbox` / 各种 score。R2 **只动 `shotBucket` 一列**
+- 现有代码风格（文件头纪律说明、`_VERSION`、日志、`FACE_IDENTITY_COLUMNS` 等常量）保持一致
+- 不要顺手重构与本步无关的代码
+
+## 七、完成后必须输出
+1. 改动文件清单（新增 / 修改，逐个列路径）
+2. 验收结果（上面 22 条**逐条**给命令与实际输出 / 数值）
+3. **`auditBuckets()` 改前 vs 改后的完整报告**
+4. **内存两笔账分开列**：质心矩阵（MB）与人脸向量矩阵（MB）
+5. **`verify_bucket_gain.py` 的自适应 vs 等宽 FR 实测对比**
+6. 遗留问题与需要我决策的点
+````
+
+---
+
+## 修正步骤 R3 · 修 `(0,0)` 占位坐标（DR-25）
 
 > **什么时候做**：现在。地点功能的第一步，**也独立有价值**（26 张照片的地点现在是错的）。
 > **为什么必须最先做**：错的 `placeName` 已经落库了，不清掉的话后面所有地点视图都被污染。
 
-```text
+````text
 【photo-browser · 修正步骤 R3 · 修 (0,0) 占位坐标】
 
 ## 目标
@@ -133,17 +618,16 @@ def isRealCoordinate(lat, lon) -> bool:
 3. **lat/lon 是否一并清理的结论与理由**
 4. 第三节三个数字
 5. 遗留问题与需要我决策的点
-```
+````
 
 ---
----
 
-# 修正步骤 R4 · 地点数据层（geohash 归并 + 目录名抽取 + API）
+## 修正步骤 R4 · 地点数据层（geohash 归并 + 目录名抽取 + API）
 
 > **什么时候做**：R3 验收通过后。
 > **做什么**：把「地点」变成可验证的数据。本步**不做界面**。
 
-```text
+````text
 【photo-browser · 修正步骤 R4 · 地点数据层】
 
 ## 目标
@@ -340,26 +824,16 @@ class DirPlaceHint:
 4. **目录名采纳/排除清单 + 判据说明**
 5. 归并误判/漏判的自查结论（哪些地点你看着不对、为什么）
 6. 遗留问题与需要我决策的点
-```
-
----
----
-
-# 修正步骤 R5 · 地点界面（人物 → 地点列表 → 时间线）
-
-> **什么时候做**：R4 验收通过、**地点清单人工核对过之后**。
-> 本步的提示语**暂未编写** —— 界面形态要在看过真实地点清单之后再定（现在定会返工）。
-> 届时按 R4 输出的「地点清单」决定：地点怎么分组（按省/市？按时间跨度？）、要不要地图、
-> 人物视角与地点视角的入口放哪。
+````
 
 ---
 
-# 修正步骤 R4a · 地点中文名（DR-28/29）
+## 修正步骤 R4a · 地点中文名（DR-28/29）
 
 > **什么时候做**：现在。地点界面（R5）之前必须做完，否则界面出来还是英文。
 > **前置**：R3 已完成；`pb_place` + `placeStore.py` + `/api/places` 已落地（本步是**增量**，不是重写）。
 
-```text
+````text
 【photo-browser · 修正步骤 R4a · 地点中文名】
 
 ## 目标
@@ -567,520 +1041,17 @@ def resolvePlaceFilter(value) -> tuple:
 5. **你截图那张照片的 `placeZh` 实际值**
 6. `amap-geo` 的首次加载耗时实测
 7. 遗留问题与需要我决策的点
-```
-
----
----
-
-# 修正步骤 R4b · 目录名线索接入（DR-25/30）
-
-> ⚠️ **暂未编写**。R4a 完成后决定要不要做 —— 前提是回答：
-> 「地点字典只有 65 张 GPS 照片，而目录名线索有 512 张。值得为它扩表吗？」
-> 若做，涉及 `pb_photo` 加列 + `rebuildPlaces` 的聚合键变更，会影响 `placeCode` 派生，
-> 需重新评估 DR-28 的 B 方案是否还成立。
+````
 
 ---
 
-# 修正步骤 R5 · 地点界面（人物 → 地点列表 → 时间线）
-
-> **什么时候做**：R4a 完成、`pb_place` 清单人工核对过之后。
-> 本步的提示语**暂未编写** —— 界面形态要在看过真实地点清单之后再定。
-> 届时需要落实的**显示契约**（本步已定）：
-> `显示名 = placeZh ?? placeName`；地点筛选两套值都认；`placeZh` 为空即回退英文。
-
----
-
-# 修正步骤 R6 · 照片详情左右翻页（A 档 · DR-31）
-
-> **什么时候做**：R4a 之后（或随时，与地点线无依赖）。
-> **做什么**：P-03 照片详情页支持左右箭头翻看上一张/下一张。**只做前端，后端零改动。**
-
-```text
-【photo-browser · 修正步骤 R6 · 照片详情左右翻页（A 档）】
-
-## 目标
-P-03 照片详情页支持「上一张 / 下一张」：**键盘 ← →** + **左右浮动箭头按钮**。
-**只做 P-03；网格页不动；后端零改动。**
-
-## 前置
-步骤 1–12 已完成。P-03（`PhotoDetailView.vue`，35KB）已上线，`store/photos.js` 已实现列表。
-
-## 必须先读的项目文档
-- plan/开发计划.md 第四节 **DR-31**（本步全部口径）
-
-## 必须先读现有代码
-### 1. `code/webserver/src/views/PhotoDetailView.vue`
-- `onMounted` 现在只有 `review.ensurePersonDirectory()` / `reloadPhoto()` / `probeRange()`
-  —— **没有任何键盘监听**，本步要加
-- 已有 `const zoomPercent = ref(100)` 与 `zoomStyle` —— ⚠️ 箭头不能与缩放交互打架
-- 已有 `FixFaceDialog`（改判入口，DR-16）—— ⚠️ 见「四、与改判的顺序」
-
-### 2. `code/webserver/src/store/photos.js`
-- `items`（已加载列表，**累积上限 `MAX_APPENDED_CELLS = 1800`**）、`total`、`page`、`size`
-- `current`（当前详情对象）、`currentLoading`
-- `hasMore` / `canAppendMore` / `appendCapped` / `rangeText`
-- `applyFilters()` / `resetFilters()` —— **两者都会把 `items` 清空并回到第 1 页**
-
-### 3. `code/webserver/src/views/ReviewView.vue` 的键盘纪律（本步要照抄）
-```js
-function onKeydown(event) {
-  if (activeTab.value !== 'pending') return
-  if (event.metaKey || event.ctrlKey || event.altKey) return
-  if (isTypingTarget(event.target)) return
-  if (overlayOpen()) return
-  ...
-  event.preventDefault()
-}
-onMounted(async () => { window.addEventListener('keydown', onKeydown); ... })
-onBeforeUnmount(() => { window.removeEventListener('keydown', onKeydown); ... })
-```
-⚠️ `isTypingTarget` / `overlayOpen` 这两个判据**复用或照抄**，不要另写一套。
-
-## 一、新增 `code/webserver/src/components/photo/PhotoPager.vue`
-
-单一职责组件：**左右箭头 + 位置提示**。P-03 用它，将来 `PersonDetailView` 的时间轴详情也能复用。
-
-```vue
-<template>
-  <div class="photo-pager">
-    <button class="pager-btn" :disabled="!canPrev" aria-label="上一张"
-            @click="$emit('nav', -1)"> <ChevronLeft /> </button>
-    <div class="pager-info">
-      <span class="pager-index">{{ index }}</span>
-      <span class="pager-total">/ {{ total }}</span>
-    </div>
-    <button class="pager-btn" :disabled="!canNext" aria-label="下一张"
-            @click="$emit('nav', 1)"> <ChevronRight /> </button>
-  </div>
-  <p v-if="loadedHint" class="pager-hint">{{ loadedHint }}</p>
-</template>
-```
-
-| prop | 说明 |
-|---|---|
-| `index` | 当前在 `items` 里的**下标 + 1**（1 基）；不在列表里时为 0 |
-| `total` | **`items.length`**（不是 store 的 `total`！见 DR-31 边界纪律③） |
-| `loadedHint` | `items.length < store.total` 时的补充提示（如「已加载 60 / 2137，滚动可继续加载」） |
-
-⚠️ **禁止循环**：到第一张左箭头灰、到最后一张右箭头灰，**不要**「到底跳回第一张」。
-⚠️ 箭头**必须是真 `<button>`**（不用 `div`），带 `aria-label`、`:disabled`、`focus-visible` 样式。
-
-## 二、`PhotoDetailView.vue` 的改动
-
-### 2.1 计算前后张（**不要新写一个接口**）
-
-```js
-const photoStore = usePhotosStore()
-
-/** 当前 photoCode 在已加载列表里的下标；-1 = 不在列表里 */
-const currentIndex = computed(() =>
-  photoStore.items.findIndex((p) => p.photoCode === current?.photoCode))
-
-const canPrev = computed(() => currentIndex.value > 0)
-const canNext = computed(() =>
-  currentIndex.value >= 0 && currentIndex.value < photoStore.items.length - 1)
-/** ⚠️ -1 时（不在列表里）两个都 false —— DR-31 边界纪律① */
-const pagerTotal = computed(() => photoStore.items.length)
-```
-
-### 2.2 翻页动作
-
-```js
-async function gotoOffset(delta) {
-  if (busy.value) return                      // ⚠️ 改判进行中禁翻（见四）
-  const target = photoStore.items[currentIndex.value + delta]
-  if (!target) return
-  busy.value = true
-  try {
-    await router.push({ name: 'photo-detail', params: { photoCode: target.photoCode } })
-    // ⚠️ 不要预取上一张，只预取下一张（DR-31）
-    prefetchNext()
-  } finally {
-    busy.value = false
-  }
-}
-```
-
-- 路由参数用 `photoCode`（`/photos/:photoCode`），保持「可分享 URL、可刷新」
-- ⚠️ **`currentIndex` 依赖 `photoStore.items`** ⇒ `applyFilters()` / `resetFilters()` 清空
-  `items` 后，`currentIndex` 会变成 -1 ⇒ 箭头自动禁用。**这是期望行为**，不要额外去「记住旧索引」
-
-### 2.3 键盘监听（照抄 ReviewView 三条纪律 + 第四条）
-
-```js
-function onKeydown(event) {
-  if (event.metaKey || event.ctrlKey || event.altKey) return
-  if (isTypingTarget(event.target)) return
-  if (overlayOpen()) return
-  if (event.key === 'ArrowLeft'  && canPrev.value) { event.preventDefault(); gotoOffset(-1) }
-  if (event.key === 'ArrowRight' && canNext.value) { event.preventDefault(); gotoOffset(+1) }
-}
-```
-
-⚠️ **`preventDefault()` 必须调**，否则 `←`/`→` 会触发横向滚动。
-⚠️ `onMounted` 里 `addEventListener`、`onBeforeUnmount` 里 `removeEventListener`（ReviewView 已有这个范式）。
-
-**不要**占用其他键（`Esc` 关闭、`F` 全屏留给将来）。**不要**加 `↑`/`↓`（会与缩放/滚动打架）。
-
-### 2.4 预取下一张（只做 1 张）
-
-```js
-function prefetchNext() {
-  const next = photoStore.items[currentIndex.value + 1]
-  if (!next) return
-  // ⚠️ 用 requestIdleCallback 或 setTimeout 延后；连按 → 时不要堆成一片请求
-  idle(() => { fetch(`${API_BASE}/api/original/${next.photoCode}`, { headers: { Range: 'bytes=0-65535' } }) })
-}
-```
-⚠️ `/api/original` **已支持 Range**（步骤 4 已交付），所以预取首块即可，别整张拉。
-⚠️ 预取失败**静默忽略**，不许弹错误提示（用户没要求看下一张）。
-
-## 三、样式与可访问性
-
-| 项 | 要求 |
-|---|---|
-| 位置 | 大图**左右两侧垂直居中**，浮动；`hover` 才显形（`opacity-0 → 1`），避免干扰看图 |
-| 圆角/阴影 | 圆形按钮 + 轻阴影（沿用 `--radius` 与浅色 token） |
-| 响应式 | `<768` 时缩小按钮（避免遮挡）；**不要**引入手势滑动 |
-| 深色主题 | 两套主题下都要可辨（箭头背景用 `bg-card` / `border-card` 类，不用硬编码色） |
-| 无障碍 | `<button>` + `aria-label="上一张/下一张"` + `focus-visible` 环；`disabled` 用 `disabled:` 变体而非 JS 控制 `opacity` 硬改 |
-| 位置提示 | 箭头之间的 `12 / 60`，小号 `text-secondary`；`loadedHint` 放在下方、更弱的颜色 |
-
-## 四、⚠️ 与改判（DR-16）的顺序 —— 本步最容易漏的一条
-
-P-03 上有「✗ 不是他」改判（`FixFaceDialog`）。改判成功后：
-- 该脸的 `personCode` / `isStranger` 变了 ⇒ **人脸框状态要重画**（`FaceBox` 的描边三态）
-- `pb_photo_person` 变了 ⇒ 侧栏「出现的人」列表要重画
-
-⚠️ **若改判请求未完成就按 `→` 跳走**，回来时状态陈旧，**且不报错** —— 表现是「我明明改判了，人脸框还是绿的」。
-
-**做法**：
-1. `busy` 标志位覆盖「改判请求进行中」与「翻页进行中」
-2. `busy` 为真时 **两个箭头禁用 + 键盘不响应**
-3. 改判成功后**先 `reloadPhoto()` 刷当前图，再解禁**
-
-⚠️ 验收第 6 条专门测这个：改判中途点箭头 → 应无反应；改判成功后当前图的人脸框与侧栏都已更新。
-
-## 五、验收清单（逐条实际运行）
-
-1. P-03 打开时左右箭头**正确显示/禁用**：第一张左箭头灰、最后一张右箭头灰
-2. 点箭头 / 按 `←` `→` 都能翻到相邻照片，**URL 的 `photoCode` 同步变化**（可分享、可刷新）
-3. **不循环**：第一张连按 `←` 停在原地；最后一张连按 `→` 停在原地
-4. 位置提示 `12 / 60` 正确；**分母是 `items.length` 不是 `total`**
-5. `items.length < total` 时出现补充提示（如「已加载 60 / 2137，滚动可继续加载」）
-6. **⚠️ 改判顺序**：改判进行中点箭头 → **无反应**；改判成功后 → 人脸框与侧栏「出现的人」都已更新，然后才能翻
-7. **不在列表里**：从 P-06 待确认队列点开一张照片 → **两个箭头都禁用**，且有说明「不在当前列表中，无法连续翻页」
-8. **换筛选后**：在 P-02 改筛选 → 点进详情 → 索引正确、`items.length` 正确
-9. **三条忽略纪律逐条验**：① 按住 Ctrl/Alt/Shift + `←` 不响应 ② 光标在输入框内按 `←` 不响应
-   （输入框光标移动） ③ `FixFaceDialog` 打开时按 `←` 不响应（不误翻）
-10. `preventDefault` 生效：按 `←`/`→` **页面不横向滚动**
-11. **预取生效**：Network 里能看到下一张的 `/api/original` Range 请求，**且只有 1 张**（不堆成一片）
-12. 预取失败**不弹错误提示**
-13. **网格页 P-02 未受影响**：方向键仍是移动焦点（Tab / 方向键能走到每张缩略图）
-14. `<768` 断点下箭头不遮挡大图；`<1024` 正常
-15. 深色主题下箭头可辨（两套主题都看一遍）
-16. 无障碍：箭头是真 `<button>`、有 `aria-label`、`focus-visible` 环清晰、`disabled` 有视觉态
-17. `npm run build` 通过；`npm run dev` 手动过一遍
-18. **后端零改动**：本步**不改任何 `.py`** —— 用 `git status` 证明（只应有 `.vue` / 可能的 `.js` 改动）
-19. **photoDir 零风险**：全程文件数与总字节数不变
-20. `pytest code/src/test -q` 仍全绿（当前基线 **1237 passed**）
-
-## 六、硬约束
-- **后端零改动**（A 档的核心）：不新增、不修改任何 `.py` / `pb_*.txt`
-- **网格页不动**：P-02 的方向键保持移动焦点（WCAG 2.1 AA 基线）
-- **只占用 `←` `→` 两个键**，不抢其他键
-- 一切读写经既有 store/api 封装，**不要在组件里直接 axios**
-- 现有代码风格（`store` / `api` / `components` 分层、`<script setup>`、Element Plus + Tailwind、主题 token）保持一致
-- 单文件不超过 300 行（`PhotoDetailView.vue` 现有 35KB，若逼近上限请把翻页逻辑拆到 `PhotoPager.vue`）
-- 不要顺手加手势滑动、全屏、缩略图条等本步未要求的功能
-
-## 七、完成后必须输出
-1. 改动文件清单（应只有前端文件）
-2. 验收结果（20 条逐条说明实测情况）
-3. `git status` 证明后端零改动
-4. 第 7 条的实测：从队列点开照片时箭头的实际状态与提示文案
-5. 遗留问题与需要我决策的点
-```
-
----
-
-# 修正步骤 R7 · 人物头像（卡片显示照片 + 样本设默认 · DR-40/41）
-
-> **什么时候做**：随时（与 R5 地点界面**无依赖**，两边都要改人物相关文件时建议串行）。
-> **做什么**：① 人物库卡片中间显示**本人照片**（人脸裁剪图）；② 人脸样本里**任选一张设为该人的默认头像**，可清除。
-> 拆两半：**A 半（①）零迁移、纯读取回退**；**B 半（②）只多一列写入**。先做 A 单独就已解决截图里的问题。
-
-```text
-【photo-browser · 修正步骤 R7 · 人物头像（DR-40/41）】
-
-## 目标
-① P-04 人物库卡片中间显示**本人照片**（人脸裁剪图），不再是首字母占位。
-② P-05 人物详情「人脸样本」里，**人工确认段与自动归属段任选一张 → 设为该人的默认头像**；可清除（回到自动代表脸）。
-拆两半：**A 半（①）纯读取回退、零迁移**；**B 半（②）只多一列写入**。A 单独做即可先上线。
-
-## 前置
-步骤 1–12 与 R3 / R4 / R4a / R4b / R6 均已完成。
-真实库 `d:\PhotoLib\db\photolib.db`：`pb_person` **2029** 行、`pb_face` **3647** 张（但**仅 67 张有归属**），
-`pb_person.avatarFaceCode` 列**已存在**、且**全库几乎为空**（这就是卡片全是字母的原因）。
-
-## 必须先读的项目文档
-- plan/开发计划.md 第四节 **DR-40 / DR-41**（本步全部口径）
-- plan/UI/photo-browser UI 设计.md §4.8（P-04 人物库）/ P-05 人物详情 —— **「改头像」本来就在设计稿的操作行里**
-
-## 必须先读现有代码
-### 1. `code/webserver/src/components/common/PersonCard.vue`
-- 第 40–42 行 `avatarSrc` **只读** `person.avatarFaceCode` ⇒ 空就退到第 45 行的 `initial`（首字母）
-- 第 12–16 行文件头**已经把取舍写死**：头像永远是人脸裁剪图，**不是照片缩略图**（合影里脸太小认不出）—— 本步照此执行
-- 第 95–116 行是头像那块（圆形遮罩 `h-20 w-20`），第 109–115 行是首字母占位
-
-### 2. `code/webserver/src/views/PersonDetailView.vue`
-- 第 76–81 行 `avatarSrc`：`avatarFaceCode` → 否则「第一张确认样本」。⚠️ 与列表页口径**不一致**，本步统一到后端 `coverFaceCode`
-- 第 379–385 行 `setAvatar()` 是**死代码**（模板里没有任何按钮调它，函数体只弹一条「不提供编辑入口」的提示）⇒ **删掉**，换成真的实现
-- 第 554–571 行（人工确认段）/ 第 593–632 行（自动归属段）是样本列表；自动段每张已有「确认 / ✕ 移除」
-
-### 3. `code/src/api/browse.py`
-- 第 234–276 行 `personSummary()`（第 271 行的 `thumbUrl` 就是头像 URL）
-- 第 605 行 `personStatsOf()` —— **本步新函数的样板**：一次 `IN` 查询算一批人，禁止逐人查库
-- 第 298 行 `_inClause()`；第 750–757 行 `listPersons` 的 items 组装；第 784–786 行 `getPerson`
-- 第 871 行 `_faceSummary()`（Tab2 的样本形状，`thumbUrl` = `/api/face/<faceCode>`）
-
-### 4. `code/src/api/contacts.py`
-- 第 415–416 行 `CONTACT_PATCH_COLUMNS`；第 455–515 行 `patchContact` 主流程
-- ⚠️ 第 463–471 行「未知字段优先报错」与「没有任何字段要改」的**顺序不要改**
-- 第 301 行（contacts 列表）与 `code/src/api/place.py` 第 715–720 行也要同步传代表脸
-
-### 5. `code/src/api/dto.py`
-- 第 352–380 行 `ContactPatchBody`（`extra="allow"`：白名单外的键由路由 400 拒掉）
-
-## 一、A 半：卡片显示照片（DR-40）
-
-### 1.1 后端：新增 `personCoverOf(codes)`（放在 `personStatsOf` 旁边）
-
-对每人取一张**代表脸**，优先级：
-`isConfirmed DESC`（用户核对过的优先）→ `detScore DESC` → `quality DESC` → `regYMDHMS ASC`（稳定）。
-
-- 一次 `IN` 查询拿一批人（⚠️ **必须批量**；正式库 2029 人，逐人查就是 N+1）
-- 只取 `delFlag='0'` 且 `personCode IS NOT NULL` 的脸
-- 返回 `{personCode: faceCode}`；**查不到**的人不出现在字典里（调用方 `.get()` 拿 `None`）
-
-⚠️ **不要做 `thumbStore.exists()` 探测**：列表接口不该为每行去碰文件系统（一页 24 次 `stat`，磁盘异常会把列表拖死）。裁剪图缺失由前端 `@error` 兜底。
-
-### 1.2 `personSummary()` 增 `coverFaceCode`
-
-- 新参数 `coverFaceCode=None`；值 = **用户指定的默认（且那张脸还在他名下）→ 否则代表脸**
-  （⚠️ 由 `personCoversOf()` 解析好后传进来，**不要在 `personSummary` 里写 `avatarFaceCode or ...`** ——
-  见文末「R7 落地时的偏差」第 1 条）
-- `thumbUrl`（第 271 行）指向 `coverFaceCode`
-- ⚠️ `avatarFaceCode` 字段**语义不变**（用户指定的默认）；`coverFaceCode` 才是「实际展示的那张」
-- ⚠️ **代表脸绝不写库**：`avatarFaceCode` 为空是**合法状态**，不能变成「浏览一次就写一次库」
-
-接线四处：`browse.listPersons`（750）、`browse.getPerson`（784）、`contacts.py` 列表（301）、`place.py`（715–720 —— 该处已有 `thumbUrl` 字段，一并改口径）。
-
-### 1.3 前端：`PersonCard.vue`
-
-- `avatarSrc` 改成 `faceUrl(person.avatarFaceCode || person.coverFaceCode)`（任一为空 → 退首字母）
-- 头像尺寸 **`h-20 w-20` → `h-24 w-24`（96px）**（用户要的是「中间显示照片」，80px 太小）
-- `<img>` 加 **`@error`** ⇒ 加载失败切回首字母占位（**不允许出现破图**）
-- 首字母占位（109–115 行）**保留**：没有任何脸的人（刚导入的联系人）仍然靠它
-
-### 1.4 前端：`PersonDetailView.vue` 头部
-
-第 76–81 行的 `avatarSrc` 改为优先用后端 `coverFaceCode`，**与列表页口径统一**（不要再自己取 `facesConfirmed[0]`）。
-
-## 二、B 半：人脸样本设默认头像（DR-41）
-
-### 2.1 后端：`avatarFaceCode` 进 PATCH 白名单
-
-- `dto.ContactPatchBody` 加 `avatarFaceCode: Optional[str]`
-- `CONTACT_PATCH_COLUMNS` 加 `"avatarFaceCode"`
-- `patchContact` 里加**写库前**的校验：
-  - 非空 ⇒ `browse.faceRow(faceCode)` 必须存在、未软删、且 `face.personCode == personCode`；
-    **不存在/已软删 → 404 `NOT_FOUND`**，**属于别人 → 400 `PARAM_INVALID`**（见文末偏差第 2 条）
-  - 空串 / `None` ⇒ 清空（回退代表脸），**合法**
-- ⚠️ **不写 `pb_review_log`**、**不重算质心**、**不 rebucket**：头像是展示，不是归属
-- 响应：`changedFields` 天然含它；`personSummary` 已返回 `avatarFaceCode`
-
-### 2.2 前端：Tab2 就地设默认
-
-- ⚠️ 走既有封装：`store/persons.js` 加 `setAvatar(personCode, faceCode)`（内部调 `api/contacts.js` 的 `patchContact`，成功后重取 `fetchPerson` + `fetchFaces`）。**组件里不要直接 axios**
-- 两段样本（554–571 / 593–632）每张加「设为默认」
-- **当前默认那张**：加实心描边 + 「默认」角标（⚠️ 描边语义沿用 `utils/faceState.js` 那套，**不要另写配色**）
-- 头部接「改头像」按钮（设计稿 P-05 操作行里本来就有）：打开「选择默认头像」弹窗 —— 列出全部样本、点选即设、内含「清除默认」
-- 选中**自动归属段**的样本时给一句说明：「这张是机器认的、还没确认；**头像只影响展示，不影响匹配**」
-- 成功 Toast「已设为默认头像」；清除后 Toast「已清除默认头像，已回到自动代表脸」
-
-### 2.3 边界
-
-| 情况 | 行为 |
-| --- | --- |
-| 默认那张脸被「移除」/「合并走」 | `avatarFaceCode` **留着不动**，展示层自动降级到代表脸（DR-41 ④ 的刻意选择） |
-| 库里没有任何脸 | 首字母占位；「设为默认」入口**隐藏或禁用并说明原因** |
-| 已停用的人 | 头像照旧（`opacity-60`），不改行为 |
-| 传别人的 `faceCode` | 400，且库里一个字不变 |
-
-## 三、样式与可访问性
-
-| 项 | 要求 |
-| --- | --- |
-| 卡片头像 | 圆形（沿用现有 `rounded-full`），96px，`object-cover` **铺满圆框**。⚠️ **不要**在圆框内留一圈底色环把照片缩小 —— 2026-10-08 试过（`p-2` + 内层 `rounded-full`，照片缩到 ~75%），观感成了两个同心圈，用户否决并已回退 |
-| 「默认」角标 | **不只靠颜色**（DR-16② 的三重编码纪律）：图标 + 文字「默认」+ 描边 |
-| 可点区域 | 「设为默认」是真 `<button>`，带 `aria-label`（含年份），有 `focus-visible` 环 |
-| 深色主题 | 两套主题都过一遍（用 `bg-card` / `border-line` 类，不硬编码色） |
-| 图片加载 | 一律 `loading="lazy"` + `decoding="async"`；`/api/face` 已是 160px 方图，前端不再裁 |
-
-## 四、验收清单（逐条实际运行）
-
-1. P-04 一页 24 人：**所有「有人脸」的人卡片中间都显示本人照片**，不再全是字母
-2. **没有任何脸**的人仍显示首字母，且接口 200、无报错、无破图
-3. 手动把某人的 `avatarFaceCode` 改成一个**已软删的 faceCode** → 卡片自动降级到代表脸（**不出现破图**）
-4. P-05 Tab2 **人工确认段**任一样本可设默认：设置后**详情头部与 P-04 卡片同时更新**
-5. P-05 Tab2 **自动归属段**任一样本可设默认（并出现「只影响展示」的说明）
-6. 「清除默认」后回到代表脸（`avatarFaceCode` 变 NULL）
-7. 传**别人的** `faceCode` → **400**，且 `pb_person` 该行一个字不变（连 `modifyYMDHMS` 都不变）
-8. 传不存在的 `faceCode` → **404**（不是 500，也不是静默成功）
-9. 设默认**不影响匹配**：`pb_person_centroid` 的 `modifyYMDHMS` 不变；`pb_face` 零变动
-10. 设默认**不产生 `pb_review_log`** 记录（前后 `COUNT(*)` 一致）
-11. 失效场景：把默认那张脸用「✕ 移除」（`fix('unknown')`）掉 → 卡片与头部**自动降级**，无破图
-12. **N+1 检查**：`/api/persons?size=24` 的 SQL 日志里 `pb_face` 查询**只有 1 条**（不是 24 条）
-13. 停用的人仍正常显示头像（`opacity-60`），不报错
-14. 深色主题下卡片头像与「默认」角标均可辨
-15. 无障碍：「设为默认」是真 `<button>` + `aria-label`；「默认」角标有文字、不只靠颜色
-16. `npm run build` 通过；`npm run dev` 手动过一遍
-17. `pytest code/src/test -q` 全绿（R7 完成后基线 **1371 passed / 3 skipped**；改动前为 1237）
-18. **原图零风险**：`d:\PhotoLib\photo` 的文件数与总字节数全程不变
-19. `git status` 里**没有任何 `pb_*.txt` 改动**（本步**不改表**：`avatarFaceCode` 列早就存在）
-
-## 五、硬约束
-- **只写 `pb_person.avatarFaceCode` 一列**：不碰 `pb_face`、不碰 `pb_person_centroid`、不写 `pb_review_log`
-- **不改表、不重跑生成器、不需要 `build_db --migrate`**（`avatarFaceCode` 列已存在）
-- **不新增任何图片编辑/覆盖/删除入口**（原图只读红线）：设头像只写一个 faceCode，**不生成任何图片文件**
-- 代表脸**必须批量 IN**；列表接口**不碰文件系统**
-- 一切读写经既有 `store` / `api` 封装；业务层禁止裸 SQL
-- 复用既有分层与双主题 token；`<script setup>` + Element Plus + Tailwind 风格保持一致
-- 单文件不超过 300 行（`PersonDetailView.vue` 已接近上限；让文件超标就抽 `components/common/AvatarPicker.vue`）
-- 不要顺手接通讯录头像 `avatarFile`，不要顺手做「头像上传/裁剪」—— 都不是本步
-
-## 六、完成后必须输出
-1. 改动文件清单（后端 / 前端分开列）
-2. 验收结果（19 条逐条说明实测情况）
-3. 第 12 条的实测证据：`/api/persons?size=24` 的 SQL 条数
-4. 一张 P-04 的实际截图（卡片中间出现照片之后的样子）
-5. `SELECT COUNT(*) FROM pb_review_log` 在设置头像前后的对比值
-6. 遗留问题与需要我决策的点
-```
-
----
-
-## ⚠️ R7 落地时的偏差（执行后回填，供以后回看）
-
-| # | 提示语原样 | 落地成什么 | 为什么 |
-|---|---|---|---|
-| 1 | `avatarFaceCode` 失效时「展示层自动降级到代表脸」 | **降级由服务端 `personCoversOf()` 做**，不是前端；前端**只认 `coverFaceCode`** | 第一版把口径写成 `coverFaceCode = avatarFaceCode or 代表脸`，**没校验那张脸还在不在他名下** ⇒ 默认失效后卡片仍指向已删除的脸（`/api/face` 404 = 破图），DR-41④ 承诺的回退**没有发生**。用例 `test_defaultFaceRemovedDoesNotClearAvatar` 当场抓出。修法：新增 `_liveFaceOwnersOf()` 一次 IN 判「还活着且还属于他」，`personSummary` 不再自己 `or`（详见 DR-40 落地补充） |
-| 2 | 提示语写「不存在的 faceCode → **400**」 | **404 `NOT_FOUND`** | 本项目已有约定：`personCode` / `photoCode` / `faceCode` 查不到一律 404（`dto.CODE_NOT_FOUND` 的说明里就列了 faceCode）。为单个字段改全局错误码映射会让前端多记一个特例。「这张脸属于**别人**」仍是 400（请求值不对） |
-| 3 | 四处接线（persons / person detail / contacts / place） | **六处**（多了 PATCH 响应与家庭成员） | 那两个接口也在返回 `personSummary`。少接线的一处症状是「同一张脸在 A 页有照片、B 页是首字母」，接口全 200、不报错 |
-| 4 | 「每张样本加『设为默认』」 | 人工确认段用**实心按钮**、自动段并进原有的 `确认 / 移除` 行；另加头部「改头像」弹窗 | 64px 宽的样本格塞第三个按钮会换行；自动段本来就有动作行，就地并列比新开一行短。弹窗（`AvatarPicker`）解决「样本上百张时要在 Tab2 里滚很久」的问题 |
-| 5 | 「加实心描边」标出当前默认 | 改成**品牌色环（`ring`）+ ★ 图标 + 「默认」文字**，**不动描边样式** | 描边样式承担「归属来源」这一维（实线=人工确认 / 虚线=机器认的，`utils/faceState.js`）。拿它表示「这是默认」会把两种语义混成一种 |
-| 6 | 未提 | 报错文案带**双方姓名**、且**不含 Markdown 星号** | message 是给人看的一句话，会被原样 Toast；只报「不支持」用户不知道下一步做什么 |
-
----
-
-# 修正步骤 R8 · 照片年代修正（人工修正拍摄年 · DR-42）
-
-> **什么时候做**：随时（与 R5 地点界面**无依赖**）。用户看完 P-03 截图提出「这个照片的年代桶是错误的」。
-> **做什么**：给照片加一个「人工修正拍摄年」，并在照片详情页提供**编辑入口** —— 让这张照片里每个人脸的**年代桶**、时间筛选、年代跨度、地点年份一起变正确。
-> **核心判断**：这**不是**「桶算错了」，而是喂给桶公式的**拍摄年不可信** —— 所以修照片的年份，不是改人的桶。
-
-```text
-【photo-browser · 修正步骤 R8 · 照片年代修正（DR-42）】
-
-## 目标
-① `pb_photo` 新增「人工修正拍摄年」；**有效拍摄年 = override 优先于 shotYear**。
-② P-03 照片详情「拍摄信息 › 年代」行提供**编辑入口**（先看影响面，再落库）。
-③ 落库后这张照片**全部**人脸重刷年代桶 + 涉及人物质心重算（DR-22 的硬顺序）。
-④ 可撤销（pb_review_log opType=BUCKET_FIX）。
-
-## 前置
-步骤 1–12 与 R3 / R4a / R4b / R6 / R7 均已完成。
-真实库现象：`Len Family/董家老相册/相片纸(2).jpg` 读出来是 **2019-07-19**（翻拍时间），
-而照片本身拍于 1960 年代 —— 一位 1938-12-30 生的人因此落在「2016-2025」，
-按真实年代应当是「1956-1965」。**公式没错，输入错了。**
-
-## 必须先读的项目文档
-- plan/开发计划.md 第四节 **DR-42** 与 **DR-42 落地补充**（本步全部口径）
-- plan/数据库设计.md §4.4 `pb_photo` 的「有效拍摄年」段（含为什么表达式不走索引）
-- plan/开发计划.md「⚠️ 修正步骤 R2」（DR-20/21/22：桶是派生值、刷桶与重算的硬顺序）
-
-## 必须先读现有代码
-### 1. `code/src/engine/match/` —— 分桶与刷桶
-- `bucket.py` 第 235–271 行 `bucketKeyAdaptive(shotYear, birthYear)`：桶 = f(年, 生日)，**规则只在这一处**
-- `rebucket.py` 第 200–218 行 `shotYearOf()`：**全项目唯一**的 photoCode → 年份回查点（改这一处即覆盖 `rebucketFace/Photo/Person/All` 全部路径）
-- `rebucket.py` 第 357–390 行 `rebucketPhoto()`：一张照片的全部人脸重刷（只改 `shotBucket` 一列）
-- `centroid.py` 第 389–419 行 `recomputePerson()`：会 `dropBucket` 掉没样本的旧桶，**执行前**跑 DR-22 前置检查
-### 2. `code/src/api/photoAction.py` —— 照片级写的家（两段式范式照抄 `soft-delete`）
-### 3. `code/src/processor/review/assigner.py` 第 108–129 行（opType 登记表）+ `merger.py` 的 `undo()`（**唯一**逆操作入口）
-### 4. `code/webserver/src/views/PhotoDetailView.vue` 第 702–760 行「拍摄信息」区块
-
-## 一、数据层
-1. `pb_photo.txt` 加 `shotYearOverride SMALLINT NULL`，注释写明「人工修正拍摄年 分桶优先 空=未修正」。
-2. 重跑 `python code/src/database/sqliteCodeGenerator.py`（⚠️ **全量，不要用 `-i`**），
-   再跑 `python code/src/tools/build_db.py --migrate`（只加列，不动数据）。
-3. ⚠️ **不要把新列加进 `runner._META_FULL_COLUMNS`**：重扫是"整列替换"语义
-   （`updateColumns` + `forceColumns`），加进去 = 每次重扫都把人工修正洗回 EXIF 年份。
-
-## 二、口径：有效拍摄年（只有两个出口）
-- SQL 侧 `comGD.sqlEffectiveShotYear(alias)`；Python 侧 `rebucket.effectiveShotYear()`。
-- 要替换的读点（**缺一处 = 某处仍按 2019 算，且两处各自看着都对**）：
-  `browse.py`（列表 / 详情 / `shotYearFrom/shotYearTo` 筛选 / 排序白名单 / 人物年代跨度）、
-  `place.py`（年筛选 / 年代直方图 / 地点人物跨度）、
-  `placeStore.py`（字典 `rebuildPlaces` + 实时聚合 `liveAggregatePlaces` 两路的 `MIN/MAX`）。
-
-## 三、写入口（新建 `processor/photoTimeFix.py`）
-- `previewFix()` **纯读**，必须返回 `persons[]`：谁、从哪个桶、到哪个桶
-  （写入的是**照片级**年份，而桶按各人生日现算 —— 一张合影里三个不同生日的人会朝三个方向变）。
-- `applyFix()` 顺序：① 写 override → ② `rebucket.rebucketPhoto` → ③ `centroid.recomputePerson`。
-- `revertFromLog()`：撤销 = 把 override 写回原值 + 重刷桶 + 重算质心。
-- 日志：**主日志 + 每个受影响人一条成员日志**。成员日志必须带 `toPersonCode` ——
-  `/review/log?personCode=` 是**等值**查，不带就查不到，用户的操作历史里看不见这次修正。
-
-## 四、API
-- `GET /photos/{photoCode}/shot-year-fix`（纯读预览；**省略 shotYear = 预览「恢复自动」**）
-- `POST /photos/{photoCode}/shot-year-fix`（不带 `confirm=1` 只返回影响面，带了才执行）
-- ⚠️ `shotYear` 必须**显式给**：不传 → 400；传 `null` → 恢复自动。两者在 JSON 里都是 None，
-  只能靠 `model_dump(exclude_unset=True)` 区分 —— 混在一起会让"前端漏传"变成"静默清掉用户的修正"。
-
-## 五、前端
-- 新建 `components/photo/ShotYearFixDialog.vue`：年份输入 + 影响面清单 + 「恢复自动」。
-- `PhotoDetailView.vue`：拍摄信息加「年代」行（值 + 「人工修正」角标 + 「修正」按钮）。
-- `api/photoAction.js`：`getShotYearImpact` / `fixShotYear`（恢复自动要**显式**传 `{shotYear: null}`）。
-- 撤销侧：`PersonDetailView.vue` 的撤销按钮文案与成功提示必须按 `opType` 区分 ——
-  `/review/revertible` 是**通用**可撤销列表，最新一条可能是 BUCKET_FIX。
-
-## 验收
-见 plan/开发计划.md「修正步骤 R8」的验收栏（8 条），新建 `test/test_photo_time_fix.py` 逐条钉住。
-**最容易漏的一条**是 `test_rescanUpsertKeepsOverride`（重扫 upsert 之后修正还在）——
-它守的是"新列没被顺手加进扫描器的列白名单"这个边界。
-```
-
-## 落地与原提示语的差异（R8 实测）
-
-| # | 原提示语 | 落地成什么 | 为什么 |
-|---|---|---|---|
-| 1 | 用户提「**拖拽**方式或者编辑方式」 | 本轮**只做编辑入口**（P1 再做拖拽） | 拖拽的落点是「**这个人**的桶」，而写入的是**照片级**年份 ⇒ 反解有歧义（10 年桶只能保证落在桶内）；且 `BucketTimeline` 得先有一个「可选桶清单」（含 0 张的空桶）才能当放置区，那是新增 API + 组件改造。编辑入口不依赖这些，且语义更贴近真相（"这张照片是 1960 年拍的"） |
-| 2 | 修「年代桶」 | 只修**到年**（`takenAt` 一个字不动） | 桶只由年决定（用户明确要的也是桶）；改 `takenAt` 会覆盖掉「扫描器读到的 EXIF 时间」这个事实，还引入一个本需求不需要的第二真相。代价是照片流的「年月」分组里它仍在 2019 那一格 —— 已记在 R8 的「已知取舍」 |
-| 3 | 撤销 | **复用** `POST /api/review/undo`（`merger.undo` 分流委托），不新开端点 | 撤销入口只能有一个：两套入口 = 两套闸门（`isRevertible` / `revertedByLogCode`），迟早分叉。⚠️ 委托时要把 `PhotoTimeFixError` **转成 `MergeError`** —— `api/review.py` 的 `_codeOf()` 是按**错误文本**映射状态码的，直接抛新异常会变成 500（"撤销两次"本该是 409） |
-| 4 | 日志 | **主日志 + 每人一条成员日志** | 主日志的 `from/to` 都是空的（一次修正可能牵动多人，写谁都不对），而 `/review/log?personCode=` 是等值查 `toPersonCode` ⇒ 只写主日志的话，**用户在这个人的操作历史里什么都看不到** |
-| 5 | 落库后重算质心 | 重算失败**不当作整体失败**，转成 `warnings[]` 返回 | `recomputePerson` 会先跑 DR-22 前置检查；被修正的人**别的照片**若还残留旧口径桶键，它会抛 `BucketStaleError` —— 而本次这张照片的桶**已经刷对了**。「静默吞掉」与「整次操作失败」都不对，所以把建议命令交给界面显示 |
-| 6 | 未提 | 生成器**必须全量跑**（`sqliteCodeGenerator.py` 不带 `-i`） | 实测踩到：`-i pb_photo.txt` 只生成这一张表的区块，把产物里其余 9 张表的 CRUD **全抹掉了**（2600+ 行 → 997 行）。它是"只处理指定表"的语义，不是"只更新指定表" |
-
----
-
-# 修正步骤 R4b · 目录名线索接入（DR-25/30/32/33/34/35）
+## 修正步骤 R4b · 目录名线索接入（DR-25/30/32/33/34/35）
 
 > **什么时候做**：R4a 已完成，随时可做。
 > **做什么**：把「目录名里的地点」接进地点字典。**这是地点维度最大的一块数据** ——
 > 目录名线索约 **598 张**，是有效 GPS（65 张）的 **9 倍**。
 
-```text
+````text
 【photo-browser · 修正步骤 R4b · 目录名线索接入】
 
 ## 目标
@@ -1329,17 +1300,17 @@ SELECT COALESCE(NULLIF(placeNameDir, ''), placeName) AS placeKey, COUNT(*) ...
 6. 六个特例的判定与理由
 7. `--audit` 的七项输出（幽灵行 / 孤儿 nameZh / 重名 nameZh / 无中心点地点）
 8. 遗留问题与需要我决策的点（**含目录改名后需手动跑两个命令这个已知取舍**）
-```
+````
 
 ---
 
-# 修正步骤 R5 · 地点界面（地点 → 照片流 + 人物「去过的地方」）
+## 修正步骤 R5 · 地点界面（地点 → 照片流 + 人物「去过的地方」）
 
 > **什么时候做**：R4a / R4b 已完成，随时可做。
 > **形态已按 R4b 实测数据调整**（见 DR-37）：主路径是**地点 → 照片流**，不是「人物 → 地点列表」。
 > **本轮不做地图**（11/28 个地点无坐标）。
 
-```text
+````text
 【photo-browser · 修正步骤 R5 · 地点界面】
 
 ## 目标
@@ -1661,18 +1632,502 @@ pb_photo_person 共 66 行，分布在 20 个人上
 5. 第 5 条「实时 join」的实测过程（构造归属 → 接口即刻返回）
 6. `git diff --stat` 证明地点数据层未被改动
 7. 遗留问题与需要我决策的点（**特别是：地图要不要做、若要做怎么解决 11 个无坐标地点**）
+````
+
+---
+
+## 修正步骤 R6 · 照片详情左右翻页（A 档 · DR-31）
+
+> **什么时候做**：R4a 之后（或随时，与地点线无依赖）。
+> **做什么**：P-03 照片详情页支持左右箭头翻看上一张/下一张。**只做前端，后端零改动。**
+
+````text
+【photo-browser · 修正步骤 R6 · 照片详情左右翻页（A 档）】
+
+## 目标
+P-03 照片详情页支持「上一张 / 下一张」：**键盘 ← →** + **左右浮动箭头按钮**。
+**只做 P-03；网格页不动；后端零改动。**
+
+## 前置
+步骤 1–12 已完成。P-03（`PhotoDetailView.vue`，35KB）已上线，`store/photos.js` 已实现列表。
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-31**（本步全部口径）
+
+## 必须先读现有代码
+### 1. `code/webserver/src/views/PhotoDetailView.vue`
+- `onMounted` 现在只有 `review.ensurePersonDirectory()` / `reloadPhoto()` / `probeRange()`
+  —— **没有任何键盘监听**，本步要加
+- 已有 `const zoomPercent = ref(100)` 与 `zoomStyle` —— ⚠️ 箭头不能与缩放交互打架
+- 已有 `FixFaceDialog`（改判入口，DR-16）—— ⚠️ 见「四、与改判的顺序」
+
+### 2. `code/webserver/src/store/photos.js`
+- `items`（已加载列表，**累积上限 `MAX_APPENDED_CELLS = 1800`**）、`total`、`page`、`size`
+- `current`（当前详情对象）、`currentLoading`
+- `hasMore` / `canAppendMore` / `appendCapped` / `rangeText`
+- `applyFilters()` / `resetFilters()` —— **两者都会把 `items` 清空并回到第 1 页**
+
+### 3. `code/webserver/src/views/ReviewView.vue` 的键盘纪律（本步要照抄）
+```js
+function onKeydown(event) {
+  if (activeTab.value !== 'pending') return
+  if (event.metaKey || event.ctrlKey || event.altKey) return
+  if (isTypingTarget(event.target)) return
+  if (overlayOpen()) return
+  ...
+  event.preventDefault()
+}
+onMounted(async () => { window.addEventListener('keydown', onKeydown); ... })
+onBeforeUnmount(() => { window.removeEventListener('keydown', onKeydown); ... })
+```
+⚠️ `isTypingTarget` / `overlayOpen` 这两个判据**复用或照抄**，不要另写一套。
+
+## 一、新增 `code/webserver/src/components/photo/PhotoPager.vue`
+
+单一职责组件：**左右箭头 + 位置提示**。P-03 用它，将来 `PersonDetailView` 的时间轴详情也能复用。
+
+```vue
+<template>
+  <div class="photo-pager">
+    <button class="pager-btn" :disabled="!canPrev" aria-label="上一张"
+            @click="$emit('nav', -1)"> <ChevronLeft /> </button>
+    <div class="pager-info">
+      <span class="pager-index">{{ index }}</span>
+      <span class="pager-total">/ {{ total }}</span>
+    </div>
+    <button class="pager-btn" :disabled="!canNext" aria-label="下一张"
+            @click="$emit('nav', 1)"> <ChevronRight /> </button>
+  </div>
+  <p v-if="loadedHint" class="pager-hint">{{ loadedHint }}</p>
+</template>
+```
+
+| prop | 说明 |
+|---|---|
+| `index` | 当前在 `items` 里的**下标 + 1**（1 基）；不在列表里时为 0 |
+| `total` | **`items.length`**（不是 store 的 `total`！见 DR-31 边界纪律③） |
+| `loadedHint` | `items.length < store.total` 时的补充提示（如「已加载 60 / 2137，滚动可继续加载」） |
+
+⚠️ **禁止循环**：到第一张左箭头灰、到最后一张右箭头灰，**不要**「到底跳回第一张」。
+⚠️ 箭头**必须是真 `<button>`**（不用 `div`），带 `aria-label`、`:disabled`、`focus-visible` 样式。
+
+## 二、`PhotoDetailView.vue` 的改动
+
+### 2.1 计算前后张（**不要新写一个接口**）
+
+```js
+const photoStore = usePhotosStore()
+
+/** 当前 photoCode 在已加载列表里的下标；-1 = 不在列表里 */
+const currentIndex = computed(() =>
+  photoStore.items.findIndex((p) => p.photoCode === current?.photoCode))
+
+const canPrev = computed(() => currentIndex.value > 0)
+const canNext = computed(() =>
+  currentIndex.value >= 0 && currentIndex.value < photoStore.items.length - 1)
+/** ⚠️ -1 时（不在列表里）两个都 false —— DR-31 边界纪律① */
+const pagerTotal = computed(() => photoStore.items.length)
+```
+
+### 2.2 翻页动作
+
+```js
+async function gotoOffset(delta) {
+  if (busy.value) return                      // ⚠️ 改判进行中禁翻（见四）
+  const target = photoStore.items[currentIndex.value + delta]
+  if (!target) return
+  busy.value = true
+  try {
+    await router.push({ name: 'photo-detail', params: { photoCode: target.photoCode } })
+    // ⚠️ 不要预取上一张，只预取下一张（DR-31）
+    prefetchNext()
+  } finally {
+    busy.value = false
+  }
+}
+```
+
+- 路由参数用 `photoCode`（`/photos/:photoCode`），保持「可分享 URL、可刷新」
+- ⚠️ **`currentIndex` 依赖 `photoStore.items`** ⇒ `applyFilters()` / `resetFilters()` 清空
+  `items` 后，`currentIndex` 会变成 -1 ⇒ 箭头自动禁用。**这是期望行为**，不要额外去「记住旧索引」
+
+### 2.3 键盘监听（照抄 ReviewView 三条纪律 + 第四条）
+
+```js
+function onKeydown(event) {
+  if (event.metaKey || event.ctrlKey || event.altKey) return
+  if (isTypingTarget(event.target)) return
+  if (overlayOpen()) return
+  if (event.key === 'ArrowLeft'  && canPrev.value) { event.preventDefault(); gotoOffset(-1) }
+  if (event.key === 'ArrowRight' && canNext.value) { event.preventDefault(); gotoOffset(+1) }
+}
+```
+
+⚠️ **`preventDefault()` 必须调**，否则 `←`/`→` 会触发横向滚动。
+⚠️ `onMounted` 里 `addEventListener`、`onBeforeUnmount` 里 `removeEventListener`（ReviewView 已有这个范式）。
+
+**不要**占用其他键（`Esc` 关闭、`F` 全屏留给将来）。**不要**加 `↑`/`↓`（会与缩放/滚动打架）。
+
+### 2.4 预取下一张（只做 1 张）
+
+```js
+function prefetchNext() {
+  const next = photoStore.items[currentIndex.value + 1]
+  if (!next) return
+  // ⚠️ 用 requestIdleCallback 或 setTimeout 延后；连按 → 时不要堆成一片请求
+  idle(() => { fetch(`${API_BASE}/api/original/${next.photoCode}`, { headers: { Range: 'bytes=0-65535' } }) })
+}
+```
+⚠️ `/api/original` **已支持 Range**（步骤 4 已交付），所以预取首块即可，别整张拉。
+⚠️ 预取失败**静默忽略**，不许弹错误提示（用户没要求看下一张）。
+
+## 三、样式与可访问性
+
+| 项 | 要求 |
+|---|---|
+| 位置 | 大图**左右两侧垂直居中**，浮动；`hover` 才显形（`opacity-0 → 1`），避免干扰看图 |
+| 圆角/阴影 | 圆形按钮 + 轻阴影（沿用 `--radius` 与浅色 token） |
+| 响应式 | `<768` 时缩小按钮（避免遮挡）；**不要**引入手势滑动 |
+| 深色主题 | 两套主题下都要可辨（箭头背景用 `bg-card` / `border-card` 类，不用硬编码色） |
+| 无障碍 | `<button>` + `aria-label="上一张/下一张"` + `focus-visible` 环；`disabled` 用 `disabled:` 变体而非 JS 控制 `opacity` 硬改 |
+| 位置提示 | 箭头之间的 `12 / 60`，小号 `text-secondary`；`loadedHint` 放在下方、更弱的颜色 |
+
+## 四、⚠️ 与改判（DR-16）的顺序 —— 本步最容易漏的一条
+
+P-03 上有「✗ 不是他」改判（`FixFaceDialog`）。改判成功后：
+- 该脸的 `personCode` / `isStranger` 变了 ⇒ **人脸框状态要重画**（`FaceBox` 的描边三态）
+- `pb_photo_person` 变了 ⇒ 侧栏「出现的人」列表要重画
+
+⚠️ **若改判请求未完成就按 `→` 跳走**，回来时状态陈旧，**且不报错** —— 表现是「我明明改判了，人脸框还是绿的」。
+
+**做法**：
+1. `busy` 标志位覆盖「改判请求进行中」与「翻页进行中」
+2. `busy` 为真时 **两个箭头禁用 + 键盘不响应**
+3. 改判成功后**先 `reloadPhoto()` 刷当前图，再解禁**
+
+⚠️ 验收第 6 条专门测这个：改判中途点箭头 → 应无反应；改判成功后当前图的人脸框与侧栏都已更新。
+
+## 五、验收清单（逐条实际运行）
+
+1. P-03 打开时左右箭头**正确显示/禁用**：第一张左箭头灰、最后一张右箭头灰
+2. 点箭头 / 按 `←` `→` 都能翻到相邻照片，**URL 的 `photoCode` 同步变化**（可分享、可刷新）
+3. **不循环**：第一张连按 `←` 停在原地；最后一张连按 `→` 停在原地
+4. 位置提示 `12 / 60` 正确；**分母是 `items.length` 不是 `total`**
+5. `items.length < total` 时出现补充提示（如「已加载 60 / 2137，滚动可继续加载」）
+6. **⚠️ 改判顺序**：改判进行中点箭头 → **无反应**；改判成功后 → 人脸框与侧栏「出现的人」都已更新，然后才能翻
+7. **不在列表里**：从 P-06 待确认队列点开一张照片 → **两个箭头都禁用**，且有说明「不在当前列表中，无法连续翻页」
+8. **换筛选后**：在 P-02 改筛选 → 点进详情 → 索引正确、`items.length` 正确
+9. **三条忽略纪律逐条验**：① 按住 Ctrl/Alt/Shift + `←` 不响应 ② 光标在输入框内按 `←` 不响应
+   （输入框光标移动） ③ `FixFaceDialog` 打开时按 `←` 不响应（不误翻）
+10. `preventDefault` 生效：按 `←`/`→` **页面不横向滚动**
+11. **预取生效**：Network 里能看到下一张的 `/api/original` Range 请求，**且只有 1 张**（不堆成一片）
+12. 预取失败**不弹错误提示**
+13. **网格页 P-02 未受影响**：方向键仍是移动焦点（Tab / 方向键能走到每张缩略图）
+14. `<768` 断点下箭头不遮挡大图；`<1024` 正常
+15. 深色主题下箭头可辨（两套主题都看一遍）
+16. 无障碍：箭头是真 `<button>`、有 `aria-label`、`focus-visible` 环清晰、`disabled` 有视觉态
+17. `npm run build` 通过；`npm run dev` 手动过一遍
+18. **后端零改动**：本步**不改任何 `.py`** —— 用 `git status` 证明（只应有 `.vue` / 可能的 `.js` 改动）
+19. **photoDir 零风险**：全程文件数与总字节数不变
+20. `pytest code/src/test -q` 仍全绿（当前基线 **1237 passed**）
+
+## 六、硬约束
+- **后端零改动**（A 档的核心）：不新增、不修改任何 `.py` / `pb_*.txt`
+- **网格页不动**：P-02 的方向键保持移动焦点（WCAG 2.1 AA 基线）
+- **只占用 `←` `→` 两个键**，不抢其他键
+- 一切读写经既有 store/api 封装，**不要在组件里直接 axios**
+- 现有代码风格（`store` / `api` / `components` 分层、`<script setup>`、Element Plus + Tailwind、主题 token）保持一致
+- 单文件不超过 300 行（`PhotoDetailView.vue` 现有 35KB，若逼近上限请把翻页逻辑拆到 `PhotoPager.vue`）
+- 不要顺手加手势滑动、全屏、缩略图条等本步未要求的功能
+
+## 七、完成后必须输出
+1. 改动文件清单（应只有前端文件）
+2. 验收结果（20 条逐条说明实测情况）
+3. `git status` 证明后端零改动
+4. 第 7 条的实测：从队列点开照片时箭头的实际状态与提示文案
+5. 遗留问题与需要我决策的点
+````
+
+---
+
+## 修正步骤 R7 · 人物头像（卡片显示照片 + 样本设默认 · DR-40/41）
+
+> **什么时候做**：随时（与 R5 地点界面**无依赖**，两边都要改人物相关文件时建议串行）。
+> **做什么**：① 人物库卡片中间显示**本人照片**（人脸裁剪图）；② 人脸样本里**任选一张设为该人的默认头像**，可清除。
+> 拆两半：**A 半（①）零迁移、纯读取回退**；**B 半（②）只多一列写入**。先做 A 单独就已解决截图里的问题。
+
+```text
+【photo-browser · 修正步骤 R7 · 人物头像（DR-40/41）】
+
+## 目标
+① P-04 人物库卡片中间显示**本人照片**（人脸裁剪图），不再是首字母占位。
+② P-05 人物详情「人脸样本」里，**人工确认段与自动归属段任选一张 → 设为该人的默认头像**；可清除（回到自动代表脸）。
+拆两半：**A 半（①）纯读取回退、零迁移**；**B 半（②）只多一列写入**。A 单独做即可先上线。
+
+## 前置
+步骤 1–12 与 R3 / R4 / R4a / R4b / R6 均已完成。
+真实库 `d:\PhotoLib\db\photolib.db`：`pb_person` **2029** 行、`pb_face` **3647** 张（但**仅 67 张有归属**），
+`pb_person.avatarFaceCode` 列**已存在**、且**全库几乎为空**（这就是卡片全是字母的原因）。
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-40 / DR-41**（本步全部口径）
+- plan/UI/photo-browser UI 设计.md §4.8（P-04 人物库）/ P-05 人物详情 —— **「改头像」本来就在设计稿的操作行里**
+
+## 必须先读现有代码
+### 1. `code/webserver/src/components/common/PersonCard.vue`
+- 第 40–42 行 `avatarSrc` **只读** `person.avatarFaceCode` ⇒ 空就退到第 45 行的 `initial`（首字母）
+- 第 12–16 行文件头**已经把取舍写死**：头像永远是人脸裁剪图，**不是照片缩略图**（合影里脸太小认不出）—— 本步照此执行
+- 第 95–116 行是头像那块（圆形遮罩 `h-20 w-20`），第 109–115 行是首字母占位
+
+### 2. `code/webserver/src/views/PersonDetailView.vue`
+- 第 76–81 行 `avatarSrc`：`avatarFaceCode` → 否则「第一张确认样本」。⚠️ 与列表页口径**不一致**，本步统一到后端 `coverFaceCode`
+- 第 379–385 行 `setAvatar()` 是**死代码**（模板里没有任何按钮调它，函数体只弹一条「不提供编辑入口」的提示）⇒ **删掉**，换成真的实现
+- 第 554–571 行（人工确认段）/ 第 593–632 行（自动归属段）是样本列表；自动段每张已有「确认 / ✕ 移除」
+
+### 3. `code/src/api/browse.py`
+- 第 234–276 行 `personSummary()`（第 271 行的 `thumbUrl` 就是头像 URL）
+- 第 605 行 `personStatsOf()` —— **本步新函数的样板**：一次 `IN` 查询算一批人，禁止逐人查库
+- 第 298 行 `_inClause()`；第 750–757 行 `listPersons` 的 items 组装；第 784–786 行 `getPerson`
+- 第 871 行 `_faceSummary()`（Tab2 的样本形状，`thumbUrl` = `/api/face/<faceCode>`）
+
+### 4. `code/src/api/contacts.py`
+- 第 415–416 行 `CONTACT_PATCH_COLUMNS`；第 455–515 行 `patchContact` 主流程
+- ⚠️ 第 463–471 行「未知字段优先报错」与「没有任何字段要改」的**顺序不要改**
+- 第 301 行（contacts 列表）与 `code/src/api/place.py` 第 715–720 行也要同步传代表脸
+
+### 5. `code/src/api/dto.py`
+- 第 352–380 行 `ContactPatchBody`（`extra="allow"`：白名单外的键由路由 400 拒掉）
+
+## 一、A 半：卡片显示照片（DR-40）
+
+### 1.1 后端：新增 `personCoverOf(codes)`（放在 `personStatsOf` 旁边）
+
+对每人取一张**代表脸**，优先级：
+`isConfirmed DESC`（用户核对过的优先）→ `detScore DESC` → `quality DESC` → `regYMDHMS ASC`（稳定）。
+
+- 一次 `IN` 查询拿一批人（⚠️ **必须批量**；正式库 2029 人，逐人查就是 N+1）
+- 只取 `delFlag='0'` 且 `personCode IS NOT NULL` 的脸
+- 返回 `{personCode: faceCode}`；**查不到**的人不出现在字典里（调用方 `.get()` 拿 `None`）
+
+⚠️ **不要做 `thumbStore.exists()` 探测**：列表接口不该为每行去碰文件系统（一页 24 次 `stat`，磁盘异常会把列表拖死）。裁剪图缺失由前端 `@error` 兜底。
+
+### 1.2 `personSummary()` 增 `coverFaceCode`
+
+- 新参数 `coverFaceCode=None`；值 = **用户指定的默认（且那张脸还在他名下）→ 否则代表脸**
+  （⚠️ 由 `personCoversOf()` 解析好后传进来，**不要在 `personSummary` 里写 `avatarFaceCode or ...`** ——
+  见文末「R7 落地时的偏差」第 1 条）
+- `thumbUrl`（第 271 行）指向 `coverFaceCode`
+- ⚠️ `avatarFaceCode` 字段**语义不变**（用户指定的默认）；`coverFaceCode` 才是「实际展示的那张」
+- ⚠️ **代表脸绝不写库**：`avatarFaceCode` 为空是**合法状态**，不能变成「浏览一次就写一次库」
+
+接线四处：`browse.listPersons`（750）、`browse.getPerson`（784）、`contacts.py` 列表（301）、`place.py`（715–720 —— 该处已有 `thumbUrl` 字段，一并改口径）。
+
+### 1.3 前端：`PersonCard.vue`
+
+- `avatarSrc` 改成 `faceUrl(person.avatarFaceCode || person.coverFaceCode)`（任一为空 → 退首字母）
+- 头像尺寸 **`h-20 w-20` → `h-24 w-24`（96px）**（用户要的是「中间显示照片」，80px 太小）
+- `<img>` 加 **`@error`** ⇒ 加载失败切回首字母占位（**不允许出现破图**）
+- 首字母占位（109–115 行）**保留**：没有任何脸的人（刚导入的联系人）仍然靠它
+
+### 1.4 前端：`PersonDetailView.vue` 头部
+
+第 76–81 行的 `avatarSrc` 改为优先用后端 `coverFaceCode`，**与列表页口径统一**（不要再自己取 `facesConfirmed[0]`）。
+
+## 二、B 半：人脸样本设默认头像（DR-41）
+
+### 2.1 后端：`avatarFaceCode` 进 PATCH 白名单
+
+- `dto.ContactPatchBody` 加 `avatarFaceCode: Optional[str]`
+- `CONTACT_PATCH_COLUMNS` 加 `"avatarFaceCode"`
+- `patchContact` 里加**写库前**的校验：
+  - 非空 ⇒ `browse.faceRow(faceCode)` 必须存在、未软删、且 `face.personCode == personCode`；
+    **不存在/已软删 → 404 `NOT_FOUND`**，**属于别人 → 400 `PARAM_INVALID`**（见文末偏差第 2 条）
+  - 空串 / `None` ⇒ 清空（回退代表脸），**合法**
+- ⚠️ **不写 `pb_review_log`**、**不重算质心**、**不 rebucket**：头像是展示，不是归属
+- 响应：`changedFields` 天然含它；`personSummary` 已返回 `avatarFaceCode`
+
+### 2.2 前端：Tab2 就地设默认
+
+- ⚠️ 走既有封装：`store/persons.js` 加 `setAvatar(personCode, faceCode)`（内部调 `api/contacts.js` 的 `patchContact`，成功后重取 `fetchPerson` + `fetchFaces`）。**组件里不要直接 axios**
+- 两段样本（554–571 / 593–632）每张加「设为默认」
+- **当前默认那张**：加实心描边 + 「默认」角标（⚠️ 描边语义沿用 `utils/faceState.js` 那套，**不要另写配色**）
+- 头部接「改头像」按钮（设计稿 P-05 操作行里本来就有）：打开「选择默认头像」弹窗 —— 列出全部样本、点选即设、内含「清除默认」
+- 选中**自动归属段**的样本时给一句说明：「这张是机器认的、还没确认；**头像只影响展示，不影响匹配**」
+- 成功 Toast「已设为默认头像」；清除后 Toast「已清除默认头像，已回到自动代表脸」
+
+### 2.3 边界
+
+| 情况 | 行为 |
+| --- | --- |
+| 默认那张脸被「移除」/「合并走」 | `avatarFaceCode` **留着不动**，展示层自动降级到代表脸（DR-41 ④ 的刻意选择） |
+| 库里没有任何脸 | 首字母占位；「设为默认」入口**隐藏或禁用并说明原因** |
+| 已停用的人 | 头像照旧（`opacity-60`），不改行为 |
+| 传别人的 `faceCode` | 400，且库里一个字不变 |
+
+## 三、样式与可访问性
+
+| 项 | 要求 |
+| --- | --- |
+| 卡片头像 | 圆形（沿用现有 `rounded-full`），96px，`object-cover` **铺满圆框**。⚠️ **不要**在圆框内留一圈底色环把照片缩小 —— 2026-10-08 试过（`p-2` + 内层 `rounded-full`，照片缩到 ~75%），观感成了两个同心圈，用户否决并已回退 |
+| 「默认」角标 | **不只靠颜色**（DR-16② 的三重编码纪律）：图标 + 文字「默认」+ 描边 |
+| 可点区域 | 「设为默认」是真 `<button>`，带 `aria-label`（含年份），有 `focus-visible` 环 |
+| 深色主题 | 两套主题都过一遍（用 `bg-card` / `border-line` 类，不硬编码色） |
+| 图片加载 | 一律 `loading="lazy"` + `decoding="async"`；`/api/face` 已是 160px 方图，前端不再裁 |
+
+## 四、验收清单（逐条实际运行）
+
+1. P-04 一页 24 人：**所有「有人脸」的人卡片中间都显示本人照片**，不再全是字母
+2. **没有任何脸**的人仍显示首字母，且接口 200、无报错、无破图
+3. 手动把某人的 `avatarFaceCode` 改成一个**已软删的 faceCode** → 卡片自动降级到代表脸（**不出现破图**）
+4. P-05 Tab2 **人工确认段**任一样本可设默认：设置后**详情头部与 P-04 卡片同时更新**
+5. P-05 Tab2 **自动归属段**任一样本可设默认（并出现「只影响展示」的说明）
+6. 「清除默认」后回到代表脸（`avatarFaceCode` 变 NULL）
+7. 传**别人的** `faceCode` → **400**，且 `pb_person` 该行一个字不变（连 `modifyYMDHMS` 都不变）
+8. 传不存在的 `faceCode` → **404**（不是 500，也不是静默成功）
+9. 设默认**不影响匹配**：`pb_person_centroid` 的 `modifyYMDHMS` 不变；`pb_face` 零变动
+10. 设默认**不产生 `pb_review_log`** 记录（前后 `COUNT(*)` 一致）
+11. 失效场景：把默认那张脸用「✕ 移除」（`fix('unknown')`）掉 → 卡片与头部**自动降级**，无破图
+12. **N+1 检查**：`/api/persons?size=24` 的 SQL 日志里 `pb_face` 查询**只有 1 条**（不是 24 条）
+13. 停用的人仍正常显示头像（`opacity-60`），不报错
+14. 深色主题下卡片头像与「默认」角标均可辨
+15. 无障碍：「设为默认」是真 `<button>` + `aria-label`；「默认」角标有文字、不只靠颜色
+16. `npm run build` 通过；`npm run dev` 手动过一遍
+17. `pytest code/src/test -q` 全绿（R7 完成后基线 **1371 passed / 3 skipped**；改动前为 1237）
+18. **原图零风险**：`d:\PhotoLib\photo` 的文件数与总字节数全程不变
+19. `git status` 里**没有任何 `pb_*.txt` 改动**（本步**不改表**：`avatarFaceCode` 列早就存在）
+
+## 五、硬约束
+- **只写 `pb_person.avatarFaceCode` 一列**：不碰 `pb_face`、不碰 `pb_person_centroid`、不写 `pb_review_log`
+- **不改表、不重跑生成器、不需要 `build_db --migrate`**（`avatarFaceCode` 列已存在）
+- **不新增任何图片编辑/覆盖/删除入口**（原图只读红线）：设头像只写一个 faceCode，**不生成任何图片文件**
+- 代表脸**必须批量 IN**；列表接口**不碰文件系统**
+- 一切读写经既有 `store` / `api` 封装；业务层禁止裸 SQL
+- 复用既有分层与双主题 token；`<script setup>` + Element Plus + Tailwind 风格保持一致
+- 单文件不超过 300 行（`PersonDetailView.vue` 已接近上限；让文件超标就抽 `components/common/AvatarPicker.vue`）
+- 不要顺手接通讯录头像 `avatarFile`，不要顺手做「头像上传/裁剪」—— 都不是本步
+
+## 六、完成后必须输出
+1. 改动文件清单（后端 / 前端分开列）
+2. 验收结果（19 条逐条说明实测情况）
+3. 第 12 条的实测证据：`/api/persons?size=24` 的 SQL 条数
+4. 一张 P-04 的实际截图（卡片中间出现照片之后的样子）
+5. `SELECT COUNT(*) FROM pb_review_log` 在设置头像前后的对比值
+6. 遗留问题与需要我决策的点
 ```
 
 ---
 
-# 修正步骤 R9 · 照片旋转（左右转 90°）
+## ⚠️ R7 落地时的偏差（执行后回填，供以后回看）
+
+| # | 提示语原样 | 落地成什么 | 为什么 |
+|---|---|---|---|
+| 1 | `avatarFaceCode` 失效时「展示层自动降级到代表脸」 | **降级由服务端 `personCoversOf()` 做**，不是前端；前端**只认 `coverFaceCode`** | 第一版把口径写成 `coverFaceCode = avatarFaceCode or 代表脸`，**没校验那张脸还在不在他名下** ⇒ 默认失效后卡片仍指向已删除的脸（`/api/face` 404 = 破图），DR-41④ 承诺的回退**没有发生**。用例 `test_defaultFaceRemovedDoesNotClearAvatar` 当场抓出。修法：新增 `_liveFaceOwnersOf()` 一次 IN 判「还活着且还属于他」，`personSummary` 不再自己 `or`（详见 DR-40 落地补充） |
+| 2 | 提示语写「不存在的 faceCode → **400**」 | **404 `NOT_FOUND`** | 本项目已有约定：`personCode` / `photoCode` / `faceCode` 查不到一律 404（`dto.CODE_NOT_FOUND` 的说明里就列了 faceCode）。为单个字段改全局错误码映射会让前端多记一个特例。「这张脸属于**别人**」仍是 400（请求值不对） |
+| 3 | 四处接线（persons / person detail / contacts / place） | **六处**（多了 PATCH 响应与家庭成员） | 那两个接口也在返回 `personSummary`。少接线的一处症状是「同一张脸在 A 页有照片、B 页是首字母」，接口全 200、不报错 |
+| 4 | 「每张样本加『设为默认』」 | 人工确认段用**实心按钮**、自动段并进原有的 `确认 / 移除` 行；另加头部「改头像」弹窗 | 64px 宽的样本格塞第三个按钮会换行；自动段本来就有动作行，就地并列比新开一行短。弹窗（`AvatarPicker`）解决「样本上百张时要在 Tab2 里滚很久」的问题 |
+| 5 | 「加实心描边」标出当前默认 | 改成**品牌色环（`ring`）+ ★ 图标 + 「默认」文字**，**不动描边样式** | 描边样式承担「归属来源」这一维（实线=人工确认 / 虚线=机器认的，`utils/faceState.js`）。拿它表示「这是默认」会把两种语义混成一种 |
+| 6 | 未提 | 报错文案带**双方姓名**、且**不含 Markdown 星号** | message 是给人看的一句话，会被原样 Toast；只报「不支持」用户不知道下一步做什么 |
+
+---
+
+## 修正步骤 R8 · 照片年代修正（人工修正拍摄年 · DR-42）
+
+> **什么时候做**：随时（与 R5 地点界面**无依赖**）。用户看完 P-03 截图提出「这个照片的年代桶是错误的」。
+> **做什么**：给照片加一个「人工修正拍摄年」，并在照片详情页提供**编辑入口** —— 让这张照片里每个人脸的**年代桶**、时间筛选、年代跨度、地点年份一起变正确。
+> **核心判断**：这**不是**「桶算错了」，而是喂给桶公式的**拍摄年不可信** —— 所以修照片的年份，不是改人的桶。
+
+```text
+【photo-browser · 修正步骤 R8 · 照片年代修正（DR-42）】
+
+## 目标
+① `pb_photo` 新增「人工修正拍摄年」；**有效拍摄年 = override 优先于 shotYear**。
+② P-03 照片详情「拍摄信息 › 年代」行提供**编辑入口**（先看影响面，再落库）。
+③ 落库后这张照片**全部**人脸重刷年代桶 + 涉及人物质心重算（DR-22 的硬顺序）。
+④ 可撤销（pb_review_log opType=BUCKET_FIX）。
+
+## 前置
+步骤 1–12 与 R3 / R4a / R4b / R6 / R7 均已完成。
+真实库现象：`Len Family/董家老相册/相片纸(2).jpg` 读出来是 **2019-07-19**（翻拍时间），
+而照片本身拍于 1960 年代 —— 一位 1938-12-30 生的人因此落在「2016-2025」，
+按真实年代应当是「1956-1965」。**公式没错，输入错了。**
+
+## 必须先读的项目文档
+- plan/开发计划.md 第四节 **DR-42** 与 **DR-42 落地补充**（本步全部口径）
+- plan/数据库设计.md §4.4 `pb_photo` 的「有效拍摄年」段（含为什么表达式不走索引）
+- plan/开发计划.md「⚠️ 修正步骤 R2」（DR-20/21/22：桶是派生值、刷桶与重算的硬顺序）
+
+## 必须先读现有代码
+### 1. `code/src/engine/match/` —— 分桶与刷桶
+- `bucket.py` 第 235–271 行 `bucketKeyAdaptive(shotYear, birthYear)`：桶 = f(年, 生日)，**规则只在这一处**
+- `rebucket.py` 第 200–218 行 `shotYearOf()`：**全项目唯一**的 photoCode → 年份回查点（改这一处即覆盖 `rebucketFace/Photo/Person/All` 全部路径）
+- `rebucket.py` 第 357–390 行 `rebucketPhoto()`：一张照片的全部人脸重刷（只改 `shotBucket` 一列）
+- `centroid.py` 第 389–419 行 `recomputePerson()`：会 `dropBucket` 掉没样本的旧桶，**执行前**跑 DR-22 前置检查
+### 2. `code/src/api/photoAction.py` —— 照片级写的家（两段式范式照抄 `soft-delete`）
+### 3. `code/src/processor/review/assigner.py` 第 108–129 行（opType 登记表）+ `merger.py` 的 `undo()`（**唯一**逆操作入口）
+### 4. `code/webserver/src/views/PhotoDetailView.vue` 第 702–760 行「拍摄信息」区块
+
+## 一、数据层
+1. `pb_photo.txt` 加 `shotYearOverride SMALLINT NULL`，注释写明「人工修正拍摄年 分桶优先 空=未修正」。
+2. 重跑 `python code/src/database/sqliteCodeGenerator.py`（⚠️ **全量，不要用 `-i`**），
+   再跑 `python code/src/tools/build_db.py --migrate`（只加列，不动数据）。
+3. ⚠️ **不要把新列加进 `runner._META_FULL_COLUMNS`**：重扫是"整列替换"语义
+   （`updateColumns` + `forceColumns`），加进去 = 每次重扫都把人工修正洗回 EXIF 年份。
+
+## 二、口径：有效拍摄年（只有两个出口）
+- SQL 侧 `comGD.sqlEffectiveShotYear(alias)`；Python 侧 `rebucket.effectiveShotYear()`。
+- 要替换的读点（**缺一处 = 某处仍按 2019 算，且两处各自看着都对**）：
+  `browse.py`（列表 / 详情 / `shotYearFrom/shotYearTo` 筛选 / 排序白名单 / 人物年代跨度）、
+  `place.py`（年筛选 / 年代直方图 / 地点人物跨度）、
+  `placeStore.py`（字典 `rebuildPlaces` + 实时聚合 `liveAggregatePlaces` 两路的 `MIN/MAX`）。
+
+## 三、写入口（新建 `processor/photoTimeFix.py`）
+- `previewFix()` **纯读**，必须返回 `persons[]`：谁、从哪个桶、到哪个桶
+  （写入的是**照片级**年份，而桶按各人生日现算 —— 一张合影里三个不同生日的人会朝三个方向变）。
+- `applyFix()` 顺序：① 写 override → ② `rebucket.rebucketPhoto` → ③ `centroid.recomputePerson`。
+- `revertFromLog()`：撤销 = 把 override 写回原值 + 重刷桶 + 重算质心。
+- 日志：**主日志 + 每个受影响人一条成员日志**。成员日志必须带 `toPersonCode` ——
+  `/review/log?personCode=` 是**等值**查，不带就查不到，用户的操作历史里看不见这次修正。
+
+## 四、API
+- `GET /photos/{photoCode}/shot-year-fix`（纯读预览；**省略 shotYear = 预览「恢复自动」**）
+- `POST /photos/{photoCode}/shot-year-fix`（不带 `confirm=1` 只返回影响面，带了才执行）
+- ⚠️ `shotYear` 必须**显式给**：不传 → 400；传 `null` → 恢复自动。两者在 JSON 里都是 None，
+  只能靠 `model_dump(exclude_unset=True)` 区分 —— 混在一起会让"前端漏传"变成"静默清掉用户的修正"。
+
+## 五、前端
+- 新建 `components/photo/ShotYearFixDialog.vue`：年份输入 + 影响面清单 + 「恢复自动」。
+- `PhotoDetailView.vue`：拍摄信息加「年代」行（值 + 「人工修正」角标 + 「修正」按钮）。
+- `api/photoAction.js`：`getShotYearImpact` / `fixShotYear`（恢复自动要**显式**传 `{shotYear: null}`）。
+- 撤销侧：`PersonDetailView.vue` 的撤销按钮文案与成功提示必须按 `opType` 区分 ——
+  `/review/revertible` 是**通用**可撤销列表，最新一条可能是 BUCKET_FIX。
+
+## 验收
+见 plan/开发计划.md「修正步骤 R8」的验收栏（8 条），新建 `test/test_photo_time_fix.py` 逐条钉住。
+**最容易漏的一条**是 `test_rescanUpsertKeepsOverride`（重扫 upsert 之后修正还在）——
+它守的是"新列没被顺手加进扫描器的列白名单"这个边界。
+```
+
+## 落地与原提示语的差异（R8 实测）
+
+| # | 原提示语 | 落地成什么 | 为什么 |
+|---|---|---|---|
+| 1 | 用户提「**拖拽**方式或者编辑方式」 | 本轮**只做编辑入口**（P1 再做拖拽） | 拖拽的落点是「**这个人**的桶」，而写入的是**照片级**年份 ⇒ 反解有歧义（10 年桶只能保证落在桶内）；且 `BucketTimeline` 得先有一个「可选桶清单」（含 0 张的空桶）才能当放置区，那是新增 API + 组件改造。编辑入口不依赖这些，且语义更贴近真相（"这张照片是 1960 年拍的"） |
+| 2 | 修「年代桶」 | 只修**到年**（`takenAt` 一个字不动） | 桶只由年决定（用户明确要的也是桶）；改 `takenAt` 会覆盖掉「扫描器读到的 EXIF 时间」这个事实，还引入一个本需求不需要的第二真相。代价是照片流的「年月」分组里它仍在 2019 那一格 —— 已记在 R8 的「已知取舍」 |
+| 3 | 撤销 | **复用** `POST /api/review/undo`（`merger.undo` 分流委托），不新开端点 | 撤销入口只能有一个：两套入口 = 两套闸门（`isRevertible` / `revertedByLogCode`），迟早分叉。⚠️ 委托时要把 `PhotoTimeFixError` **转成 `MergeError`** —— `api/review.py` 的 `_codeOf()` 是按**错误文本**映射状态码的，直接抛新异常会变成 500（"撤销两次"本该是 409） |
+| 4 | 日志 | **主日志 + 每人一条成员日志** | 主日志的 `from/to` 都是空的（一次修正可能牵动多人，写谁都不对），而 `/review/log?personCode=` 是等值查 `toPersonCode` ⇒ 只写主日志的话，**用户在这个人的操作历史里什么都看不到** |
+| 5 | 落库后重算质心 | 重算失败**不当作整体失败**，转成 `warnings[]` 返回 | `recomputePerson` 会先跑 DR-22 前置检查；被修正的人**别的照片**若还残留旧口径桶键，它会抛 `BucketStaleError` —— 而本次这张照片的桶**已经刷对了**。「静默吞掉」与「整次操作失败」都不对，所以把建议命令交给界面显示 |
+| 6 | 未提 | 生成器**必须全量跑**（`sqliteCodeGenerator.py` 不带 `-i`） | 实测踩到：`-i pb_photo.txt` 只生成这一张表的区块，把产物里其余 9 张表的 CRUD **全抹掉了**（2600+ 行 → 997 行）。它是"只处理指定表"的语义，不是"只更新指定表" |
+
+---
+
+## 修正步骤 R9 · 照片旋转（左右转 90°）
 
 > **什么时候做**：R5 已完成（地点界面）。**R9 与地点无关**，随时可做。
 > ⚠️ **编号说明**：`R7` 已被「人物头像」（DR-40/41）占用、`R8` 是「照片年代修正」（DR-42），
 > 所以照片旋转编 **R9**。别再叫它 R7。
 > **核心判断**：旋转是**显示层属性**（DB 存角度 + 前端 CSS 转），**绝不烘进图片文件、绝不服务端转码**。
 
-```text
+````text
 【photo-browser · 修正步骤 R9 · 照片旋转】
 
 ## 目标
@@ -1947,443 +2402,412 @@ export function resetRotate(photoCode) { ... }
 7. `runner.py` / `browse.py` 的 `git diff` 为空的证明
 8. 遗留问题与需要我决策的点
    （特别是：**要不要做批量旋转**、**下载要不要给"旋转后"版本**）
-```
+````
 
 ---
 
-## 全局约定（每步都适用，已写进各提示语，此处仅备查）
+## 修正步骤 R10 · 打包分发（Windows exe / 安装包）
 
-| 项 | 约定 |
-| --- | --- |
-| 代码根 | `d:/home/lianyi/git/photo-browser/code/` |
-| 文档根 | `d:/home/lianyi/git/photo-browser/plan/` |
-| Python | `C:\Users\NINGMEI\.workbuddy\binaries\python\versions\3.13.12\python.exe`（venv 建在 `code/.venv`） |
-| pip 源 | **必须官方源** `https://pypi.org/simple`（清华镜像在本机失效） |
-| photoRoot | `d:\PhotoLib`（可改，`code/src/config/local_settings.py`） |
-| 原图 | **绝对只读**：不写、不删、不改名 |
-| 业务层 | **禁止裸 SQL**，一律走 `sqliteCommon` |
-| 表定义 | `code/src/database/pb_*.txt` 是唯一数据源，**禁止手工改 `auto_generated/`** |
-| 网络 | 服务只绑 `127.0.0.1` |
+> **什么时候做**：R9 之后。**只碰「进程模型 / 路径解析 / 配置读取」三件事，不动业务逻辑。**
+> **核心判断**：`--onedir` + Inno Setup，模型随包，配置外置，**卸载绝不删照片库**。
+> ⚠️ **两个「目录」必须分清**（见 DR-44 ⑨）：`D:\PhotoLib` 只是**安装目录的默认值**，
+> 首次安装由向导让用户自选；而 `photo_root` 必须**默认跟随实际安装目录**，不许写死。
 
----
----
-
-# 修正步骤 R · 返工修正步骤 1–6（纠错闭环 DR-16）
-
-> **什么时候做**：现在。步骤 7 之前必须完成。
-> **为什么要返工**：新增了「用户浏览时改判认错的人脸」这条闭环（DR-16），核对现有代码发现 6 处冲突，
-> 其中 1 处是**根因**，不改则后续全部白做。
-
-```text
-【photo-browser · 修正步骤 R · 返工修正步骤 1–6】
+````text
+【photo-browser · 修正步骤 R10 · 打包分发（Windows exe / 安装包）】
 
 ## 目标
-把已完成的步骤 1–6 对齐到最新的「纠错闭环」口径（plan/开发计划.md DR-16）：
-① 质心只用人工确认样本（防污染）；② 新增 ALL 兜底桶；③ 新增 isStranger 与 pb_review_log；
-④ 把「自动归属」与「人工确认」真正区分开（这是根因）；⑤ 存量数据修正与质心重建。
+把项目打成 Windows 上可分发的形态，用户**不需要装 Python、不需要联网**：
+① `PyInstaller --onedir` 产出独立 exe
+② `Inno Setup 6` 打成安装包，**安装目录由用户在向导里选，默认预填 `D:\PhotoLib`**
+③ 产物统一落在仓库 **`dist\`** 目录
+④ 双击快捷方式 → 起服务 → 自动开浏览器
 
 ## 前置
-步骤 1–6 已完成，并且**已有真实数据**（d:\PhotoLib\photo 有真实照片、正式库有真实记录，
-据开发计划 DR-12/DR-15 实测约 10 万行 pb_photo）。
-本步不新增业务功能，只做口径修正 + 数据迁移。
+- R9 已完成（打包不依赖它，但别在它未验收时同时改）
+- 本机 Python **3.13.14 AMD64**；`code/.venv` 依赖已装齐
+- **实测体积（开工前自己复核一遍，这几个数字决定了后面所有取舍）**：
+  - `code/.venv` = **498.7 MB / 13598 文件**
+  - 体积大户：cv2 **112** / scipy **108.5**(+`scipy.libs` 19.3) / onnxruntime **43.9** /
+    numpy **30.8**(+`numpy.libs` 20.2) / skimage **23.1** / onnx **21.6** / PIL 15.3 /
+    networkx 15.2 / pip 10 / pygments 8.1 / reverse_geocoder 7.5 / insightface 5.8
+  - InsightFace 模型 `~/.insightface/models/buffalo_l/` = **325.5 MB**（5 个 onnx）
+  - 前端 `code/webserver/dist` = **0.99 MB / 57 文件**
+  - `code/src/data/china_district.json.gz` = **5.74 MB**
+  - ⇒ **安装后磁盘占用预估 780–850 MB；安装包（LZMA2）预估 550–700 MB**
 
-## 必须先读的项目文档
-- plan/开发计划.md 第四节 DR-16（本次要落地的全部口径）、第五节步骤 6/7 行
-- plan/数据库设计.md §4.5 pb_face（**四态语义表**）、§4.6 pb_person_centroid（质心三级启用）、
-  §4.9 pb_review_log（8 种 opType 与副作用表）、§五 索引清单、§六 D-4/D-9/D-10/D-11
-- plan/UI/photo-browser UI 设计.md 第 4.4 / 4.5 / 4.6 节（人脸框三态描边、P-06 双 Tab、P-05 样本分两段）
+## ⚠️ 必读：五个「不做就必炸」的点（每一条都有实测证据）
 
-## 一、先读现有代码，确认真实差距（不要凭我的描述改）
-重点读这 5 个文件，**逐条核对下面的「现状 → 应为」**：
-- code/src/processor/review/assigner.py
-- code/src/processor/review/merger.py
-- code/src/engine/match/centroid.py
-- code/src/engine/match/matcher.py
-- code/src/config/basicSettings.py
+### ① 必须 `--onedir`，**禁止 `--onefile`**
+代码里有**多进程 spawn**：
+- `processor/media/thumbMaker.py:458/499` —— 缩略图批量用 `ProcessPoolExecutor`
+- `engine/face/pool.py:564` —— `multiprocessing.get_context("spawn")`，人脸提取
 
-已知差距（我已核对过源码，但你必须自己再确认一遍再动手）：
+onefile 下**每次 spawn 都要把几百 MB 重新解包**到临时目录 ⇒ 启动风暴 / 卡死 / 临时目录爆盘。
+onedir 只解包一次。**这不是性能偏好，是能不能跑的问题。**
 
-| # | 文件 | 现状 | 应改为 |
+### ② 必须补 `multiprocessing.freeze_support()`
+全仓搜 `freeze_support` —— **一处都没有**。这是 Windows 冻结的头号崩溃源。
+必须在**真正的主入口第一行**加：
+```python
+if __name__ == "__main__":
+    multiprocessing.freeze_support()   # 必须第一行，且必须在 __main__ 保护内
+```
+现有 30+ 处 `if __name__ == "__main__"` 保护要**逐条确认入口链**，别只加一处。
+
+### ③ `__file__` 推导的路径在冻结后全部指向临时目录
+两处必须改：
+- `main/app.py:85`
+  `_WEB_DIST = os.path.abspath(os.path.join(_CODE_DIR, "webserver", "dist"))`
+  ⇒ 冻结后前端**整个 404**，而 **`/api/health` 仍然 200** —— 这是最阴的静默失败
+- `src/tools/serve.py:60-72` 的相对目录推导
+
+做法：新增 `common/resourcePath.py` 作为**唯一出口**（`frozen ? sys._MEIPASS / exe 目录 : 源码目录`），
+其它地方一律不许再写 `os.path.dirname(__file__)` 式推导。
+
+### ④ 模型必须随包分发，且路径解析要改
+`engine/face/engine.py:1060-1063`：
+```python
+def defaultModelRoot():
+    return os.path.join(os.path.expanduser("~"), ".insightface", "models", DEFAULT_MODEL_PACK)
+```
+这是**写死在用户主目录**的。冻结后首次运行会触发 insightface **联网下载 325MB**，
+离线机直接废。必须改成**三段回退**：
+```
+① <app>\models\<模型包>          ← 随包（优先）
+② %USERPROFILE%\.insightface\models\<模型包>   ← 用户已下过
+③ 都没有 → 才联网下载（并给出可读的进度/失败提示）
+```
+⚠️ 同时核对 `engine.py` 里 `DET_FILE` / `REC_FILE` / `POSE_FILE` 三个文件名常量
+（`det_10g.onnx` / `w600k_r50.onnx` / `1k3d68.onnx`）与随包文件**逐字一致** —— 少一个就静默失败。
+⚠️ 本机 `~/.insightface/models/` 下还有一个 **275 MB 的 `buffalo_l.zip`**（下载残留），
+**不要打进包**，只打 `buffalo_l\` 里那 5 个 onnx。
+
+### ⑤ 配置是**包内 Python 模块**，冻结后用户改不了
+`code/src/config/local_settings.py` 是 `.py`（且被 `.gitignore:10-11` 忽略）；
+`common/paths.py:93-105` 的 `readSetting()` 优先级是 `local_settings → basicSettings.DEFAULT_*`，
+**完全不读环境变量、不读 INI**。
+冻结后用户在界面上**没有任何办法**改掉默认的 `d:\PhotoLib` —— 本步必须解决。
+
+## 一、方案选型（已定，别换）
+
+| 环节 | 选型 | 理由 |
+|---|---|---|
+| 冻结 | **PyInstaller `--onedir` + 版本化的 `.spec`** | onefile 与 spawn 多进程不兼容（§①）；`.spec` 可复现 |
+| 安装器 | **Inno Setup 6**（`.iss`） | 免费、脚本可版本化、默认目录可指定、LZMA2、**能精确控制「卸载不删数据」** |
+| 输出 | 仓库 **`dist\`** | 用户要求：`dist\PhotoBrowser-Setup-x.y.z.exe` + `dist\photo-browser\` |
+| 一键脚本 | `build\package.ps1` | 前端 build → PyInstaller → ISCC → 落 `dist\`，可重复 |
+
+## 二、安装后的目录布局（**关键设计**）
+
+**先分清两个「目录」—— 它们不是同一个东西，别混用（这是本步最容易设计错的一处）**：
+
+| | 谁决定 | 默认值 | 用户能改吗 |
 |---|---|---|---|
-| 1 | `assigner.py` 的 `assign()` | 无论人工还是自动，**都写 `isConfirmed=1`**（约 234 行硬编码） | `isConfirmed=1` **只表示经人工确认**；自动归属必须写 0 |
-| 2 | `assigner.py` 文件头 + `__main__` | 写着「待确认 = personCode IS NULL **OR isConfirmed=0**」 | 改为 `personCode IS NULL AND isStranger=0` |
-| 3 | `centroid.py` 的 `loadFaceVectors()` | 查回这个人的全部脸后只按 shotBucket 过滤，**无 isConfirmed 过滤** | 只取 `isConfirmed=1` 的样本（可开关，见 3.5） |
-| 4 | `centroid.py` | 无 `ALL` 兜底桶；桶样本不足直接不启用（约 215 行） | 桶确认样本 <3 时退到 `ALL`；总确认样本 <3 才是真不启用 |
-| 5 | `matcher.py` | 候选桶 = `bucket.neighborBucketKeys(...)`（约 407 行） | 候选集合 **∪ {ALL}**；`shotBucket` 为空的脸候选桶就是 `{ALL}` |
-| 6 | 全库 | 无 `pb_review_log` 表、`pb_face` 无 `isStranger` 列 | 建表 + 加列 + 补索引 |
+| **① 程序安装目录** | Inno 的 `DefaultDirName` + 目录向导页 | `D:\PhotoLib` | ✅ **首次安装时在向导里自选** |
+| **② 照片库根目录**（`photo_root`） | `app.ini` 的 `[paths] photo_root` | **= ①**（安装时写入） | ✅ 改 `app.ini` 后重启生效 |
 
-**第 1 条是根因**：自动归属也写 `isConfirmed=1`，导致
-(a) 无法区分「机器认的」与「人工确认的」，「我不同意」列表无从表达；
-(b) 质心全部由自动样本构成 → 防污染无从下手。
+⚠️ **② 必须默认跟随 ①**：若把 ② 写死成 `d:\PhotoLib`，用户把程序装到 `E:\apps\pb`
+就会变成「程序在 E:、数据在 D:」，用户毫不知情 —— 这是原设计的一个缺陷，本步必须修掉。
 
-## 二、表结构与数据迁移
-
-### 2.1 表定义（我已改好，你只需核对）
-- `code/src/database/pb_review_log.txt` —— **新建的第 9 张表**，22 字段，按该文件写
-- `code/src/database/pb_face.txt` —— 已加 `isStranger TINYINT NOT NULL DEFAULT 0`
-- `code/src/database/pb_person_centroid.txt` —— 注释已写明 `ALL` 兜底桶与「只统计确认样本」
-- `code/src/database/pb_photo_person.txt` —— `source` 注释已写明 0 自动 / 1 人工确认或改判
-
-**重跑生成器**（`python code/src/database/sqliteCodeGenerator.py`）→ 产物落
-`code/src/database/auto_generated/sqliteCommon.py`，**禁止手工改产物**。
-
-### 2.2 迁移（**用 `--migrate`，不要 `--drop`**）
 ```
-python code/src/tools/build_db.py --migrate
+{app}\                            ← ① 安装目录，默认 D:\PhotoLib，用户可改
+├── photo\                        ← 用户照片（只读；**卸载绝不删**）
+│                                   ⚠️ 照片必须放在 <photo_root>\photo\ —— photo_dir 是派生的，不可单独配
+├── thumb\                        ← 缩略图 / 人脸裁剪图（**卸载绝不删**）
+├── db\                           ← SQLite 库 + imports/exports（**卸载绝不删**）
+├── backup\                       ← 备份根（tools/backup.py 用）
+├── app\                          ← ★ 程序本体
+│   ├── photo-browser.exe
+│   ├── _internal\                ← PyInstaller onedir 全部依赖
+│   ├── models\buffalo_l\*.onnx   ← 随包模型（325MB）
+│   └── web\                      ← 前端 dist（构建产物拷进来）
+├── app.ini                       ← ★ 外置配置（photo_root 默认写 {app}）
+└── uninstall.exe
 ```
-- 只 `ALTER TABLE ADD COLUMN` 补缺的（加 `pb_face.isStranger`）+ 建 `pb_review_log` + 补 4 个新索引
-- **不删列、不改列类型、不动任何一行**（DR-13）
-- ⚠️ **动手前先备份**：`copy d:\PhotoLib\db\photolib.db d:\PhotoLib\db\photolib.db.bak-before-R`
-- 迁移后核对：`PRAGMA table_info(pb_face)` 有 `isStranger`；`sqlite_master` 有 `pb_review_log`
-  与 4 个新索引（`pb_face(personCode IS NULL)`、`pb_face(personCode, isConfirmed)` 部分索引、
-  `pb_review_log(isRevertible)` 部分索引、`pb_photo(movedToPhotoCode)`）
-- 迁移前后各记录一次逐表行数（`SELECT COUNT(*)`），**必须完全一致**
+装到别的位置（例如 `E:\apps\photobrowser\`）时，同一套结构整体平移：
+`E:\apps\photobrowser\{photo,thumb,db,backup,app,app.ini}`，且 `app.ini` 里 `photo_root = E:\apps\photobrowser`。
 
-### 2.3 存量数据修正（**必做，否则「我不同意」列表是空的**）
-现有自动归属的脸被写成了 `isConfirmed=1`，要按真实语义回改：
+**为什么程序放 `app\` 子目录**：`photo/thumb/db` 是**数据**，`app\` 是**程序**。
+升级只覆盖 `app\`（数据零风险）；卸载只删 `app\` + 快捷方式。
+把 exe 直接铺在 `{app}` 根，会让升级/卸载与用户照片混在一起 —— 这是不能接受的。
 
-写一次性脚本 `code/src/tools/fix_confirmed_flag.py`：
-- 依据 `pb_photo_person.source`：`source=0`（自动）→ 对应 `pb_face.isConfirmed` 回改为 **0**；
-  `source=1`（人工）→ 保持 1
-- ⚠️ 一张照片可能有多个 `pb_photo_person` 行、一个人脸只对应一个 `faceCode`。
-  **以 `pb_photo_person.faceCode` 为准**（那是判定来源那张脸）；`faceCode` 为空的行跳过并计数报告
-- 先 `--dry-run` 打印将要改的行数与样例，确认后再实跑
-- 跑完打印：回改行数、跳过行数、以及改后
-  `SELECT COUNT(*) FROM pb_face WHERE personCode IS NOT NULL AND isConfirmed=0` 的结果
+⚠️ **为什么不默认装到 `C:\Program Files\...`**：程序需要往 `photo_root` 里写 `thumb/` `db/` `backup/`。
+`Program Files` 是受保护目录，非管理员进程写不进去 ⇒ 默认必须给一个用户可写的位置（`D:\PhotoLib`）。
+**但用户仍可能自选到受保护目录**，所以首次运行必须做可写性检查（见 §三.2）。
 
-**重算全部质心**：旧质心是污染样本算出来的，必须作废。
-走 `centroid.recomputePerson()` 对库里每个有脸的 personCode 重算（**不删库**，只重算）。
+## 三、外置配置（本步的核心改造）
 
-## 三、代码修正
+新增 `code/src/config/appIni.py`。读取顺序：
+**`--config <path>` 参数 → 环境变量 `PHOTO_BROWSER_INI` → `<exe目录>\app.ini` → `<exe目录>\..\app.ini`**
+首次运行若都不存在 → **自动生成**一份带注释的 `app.ini`。
 
-### 3.1 `assigner.py` —— 拆开「人工确认」与「自动归属」
-- `assign(faceCode, personCode, source, ...)` 的 `isConfirmed` 必须由 `source` 决定：
-  - `source == comGD.LINK_SOURCE_MANUAL` → `isConfirmed=1`
-  - `source == comGD.LINK_SOURCE_AUTO` → `isConfirmed=0`（**当前硬编码 1，要改**）
-- 建议同时提供两个语义明确的入口（内部共用 `_setBelong()`），避免调用方继续传错 `source`：
-  - `confirm(faceCode, personCode, confidence=None)` —— 人工确认，`isConfirmed=1`、link `source=1`
-  - `autoAssign(faceCode, personCode, confidence)` —— 自动归属，`isConfirmed=0`、link `source=0`
-- **`fix(faceCode, action, personCode=None)` 统一改判入口**：
+```ini
+[paths]
+photo_root = D:\PhotoLib   ; 安装时由安装器写成「实际安装目录」；用户可改，改完重启生效
+thumb_root =            ; 空 = <photo_root>\thumb（DR-8 派生）
+db_file =               ; 空 = <photo_root>\db\photolib.db
 
-  | action | 效果 | 落 pb_face | 关联 | 重算质心 |
-  |---|---|---|---|---|
-  | `assign` | 改判到某人 | `personCode=新, isConfirmed=1` | 删旧 linkKey + 写新 `source=1` | **原人 + 新人**全部桶 |
-  | `unknown` | 置为未知 | `personCode=NULL, isConfirmed=0` | 删旧 linkKey | 原人全部桶 |
-  | `stranger` | 标记陌生人 | `personCode=NULL, isStranger=1` | 删旧 linkKey | 原人全部桶 |
+[server]
+host = 127.0.0.1
+port = 8765
+open_browser = 1        ; 启动后自动开浏览器
 
-  - 现有 `unassign()` 保留，但**明确它 == `fix('unknown')`**，别留两套语义
-- `batchFix(faceCodes, action, personCode)`：同一 `clusterCode` 批量，一个事务 + 一次重算
-- 每次写操作**必须落一条 `pb_review_log`**（`logCode` 幂等键、`opType`、`faceCode`、`photoCode`、
-  `fromPersonCode`、`toPersonCode`、`similarity`、`faceCount`、`opYMDHMS`）
-- ⚠️ 写 `pb_review_log` 时**注意 upsert 写 NULL 的坑**（assigner 文件头已记录：`update_*` 写不进 NULL，
-  `fromPersonCode` 为空时必须走 upsert + `forceColumns`）
-- ⚠️ 纪律 ③（`pb_photo_person` 只在「这张照片里确实有人属于 P」时存在）**继续生效**，
-  改判/陌生人/置未知都要走 `_facesInPhotoFor()` 判断后再决定删不删关联
+[models]
+# 空 = 依次找 <app>\models → %USERPROFILE%\.insightface\models → 联网下载
+model_root =
 
-### 3.2 `merger.py`
-- `merge()` 迁移脸时写 `isConfirmed=1` —— **保持不变**（用户主动合并就是人工确认）
-- `merge()` / `split()` 各自落一条 `pb_review_log`，**`isRevertible=1`**
-- 新增 `undo(logCode)`：
-  - 只允许撤销 `isRevertible=1 AND revertedByLogCode IS NULL` 的记录，否则抛错
-  - 反向恢复 `pb_face.personCode` 与 `pb_photo_person` 关联
-  - **重算涉及双方的质心**
-  - 回填原记录的 `revertedByLogCode`，并写一条 `opType=UNDO` 的新日志
-  - `merge` 撤销要恢复 `fromPerson`（软删的 `pb_person.delFlag` 也要恢复）
-
-### 3.3 `centroid.py` —— 防污染 + 兜底桶
-- `loadFaceVectors(personCode, bucketKey, confirmedOnly=True)`：加 `isConfirmed=1` 过滤
-  - ⚠️ 生成层 `query_pb_face` **没有 `isConfirmed` 查询参数**（只有 recID/faceCode/photoCode/
-    personCode + nullFields）。**不要为此改生成器加参数**（要重生成 + 全库迁移，代价与收益
-    不成比例）；按现有文件头的做法：查回这个人的脸，在 Python 里过滤
-- 新增 `ALL` 桶：`bucketKey = "ALL"` = 该人**全部确认样本**（不分桶）
-- `computeCentroid()` / `recompute()` 支持 `ALL`
-- **质心三级启用**（写进文件头）：
-
-  | 优先级 | 桶 | 启用条件 |
-  |---|---|---|
-  | 1 | 相邻年代桶 | 该桶**确认样本** ≥ 3 |
-  | 2 | `ALL` 兜底桶 | 总确认样本 ≥ 3 |
-  | 3 | 无 | 总确认样本 < 3 → **该人不参与自动匹配** |
-
-- `recomputePerson()` 重算时**也要算 `ALL` 桶**，并把已不存在的桶清掉（现有清僵尸桶逻辑保留）
-- ⚠️ **`listBucketsOf()` 要排除 `ALL`**（它是虚拟桶，不来自任何 `pb_face.shotBucket`），
-  否则 `recomputePerson` 会去算一个不存在的桶
-- `dropPerson()` / `dropBucket()` / `centroidOf()` 保持可用，`ALL` 走同一套
-
-### 3.4 `matcher.py` —— 候选桶并入 `ALL`
-- 候选桶 = `bucket.neighborBucketKeys(bucketKey, neighbor)` **∪ `["ALL"]`**
-- `shotBucket` 为空（截图、EXIF 缺失）的脸：`neighborBucketKeys("")` 返回 `[]`，
-  候选桶就是 `["ALL"]` —— **这类脸现在也能匹配了**，别让它直接掉进聚类
-- `candidateBuckets` 报告要如实反映实际参与的桶
-- 三段式判定、原因码、Top-5 降序、两次跑完全一致 —— 这些既有行为**不要动**
-
-### 3.5 `basicSettings.py` —— 冷启动开关
-新增：
+[scan]
+batch_size = 100
 ```
-CENTROID_CONFIRMED_ONLY: bool = True   # True=只用 isConfirmed=1 样本（防污染，默认）
-                                       # False=退回旧口径（全样本），仅用于回归对比与冷启动
+三条纪律：
+- ✅ `app.ini` 优先级**高于** `basicSettings.DEFAULT_*`（在 `paths.readSetting()` 里加一层）
+- ✅ **`local_settings.py` 保留**（源码开发时继续用），但**冻结环境下忽略它**
+- ✅ **不改 `paths.py` 的派生逻辑**（`photo/thumb/db` 的派生规则是 DR-8 定的，照用）
+
+### 3.1 `app.ini` **由安装器生成**，且**只在不存在时写**
+- 安装器在 `ssPostInstall` 阶段写 `<安装目录>\app.ini`，`photo_root` 的值取 `{app}`（**不是写死的 `d:\PhotoLib`**）
+- ⚠️ **仅在文件不存在时写**（`FileExists()` 判断）——否则**升级会覆盖掉用户自定义的 `photo_root`**，
+  而用户的数据还在老路径上 ⇒ 升级后「照片全没了」（实际是路径被改回默认）
+- 用户手改过 `app.ini` 后，卸载**不要删它**（或在卸载提示里说明会保留）
+
+### 3.2 首次运行必须做**可写性检查**（对应用户可能自选到受保护目录）
+按顺序检查并在**任一项失败时给出可读错误**（不要抛堆栈、不要静默）：
+1. `photo_root` 目录不存在 → **创建**（只能创建到该层；`photo\` 若不存在，给引导文案而非报错）
+2. `photo_root` 及 `thumb/` `db/` 是否**可写**（实际写一个探测文件再删）
+3. 不可写 → 弹可读提示：「`<路径>` 当前不可写。请改 `app.ini` 里的 `photo_root` 指向一个有写权限的目录
+   （例如 `D:\PhotoLib`），或换一个安装位置重装」，并**指出 `app.ini` 的完整路径**
+4. `<photo_root>\photo` 不存在或为空 → **不要报错**，给首次使用引导：
+   「把你的照片放进 `<photo_root>\photo\` 后，回到『扫描任务』页开始扫描」
+   —— ⚠️ 明确写出这个路径：`photo_dir` 是**派生**的（DR-8），
+   用户**不能**把 `photo_root` 直接指向一个已有的照片目录（除非照片恰好在 `<它>\photo\` 下）
+
+## 四、逐项改造清单
+
+### 4.1 新增
+| 文件 | 作用 |
+|---|---|
+| `code/src/common/resourcePath.py` | 冻结感知的资源路径**唯一出口**（`_MEIPASS` / exe 目录 / 源码目录三态） |
+| `code/src/config/appIni.py` | 外置 INI 读取 + 首次自动生成 |
+| `code/src/tools/appLauncher.py` | **新的唯一 exe 入口**：`freeze_support()` → 读 INI → 起 serve → 按需开浏览器 |
+| `build/photo-browser.spec` | PyInstaller spec（datas / hiddenimports / excludes） |
+| `build/installer.iss` | Inno Setup 脚本 |
+| `build/package.ps1` | 一键打包 |
+| `build/README.md` | 打包步骤 + 排障（给未来的自己） |
+
+### 4.2 必须改的现有文件
+| 文件:行 | 改什么 |
+|---|---|
+| `main/app.py:85` | `_WEB_DIST` 改走 `resourcePath`；顺序 `<app>\web` → `_MEIPASS\web` → 源码 `webserver/dist` |
+| `src/tools/serve.py:60-72` | 相对目录推导改走 `resourcePath`；`open_browser=1` 时 `webbrowser.open` |
+| `engine/face/engine.py:1060-1063` | `defaultModelRoot()` 改三段回退（随包 → 用户主目录 → 下载） |
+| `common/paths.py:93-105` | `readSetting()` 加 `app.ini` 层（优先级最高） |
+| 主入口 | 加 `multiprocessing.freeze_support()`（**第一行**） |
+| `basicSettings.py` | `SERVER_HOST/PORT` 等改为「INI 可覆盖」；**`DEFAULT_*` 保持不动** |
+
+### 4.3 PyInstaller spec 要点
+```python
+datas = [
+    ('code/webserver/dist', 'web'),                      # 前端
+    ('code/src/data/china_district.json.gz', 'data'),     # 区县边界（5.74MB）
+    ('code/data/meanshape_68.npz', 'data'),               # 人脸形状（1.4KB）
+    ('models/buffalo_l', 'models/buffalo_l'),             # 模型（325.5MB）
+]
+hiddenimports = [
+    'uvicorn.logging', 'uvicorn.loops.auto',
+    'uvicorn.protocols.http.auto', 'uvicorn.protocols.websockets.auto',
+    'uvicorn.lifespan.on',
+    'engine.face.pool',            # ⚠️ spawn 子进程按名字 import，必须显式列
+    'processor.scanner.runner',
+    'onnxruntime', 'cv2', 'shapely', 'insightface',
+]
+excludes = ['pip', '_pytest', 'pytest', 'pygments', 'tkinter',
+            'matplotlib', 'IPython', 'notebook']
 ```
-⚠️ **为什么需要这个开关**：改成「只用确认样本」后，**在用户还没人工确认过任何脸之前，
-所有质心都不可用 → 自动归属数为 0 → 所有人脸进待确认队列**。
-这是**正确行为**（没有干净样本可用），但会让 S0 回归验证跑不出结果。
-所以留一个逃生口：验收第 21 条与 S0 回归对比用 `False`，日常跑 `True`。
+- ⚠️ **被 spawn 的子进程模块必须进 `hiddenimports`** ——
+  `schedule/faceScheduler.py:117-119` 的注释已经踩过这个坑
+  （「子进程是在 multiprocessing 里 spawn 出来的，缺依赖时它们在 `_queueWorkerLoop` 第一行就 ModuleNotFoundError」）
+- ⚠️ `reverse_geocoder` 的 `rg_cities1000.csv`（7.49MB）要用 `collect_data_files` 收进来
+- ⚠️ `onnxruntime\capi\*.dll`、`cv2.pyd`(81.87MB)、`shapely` 的 GEOS 必须被 hooks 正确收集
+- ⚠️ **先全量打包跑通，再逐项 `excludes` 瘦身**。
+  `scipy(127.8MB)` / `skimage(23.1MB)` / `networkx(15.2MB)` 是 insightface 的传递依赖，
+  **裁剪有风险**（`insightface.app` 可能 import scipy）—— 每剪一项都要重跑 §五 第 6 条
 
-## 四、验收清单（逐条实际运行，不要只写代码就宣称通过）
+### 4.4 Inno Setup 要点
+```ini
+[Setup]
+DefaultDirName=D:\PhotoLib
+DisableProgramGroupPage=yes
+ArchitecturesAllowed=x64compatible
+Compression=lzma2/max
+SolidCompression=yes
+OutputDir=..\dist
+OutputBaseFilename=PhotoBrowser-Setup-{#Ver}
 
-### A. 迁移
-1. 迁移前已备份 `photolib.db.bak-before-R`
-2. `build_db.py --migrate` 成功；**逐表行数迁移前后完全一致**（贴出前后对照）
-3. `PRAGMA table_info(pb_face)` 含 `isStranger`（默认 0）；`sqlite_master` 含 `pb_review_log`
-   与 4 个新索引
-4. `PRAGMA integrity_check` 返回 ok
+[Files]
+Source: "dist\photo-browser\*"; DestDir: "{app}\app"; Flags: recursesubdirs
 
-### B. 语义修正
-5. `fix_confirmed_flag.py --dry-run` 输出合理 → 实跑后：
-   `SELECT COUNT(*) FROM pb_face WHERE personCode IS NOT NULL AND isConfirmed=0` **> 0**
-   （这就是「我不同意」列表的条数，必须不为 0，否则说明回改没生效）
-6. 四态互斥性检查（写 SQL 验证）：
-   - 待确认 = `personCode IS NULL AND isStranger=0`
-   - 我不同意 = `personCode IS NOT NULL AND isConfirmed=0 AND isStranger=0`
-   - 人工确认 = `isConfirmed=1`
-   - 陌生人 = `isStranger=1`
-   - **四者之和 == `pb_face` 总行数**（不重不漏）
+[Icons]
+Name: "{autoprograms}\Photo Browser"; Filename: "{app}\app\photo-browser.exe"
+Name: "{autodesktop}\Photo Browser";  Filename: "{app}\app\photo-browser.exe"
 
-### C. 质心防污染（**本步最核心的三条**）
-7. 造测试数据：某 person 某桶放 2 张 `isConfirmed=1` + 1 张 `isConfirmed=0`（属于别人的脸），
-   `recomputePerson` 后该桶 **`sampleCount == 2` 且 `centroid` 与只有那 2 张时逐字节相同**
-   —— 证明自动样本没进质心
-8. `ALL` 兜底：某 person 桶确认样本只有 1 张，但总确认样本 4 张 → 该桶不启用、
-   **`ALL` 桶启用且 sampleCount=4**，且该人能被匹配到
-9. 总确认样本 2 张的人 → **不启用任何质心**，`loadAllCentroids` 的索引里没有他
-10. `shotBucket` 为空的脸 → 候选桶 == `["ALL"]`，能拿到分数（不再直接掉聚类）
-11. 旧质心已全部重算（贴出重算前后 `pb_person_centroid` 行数与 `sampleCount` 变化）
+[Run]
+Filename: "{app}\app\photo-browser.exe"; Description: "启动 Photo Browser"; Flags: postinstall nowait
 
-### D. 纠错链路
-12. `fix(action='assign')`：**原人与新人的质心都重算**（查两人 `modifyYMDHMS` 或质心内容，
-    只重算一边算不合格）；旧 `linkKey` 已删；新行 `source=1`
-13. `fix(action='unknown')` → 该脸进待确认队列；关联行按纪律 ③ 正确存废
-14. `fix(action='stranger')` → 该脸**既不在待确认、也不在「我不同意」、也不参与聚类**
-15. `merge` 后 `undo` 能完整还原（人脸归属 + `pb_photo_person` + 双方质心 + `fromPerson` 的
-    `delFlag`），且 `revertedByLogCode` 已回填
-16. `undo` 对 `isRevertible=0` 的记录（普通确认）**必须报错拒绝**
-17. 每次写操作都新增了一条 `pb_review_log`，`opType`/`fromPersonCode`/`toPersonCode` 正确
-18. `verifyLinks()` 仍然 `clean=True`（改判/陌生人之后不能留下幽灵关联）
-19. **纪律 ③ 回归**：同一张合影里 P 有 2 张脸，把其中 1 张改判给别人 →
-    `pb_photo_person` 里 P 的那行**必须还在**（还有 1 张脸属于 P）
+[UninstallDelete]
+; ⚠️ 只删程序目录。**绝不许**出现 {app}\* 这种通配
+Type: filesandordirs; Name: "{app}\app"
+```
+
+#### `[Setup]` 里与「目录选择」相关的三行（**对应本步的用户需求**）
+```ini
+DefaultDirName=D:\PhotoLib      ; ★ 只是「默认值」，不是固定值
+DisableDirPage=auto             ; 默认值就是 auto，写上表意清楚（**不要改成 yes**）
+AlwaysShowDirOnReadyPage=yes    ; 升级时目录页被跳过，但「准备安装」页仍显示目标目录
+UsePreviousAppDir=yes           ; 默认值：升级时沿用上次安装目录
+```
+**为什么这样配**（Inno 官方语义）：
+- `DefaultDirName` 是**预填值**；`DisableDirPage=auto`（默认）下，**首次安装会显示「选择目标位置」页**，
+  用户可改到任意位置 ⇒ **天然满足「让用户选目录、`D:\PhotoLib` 只是默认」这个需求，无需额外开发**
+- `auto` 下**升级会跳过**该页并沿用旧目录 —— 这是**要的行为**：
+  让用户在升级时改目录会导致新旧文件分散、老数据成孤儿
+- 若把 `DisableDirPage` 改成 `no`，升级也会弹目录页 ⇒ **容易让用户误改**。想要「看得见目录」用
+  `AlwaysShowDirOnReadyPage=yes` 即可，别动 `DisableDirPage`
+- 静默安装（`/SILENT`）没有界面，只能用 `/DIR="X:\path"` 指定 —— 交付说明里写一句
+
+#### ⚠️ `app.ini` 的生成必须用 `[Code]`，不能用 `[INI]`
+`[INI]` 段**每次安装都会写**，升级时会把用户改过的 `photo_root` 覆盖回默认 ⇒ 用户数据「不见了」。
+必须用 `[Code]` 判存在再写：
+```pascal
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  IniPath: String;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    IniPath := ExpandConstant('{app}\app.ini');
+    // ★ 只有不存在时才写：升级不覆盖用户自定义
+    if not FileExists(IniPath) then
+    begin
+      SetIniString('paths', 'photo_root', ExpandConstant('{app}'), IniPath);
+      SetIniString('server', 'port', '8765', IniPath);
+      SetIniString('server', 'open_browser', '1', IniPath);
+      // 其余项留空走 DR-8 派生：thumb_root / db_file / model_root
+    end;
+  end;
+end;
+```
+- ✅ `photo_root` 取 `{app}` ⇒ **装到哪、数据就在哪**（修掉 §二 里说的那个缺陷）
+- ⚠️ 若用户把安装目录选到**受保护位置**（如 `C:\Program Files\...`），`photo_root` 也会是那里 ⇒
+  首次运行的可写性检查（§3.2）必须拦住并给出可读提示
+
+- ⚠️ **卸载前必须提示**「你的照片 `photo\`、缩略图 `thumb\`、数据库 `db\` 都保留在 `<photo_root>`」，
+  且路径要用 `{app}` / 读取到的 `photo_root` 动态拼，**不要写死 `d:\PhotoLib`**
+- ⚠️ **`[UninstallDelete]` 里绝不许用 `{app}\*`** —— 那会删掉用户照片（本步最大红线）
+- ⚠️ `app.ini` 若被用户改过，卸载**不要删**（或在提示里说明会保留）
+
+## 五、验收清单（逐条实际运行，不许只写代码就宣称通过）
+
+### A. 构建
+1. 从**干净状态**跑 `build\package.ps1`（先删 `dist\`、`build\work\`），一条命令产出
+   `dist\photo-browser\` 与 `dist\PhotoBrowser-Setup-*.exe`。贴出体积
+2. **体积与预估对照**：`<app>\app` 目录 MB、安装包 MB
+   —— 预估 780–850MB / 550–700MB，偏差 >15% 必须解释
+3. `dist\` 里**只有** `photo-browser\` 与 `PhotoBrowser-Setup-*.exe`
+
+### B. 冻结后功能
+4. 把 `dist\photo-browser\` 拷到**不含空格与中文**的路径，双击 exe →
+   浏览器自动打开，`/api/health` 200
+5. **前端能出来**（不是 404、不是白屏）：首页 / 照片流 / 人物库 / 地点 / 待确认队列 各点一遍
+   —— 专治 §③ 的「`/api/health` 200 但前端 404」静默失败
+6. ⭐ **人脸提取能跑**（本步最关键的验收，一次同时验证 spawn + hiddenimports + 模型路径）：
+   对 **10 张照片**跑一次提取 → 生成 `pb_face` 行 → **无子进程 ModuleNotFoundError**。贴行数
+7. **缩略图批量生成能跑**（专治 `ProcessPoolExecutor`）：`gen_thumbs` 对 50 张跑通
+8. ⭐ **模型确实走随包**：**断网** + 把 `%USERPROFILE%\.insightface` **改名**
+   → 人脸提取仍跑通 ⇒ 证明没在联网下载
+9. 外置配置生效：改 `app.ini` 的 `photo_root` 到另一个目录 → 重启后界面数据跟着变
+10. `app.ini` 不存在时**自动生成**且带注释；其中 `photo_root` = **实际安装目录**（不是写死的 `d:\PhotoLib`）
+11. **可写性检查**（§3.2）：把 `photo_root` 指到一个**只读目录** → 启动时给**可读提示 + 指出 `app.ini` 完整路径**，
+    不是抛堆栈、不是静默失败
+12. `<photo_root>\photo` 不存在或为空时 → 给**首次使用引导**（明确写出「照片要放在 `<photo_root>\photo\`」），
+    **不报错**
+13. 端口被占：先起一个占 8765 的进程 → 启动 exe 给出**可读的错误**（不是堆栈）
+14. `--onedir` 而非 onefile 的证明：`<app>\app\_internal` 存在且**启动 < 5 秒**
+
+### C. 安装器（**本组直接对应「用户自选目录」这个需求**）
+15. 干净环境跑安装包：**「选择目标位置」页出现**，默认目录**自动填 `D:\PhotoLib`**，
+    用户**可以改**（改到 `E:\apps\photobrowser` 试试）
+16. ⭐ **换目录后数据跟随**：在第 15 步把安装目录改成 `E:\apps\photobrowser` →
+    装完检查 `E:\apps\photobrowser\app.ini` 里 `photo_root = E:\apps\photobrowser`，
+    且 `photo/thumb/db` 都建在 `E:\apps\photobrowser\` 下
+    —— **专治「程序在 E:、数据跑去 D:」这个原设计缺陷**
+17. 用 `/SILENT /DIR="E:\apps\photobrowser"` 静默安装一次，结果与第 16 步一致
+18. 安装后布局与 §二 一致（`app\` 子目录、`app.ini`、模型在 `app\models\`）
+19. **升级**：装 v0.1 → 造几张照片 + 确认一个人脸 + **手改 `app.ini`（如改端口）** → 装 v0.2 →
+    ⭐ 数据**原样**（照片数、`pb_person`/`pb_face` 行数）**且手改的配置没被覆盖**
+    —— 这一条专测 `[Code]` 里的 `FileExists` 判断，用 `[INI]` 段必然失败
+20. ⭐ **卸载**：卸载后 `<photo_root>\photo`、`thumb`、`db`、`backup` **全在**，
+    且卸载界面提示里的路径是**动态拼的**（跟着实际安装目录走），不是写死 `d:\PhotoLib`。
+    —— **这是本步红线，照片库绝不能因卸载而丢**
+21. 快捷方式（开始菜单 + 桌面）指向正确，启动即开浏览器
+
+### D. 兼容与分发
+22. **不含 Python 的机器**上验证（把 `code\.venv` 改名后测，或换一台干净机）
+23. ⭐ **把程序装到受保护目录**（如 `C:\Program Files\PhotoBrowser`）→
+    首次运行必须给出**可读提示**并指路 `app.ini`（§3.2 第 3 条）
+24. **非管理员账户**安装与运行；权限不足时的行为要明确
+25. **路径含中文/空格**：把程序装到 `D:\我的 照片\` 测一次
+26. Windows 11 与 Windows 10（若可）各一次；确认**无 VC++ 运行库缺失弹窗**
+27. **交付说明要写清**：未签名 exe 会触发 SmartScreen「更多信息 → 仍要运行」；
+    PyInstaller 产物可能被杀软误报；静默安装用 `/DIR=` 指定路径。能签名就单列一节写成本与流程
 
 ### E. 回归
-20. `pytest code/src/test` 全绿（含新增的防污染、兜底桶、改判、撤销单测）
-21. `CENTROID_CONFIRMED_ONLY=False` 时行为与修正前一致（**用旧口径跑一遍 S0 验证集，
-    给出 FR 数字**，与之前基线对比，确认代码改动没有意外改变匹配能力）
-22. `tools/backtest_s0.py` 跑通，给出准确率与耗时
-23. `tools/scan_cli.py --db <临时库>` 指向临时库跑一小批，确认**正式库行数不变**
-    （`--db` 是 DR-10 强调过的坑，务必验证）
-24. **photoDir 零风险**：扫描前后 `photoDir` 的文件数与总字节数完全一致
-
-## 五、硬约束
-- **原图绝对只读**：`d:\PhotoLib\photo` 一律只读，扫描前后文件数与字节数必须一致
-- **迁移只加不删**：`--migrate` 不删列不改类型不动数据；不删任何行
-- **业务层禁止裸 SQL**：一切读写经 `sqliteCommon`；新表走生成的
-  `query_pb_review_log` / `insert_pb_review_log` / `update_pb_review_log` / `delete_pb_review_log`
-- **禁止手工改 `auto_generated/`**：改表一律回 `pb_*.txt` 再重跑生成器
-- **单写入者**：所有写库在主进程；本步不引入子进程
-- 现有代码风格（文件头纪律说明、错误码、`_VERSION`、日志）保持一致，别把注释删了
-- 不要顺手重构与本步无关的代码
-
-## 六、完成后必须输出
-1. 改动文件清单（新增 / 修改，逐个列路径）
-2. 验收结果（上面 24 条**逐条**给命令与实际输出 / 数值）
-3. 遗留问题与需要我决策的点
-4. **存量数据修正后的统计**：四态各多少条、质心重算前后对比
-5. 步骤 7 可以开始的判断：以上 24 条是否全部通过
-```
-
----
----
-
-# 修正步骤 R2 · 分桶口径修复（自适应分桶从未生效 · DR-20/21/22）
-
-> **什么时候做**：**先于修正步骤 R**（R 已经假设质心口径正确了；R2 修的是桶键来源）。
-> **为什么必须做**：`faceStore.makeShotBucket()` 写的是等宽 5 年**占位**桶，
-> 注释说「步骤 6 会用自适应规则重算覆盖」，**但步骤 6 从来没做这个覆盖**。
-> 全库 `bucketKeyAdaptive()` 只在验证脚本、CLI 报告与测试里被调用，**没有任何生产路径写回
-> `pb_face.shotBucket`**。而 `matcher.bucketKeyOfFace()` 明确「只认 `shotBucket` 这一列」。
-> 结果：生产库里所有脸都是等宽 5 年桶 → **S0 的「自适应分桶让 FR 32.75%→19%」一直在跑对照组**，
-> `bucket.py` 的自适应逻辑是死代码，**且 DR-18「改生日重算质心」完全无效**（桶键不依赖生日）。
-
-```text
-【photo-browser · 修正步骤 R2 · 分桶口径修复】
-
-## 目标
-三件事，缺一不可：
-① **补「重刷 shotBucket」过程**（方案 A，用户已定）：让 `pb_face.shotBucket` 真正按
-   「拍摄年 + 出生年」算出自适应桶（0–18 岁 3 年 / 18+ 10 年），而不是等宽 5 年占位；
-② **放宽未归属脸的候选桶**（DR-21）：否则跨口径对不上，等宽桶的脸一把质心都取不到；
-③ **确立「先刷桶，再重算质心」的硬顺序**（DR-22），并加前置检查。
-
-## 前置
-步骤 1–6 已完成，**真实数据已在库里**（10 万行 pb_photo、真实人脸与质心）。
-修正步骤 R 尚未开始（若已开始的，先停下做完 R2）。
-
-## 必须先读的项目文档
-- plan/开发计划.md 第四节 **DR-20 / DR-21 / DR-22**（本次要落地的全部口径）
-- plan/数据库设计.md §4.5 pb_face.shotBucket、§4.6 pb_person_centroid
-- plan/MVP_plan.md S3 的分桶规则与匹配决策
-
-## 必须先读���现有代码（逐条核对「现状 → 应为」，不要凭我的描述改）
-| 文件 | 关键点 |
-|---|---|
-| `code/src/engine/face/faceStore.py` | `makeShotBucket()` 返回**等宽 5 年**（约 72–93 行），文件头与函数注释都写着「步骤 6 会重算覆盖」，**但没有任何代码做这件事** |
-| `code/src/engine/match/bucket.py` | `bucketKeyAdaptive(shotYear, birthYear)` / `bucketKeyOf(shotYear, birthday)` / `birthYearOf(birthday)` —— **已实现且正确**，但生产路径没调用 |
-| `code/src/engine/match/matcher.py` | `bucketKeyOfFace()`（约 293 行）**只认 `shotBucket` 列**，注释解释了「质心按 shotBucket 建、匹配必须按同一列取」——这个纪律是对的，**不要改成实时算** |
-| `code/src/engine/match/centroid.py` | `listBucketsOf()` 从脸表读 `shotBucket`；`loadFaceVectors()` 按桶过滤；`recomputePerson()` 重算各桶 |
-| `code/src/processor/review/assigner.py` | `assign()` 读 `face["shotBucket"]` 用于重算质心（约 397 行），**但从不重写它** |
-| `code/src/processor/review/merger.py` | `merge()` 用 `update_pb_face` 迁移 `personCode`，**没管 `shotBucket`** |
-| `code/src/tools/verify_bucket_gain.py` | 已能对比「等宽 vs 自适应」的收益，**R2 要用它给出真实数字** |
-
-## 一、新增 `code/src/engine/match/rebucket.py`（本步核心）
-
-```python
-SHOT_BUCKET_WIDTH_FALLBACK = 5      # 无生日时的降级等宽（沿用 faceStore 口径）
-
-def shotBucketFor(shotYear, birthday) -> str:
-    """(拍摄年, pb_person.birthday 原文) -> 自适应桶键；生日不可用 -> 降级等宽 5 年。
-    ⚠️ 薄封装，最终一律调 bucket.bucketKeyAdaptive()，**不在这里重写规则**"""
-
-def rebucketFace(faceRow, personRow=None) -> dict:
-    """单张脸：按 (pb_photo.shotYear, 该脸所属人的 birthday) 重算并写回 pb_face.shotBucket。
-    - personRow 为 None（未归属）→ 降级等宽桶
-    - **只改 shotBucket 一列**，走 upsert + forceColumns（注意 faceStore 已有 FACE_IDENTITY_COLUMNS 纪律）
-    - ⚠️ **绝不碰 personCode / isConfirmed / isStranger / clusterCode / embedding**
-    - 返回 {'faceCode','oldBucket','newBucket','changed'}"""
-
-def rebucketPerson(personCode) -> dict:      # 该人全部脸（分页，别一次取全）
-def rebucketPhoto(photoCode) -> dict:        # 该照片全部脸
-def rebucketAll(batchRows=None, progress=None, onlyAdaptive=False) -> dict:
-    """全库。**未归属的脸保持等宽桶**（没有生日可用），
-    所以 onlyAdaptive=True 时只刷「已归属 + 目标人有合法生日」的那些"""
-def auditBuckets() -> dict:
-    """一致性巡检（只读，不写）：
-    - bucketWidth 分布：宽 3 / 宽 10 = 自适应，宽 5 = 等宽降级
-    - 孤儿质心：pb_person_centroid 里的 bucketKey 在该人脸表中**没有任何脸**
-    - 失配脸：该人脸表的 shotBucket 集合与该人质心的 bucketKey 集合不相交
-    - 无主质心：bucketKey='ALL' 之外的桶，sampleCount>0 但该桶已无脸"""
-```
-
-**巡检是本步最有价值的产出** —— 它能把「桶口径不一致」这类静默失配变成一条明确结论。
-请把 `auditBuckets()` 的输出做成一目了然的表格（宽度分布用计数 + 举例）。
-
-## 二、把刷桶接进写入路径（**根治点：不要靠人记得跑脚本**）
-
-| 触发点 | 做什么 |
-|---|---|
-| **`assigner.assign()`** | 归属那一刻**生日才确定** → 先按新主人的 birthday 重刷这张脸的 `shotBucket`，**再**重算质心。⚠️ 这是最关键的一处 |
-| `assigner.unassign()` / `fix('unknown')` | 退回未归属 → 刷回**等宽降级桶**（生日不再是这个人的） |
-| `fix('stranger')` | 同上（该脸永远不会再匹配，刷成等宽即可） |
-| `merger.merge()` | 迁移到目标人后，按**目标人**的 birthday 重刷全部迁移的脸（源与目标的 birthday 可能不同 → 桶键不同） |
-| `merger.split()` | 拆出的人（新建档案）生日可能为空 → 刷成等宽降级桶 |
-| **联系人导入后** | `import_contacts` 落库完成 → 对**本次新建/更新的人**跑 `rebucketPerson` + `recomputePerson`（生日到位了，桶键才该变） |
-| 扫描提取后（`faceStore`） | 保持现状：仍写等宽占位桶（此时还不知道这张脸是谁），由 `assign` 负责刷。**但要在 faceStore 的函数注释里把「谁负责重刷」写清楚**，别再留「步骤 6 会覆盖」这种已经失效的承诺 |
-
-## 三、DR-21：未归属脸的候选桶放宽到「全部已启用桶」
-
-`matcher.py` 现在对所有脸都用 `bucket.neighborBucketKeys(bucketKey, neighbor)`。
-问题：**未归属脸的桶是等宽 5 年，而别人的质心是自适应桶（宽 3 / 宽 10），键根本不对齐**
-（等宽 `"2000-2004"` 的邻居是 `"1995-1999"`/`"2005-2009"`，而自适应童年桶可能是 `"1997-1999"`）
-→ **未归属脸一把质心都取不到，只能靠 `ALL` 兜底 → 等于退化成不分桶**，
-而这恰恰是最需要匹配的阶段。
-
-改法：
-```python
-def candidateBucketsOf(faceRow, index=None):
-    """faceRow['personCode'] 为空 -> 返回 None（表示"全部已启用的桶"）
-    已归属 -> bucket.neighborBucketKeys(shotBucket, neighbor)"""
-```
-调用侧：候选为 `None` 时用 `index.subset(index.全部桶键)`（**`CentroidSubset` 的按人连续段与
-`np.maximum.reduceat` 优化完整保留，不用重写**），并把 `ALL` 一并加入。
-
-**成本核算要给出实测数字**（别只说「可接受」）：
-- 质心行数 = Σ(人 × 每人启用桶数)，行数 × 512 × 4B = 内存
-- 单脸一次矩阵乘的耗时（ms）
-- 10 万张脸全量重匹配的 wall-clock
-
-**注意与 DR-12 的关系**：DR-12 说「按候选桶惰性加载，10 万 × 512 = 205MB 已超预算」。
-本条放宽后，未归属脸要全量 —— 但**质心行数远小于人脸行数**（质心 = 人数 × 桶数，几百到几千行，
-几 MB），人脸的 embedding 才是 205MB 那一项，而那部分**没有变化**。请在报告里把
-「质心矩阵」与「人脸向量矩阵」两笔内存分开列，别混成一个数字。
-
-## 四、DR-22：硬顺序 + 前置检查
-
-- `centroid.recomputePerson()` / `recompute()` 执行前**先做一致性检查**：
-  脸表实际 `shotBucket` 集合 vs 质心表 `bucketKey` 集合，不一致 → **抛错并提示先跑 rebucket**，
-  **不要默默按旧口径算**（那会造出僵尸质心 + 新桶无质心 → 匹配率归零且库里看不出异常）
-- 提供 `tools/rebucket_cli.py`：
-  `--all` / `--person <code>` / `--photo <code>` / `--audit` / `--dry-run` / `--recompute`
-  ⚠️ `--recompute` 必须是**刷完桶之后**才重算，不要提供一个「只重算」的路径让人跳过刷桶
-
-## 五、验收清单（逐条实际运行，不要只写代码就宣称通过）
-
-### A. 桶口径修好了
-1. `auditBuckets()` 改前 vs 改后的 **bucketWidth 分布**：改前宽 5 占比 ~100%；改后
-   宽 3 / 宽 10 出现（有生日的人），宽 5 只剩「无生日 + 未归属」那些
-2. 抽 3 个人，各挑一张有 `shotYear` 的脸，贴出 `shotBucket` 改前 → 改后的值，
-   并手算 `bucketKeyAdaptive(shotYear, birthYear)` 验证与库里的值一致
-3. `rebucketPerson` 对**已归属 + 有生日**的人：桶键集合与 `bucket.bucketKeyAdaptive` 逐条重算一致
-4. 未归属的脸：桶宽仍是 5（降级），**不被误改成自适应桶**
-
-### B. 写入路径已接上（**这是根治点，逐个测**）
-5. 新建一个人（有生日）→ `assign()` 一张脸 → **该脸 `shotBucket` 立即变成自适应桶**（不是等宽）
-6. `fix('unknown')` / `unassign()` → 该脸刷回等宽降级桶
-7. `fix('stranger')` → 同上
-8. `merge()`（源与目标 birthday 不同）→ **迁移后的脸按目标人生日重刷**，与目标人其他脸同口径
-9. `split()` 拆出的人 birthday 为空 → 脸刷成等宽降级桶
-10. 走查确认：`assign()` 里「先刷桶、后重算质心」的顺序不可颠倒
-
-### C. DR-21 生效
-11. 构造一张**未归属**脸 + 一个**有自适应桶质心**的人 → 该脸能拿到分数（改前拿不到，改前请先贴出对照）
-12. 已归属脸仍走相邻三桶（**不要被 R2 改成全量**）：贴出候选桶列表证明仍是 3 个桶 + `ALL`
-13. `candidateBucketsOf()` 对未归属脸返回 `None` → 调用侧正确转成「全部桶」
-14. `CentroidSubset` 的 reduceat 路径仍被使用（代码走查 + 与改前相同的打分结果对照）
-
-### D. 顺序纪律
-15. 故意先 `recompute` 再 `rebucket`（用 `--recompute` 单独跑一次制造）→ 确认
-    **前置检查抛错并提示先跑 rebucket**，而不是默默产出错误的质心
-
-### E. 一致性与回归
-16. `auditBuckets()` 改后：**孤儿质心 0 条、失配脸 0 条、无主质心 0 条**（贴出完整报告）
-17. `pytest code/src/test` 全绿
-18. **`tools/verify_bucket_gain.py` 给出自适应 vs 等宽的真实 FR 对比数字** ← 本步最硬的证据，
-    之前 S0 的结论是 32.75% → 19%，请给出**生产库口径下**的实测值
-19. `tools/run_match.py` 在真实库上跑一批脸，给出三段式分布（auto/review/cluster）与耗时
-20. 修完后**全库重算质心**（`--all --recompute`），给出重算前后 `pb_person_centroid` 行数变化
-21. `photoDir` 零风险：全程文件数与总字节数不变
-22. 迁移/备份口径不变：`backup.py` 仍可整库拷贝（本步不得让 `photo\` 变成可写）
+28. `pytest code/src/test -q` 全绿（冻结改造不应破坏测试）
+29. **源码开发路径没被破坏**：`start.cmd` 仍能起服务，`local_settings.py` 仍生效
+30. `<photo_root>\photo` 的照片**文件数与总字节数全程不变**（原图零风险铁律）
 
 ## 六、硬约束
-- **原图绝对只读**：`d:\PhotoLib\photo` 一律只读
-- **业务层禁止裸 SQL**：一律经 `sqliteCommon`
-- **不要改成「匹配时实时算桶键」**（方案 B）：`CentroidSubset` 的 reduceat 优化会被推翻、
-  匹配侧要重写。用户已定方案 A
-- **不要用 `update_pb_face` 写 `shotBucket`**：它写不进 NULL/变化不可靠，走 upsert +
-  `forceColumns`（faceStore/assigner 文件头已有该纪律的记录）
-- **不要动 `pb_face` 的这些列**：`personCode` / `isConfirmed` / `isStranger` / `clusterCode` /
-  `embedding` / `bbox` / 各种 score。R2 **只动 `shotBucket` 一列**
-- 现有代码风格（文件头纪律说明、`_VERSION`、日志、`FACE_IDENTITY_COLUMNS` 等常量）保持一致
-- 不要顺手重构与本步无关的代码
+- **`--onedir`，禁止 `--onefile`**（spawn 多进程）
+- **必须 `freeze_support()`**（第一行、`__main__` 内）
+- **所有资源路径只走 `resourcePath` 一个出口**，不许再有 `__file__` 相对推导
+- **配置外置到 `app.ini`** 且优先级高于 `basicSettings.DEFAULT_*`；源码模式仍认 `local_settings.py`
+- ⭐ **区分「安装目录」与「照片库根目录」**：`D:\PhotoLib` 只是**安装目录的默认值**，
+  `photo_root` 必须默认**跟随实际安装目录**（由安装器写 `{app}`），**不许写死 `d:\PhotoLib`**
+- ⭐ **`DisableDirPage` 保持 `auto`（默认）**，让首次安装能自选目录、升级沿用旧目录；
+  想要「升级也看得见目录」用 `AlwaysShowDirOnReadyPage=yes`，**不要**把它改成 `no`
+- ⭐ **`app.ini` 只在不存在时生成**（Inno 用 `[Code]` + `FileExists`，**不许用 `[INI]` 段**），
+  否则升级会覆盖用户自定义的 `photo_root`
+- ⭐ **首次运行必须做可写性检查**，不可写时给可读提示 + 指出 `app.ini` 路径
+- **模型随包**，路径三段回退（随包 → 用户主目录 → 下载）；**不打包那个 275MB 的 `buffalo_l.zip`**
+- **卸载绝不删 `photo` / `thumb` / `db` / `backup`**（红线），提示里的路径要**动态拼**不许写死
+- **程序放 `app\` 子目录**，与数据物理分离
+- **产物落仓库 `dist\`**
+- **不改任何业务逻辑** —— 本步只动「进程模型 / 路径解析 / 配置读取」三件事
+- 不引新的**运行时**依赖（PyInstaller / Inno 只在打包时用，`requirements.txt` 不动）
+- 打包脚本全部版本化（`.spec` / `.iss` / `.ps1`），能一条命令复现
 
 ## 七、完成后必须输出
-1. 改动文件清单（新增 / 修改，逐个列路径）
-2. 验收结果（上面 22 条**逐条**给命令与实际输出 / 数值）
-3. **`auditBuckets()` 改前 vs 改后的完整报告**
-4. **内存两笔账分开列**：质心矩阵（MB）与人脸向量矩阵（MB）
-5. **`verify_bucket_gain.py` 的自适应 vs 等宽 FR 实测对比**
-6. 遗留问题与需要我决策的点
-```
+1. 改动文件清单（新增 / 修改）
+2. 验收结果（**30 条逐条**给命令与实际输出）
+3. **产物体积实测表**（onedir 目录 MB、安装包 MB、其中模型占比）
+4. ⭐ **第 6 条人脸提取的实测证据**（10 张 → `pb_face` 行数 + 无子进程报错）
+5. ⭐ **第 8 条「断网 + 改走模型目录」的证明**
+6. ⭐ **第 16 条「换安装目录后数据跟随」的证明**（`E:\apps\...` 下 `app.ini` 与 `photo/thumb/db` 的目录树）
+7. ⭐ **第 19 条升级不覆盖 `app.ini` 的证明**（手改的配置升级后还在）
+8. ⭐ **第 20 条卸载前后 `<photo_root>` 的目录树对照**（证明照片库没被删）
+9. `build\package.ps1` 一次完整运行日志
+10. 遗留问题与需要我决策的点
+    （特别是：**要不要代码签名**、**要不要把模型拆成可选下载包以减小安装包**、
+    **要不要在安装向导里增加一页「照片库位置」**）
+````
 
 ---
----
 
-# 步骤 1 · 工程基线与配置骨架
+# 第二部分 · 主线 12 步（2026-10-07 全部完成）
+
+> 已完成留档。各步骤的「实际落地偏差」记录见各节末尾与`plan/开发计划.md`。
+
+## 步骤 1 · 工程基线与配置骨架
 
 ```text
 【photo-browser · 步骤 1/12 · 工程基线与配置骨架】
@@ -2463,9 +2887,8 @@ def candidateBucketsOf(faceRow, index=None):
 ```
 
 ---
----
 
-# 步骤 2 · SQLite 运行层 + 代码生成器 + 建库
+## 步骤 2 · SQLite 运行层 + 代码生成器 + 建库
 
 ```text
 【photo-browser · 步骤 2/12 · SQLite 运行层 + 代码生成器 + 建库】
@@ -2550,9 +2973,8 @@ def candidateBucketsOf(faceRow, index=None):
 ```
 
 ---
----
 
-# 步骤 3 · 扫描器（遍历 / hash / EXIF / 去重 / 批次限流）
+## 步骤 3 · 扫描器（遍历 / hash / EXIF / 去重 / 批次限流）
 
 ```text
 【photo-browser · 步骤 3/12 · 扫描器】
@@ -2622,9 +3044,8 @@ def candidateBucketsOf(faceRow, index=None):
 ```
 
 ---
----
 
-# 步骤 4 · 缩略图与原图文件服务
+## 步骤 4 · 缩略图与原图文件服务
 
 ```text
 【photo-browser · 步骤 4/12 · 缩略图与原图文件服务】
@@ -2703,9 +3124,8 @@ thumbDir\   生成物，可随时重建
 ```
 
 ---
----
 
-# 步骤 5 · 人脸引擎（检测 + 特征 + 质量过滤）
+## 步骤 5 · 人脸引擎（检测 + 特征 + 质量过滤）
 
 ```text
 【photo-browser · 步骤 5/12 · 人脸引擎】
@@ -2772,9 +3192,8 @@ thumbDir\   生成物，可随时重建
 ```
 
 ---
----
 
-# 步骤 6 · 分桶 + 质心 + 匹配决策
+## 步骤 6 · 分桶 + 质心 + 匹配决策
 
 ```text
 【photo-browser · 步骤 6/12 · 分桶 + 质心 + 匹配决策】
@@ -2863,9 +3282,8 @@ thumbDir\   生成物，可随时重建
 ```
 
 ---
----
 
-# 步骤 7 · 聚类与待确认数据
+## 步骤 7 · 聚类与待确认数据
 
 ```text
 【photo-browser · 步骤 7/12 · 聚类与待确认数据】
@@ -2923,9 +3341,8 @@ thumbDir\   生成物，可随时重建
 ```
 
 ---
----
 
-# 步骤 8 · 联系人导入（CSV / vCard）
+## 步骤 8 · 联系人导入（CSV / vCard）
 
 ```text
 【photo-browser · 步骤 8/12 · 联系人导入（CSV / vCard）】
@@ -2983,9 +3400,8 @@ thumbDir\   生成物，可随时重建
 ```
 
 ---
----
 
-# 步骤 9 · 后端 API 全量
+## 步骤 9 · 后端 API 全量
 
 ```text
 【photo-browser · 步骤 9/12 · 后端 API 全量】
@@ -3305,11 +3721,11 @@ thumbDir\   生成物，可随时重建
     第二次跑 `created=0 / updated=N`；`source=1` 的手工行**不能被复算打回 0**；
     已从 `pb_photo` 消失的地点**行要留、`photoCount` 要归零**
     （不归零就会在地图上留一个「0 张却显示 300 张」的幽灵点）。
+```
 
 ---
----
 
-# 步骤 10 · 前端骨架 + 双主题
+## 步骤 10 · 前端骨架 + 双主题
 
 ```text
 【photo-browser · 步骤 10/12 · 前端骨架 + 双主题】
@@ -3378,9 +3794,8 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 ```
 
 ---
----
 
-# 步骤 11 · 照片流 + 照片详情 + 待确认队列
+## 步骤 11 · 照片流 + 照片详情 + 待确认队列
 
 ```text
 【photo-browser · 步骤 11/12 · 照片流 + 照片详情 + 待确认队列】
@@ -3468,9 +3883,8 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 ```
 
 ---
----
 
-# 步骤 12 · 人物库/详情 + 扫描台 + 设置 + 打磨
+## 步骤 12 · 人物库/详情 + 扫描台 + 设置 + 打磨
 
 ```text
 【photo-browser · 步骤 12/12 · 人物库/详情 + 扫描台 + 设置 + 打磨】
@@ -3558,7 +3972,8 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 ```
 
 ---
----
+
+# 第三部分 · 附录
 
 ## 附录 A · 步骤与里程碑对照
 
@@ -3566,6 +3981,7 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 | --- | --- | --- | --- |
 | **R5** | **地点界面**（**地点 → 照片流** + 人物「去过的地方」区块 · DR-37/38） | — | ✅ 已完成（`api/place.py` 48KB / `PlacesView` / `PlaceDetailView` / `PersonPlaces` / `test_api_person_places.py`；路由 `/places` + `/places/:placeCode`、侧栏 `MapPin`、`PersonDetailView` L684「↓↓↓ R5：去过的地方 ↓↓↓」均已接线） |
 | **R9** | **照片旋转**（左右转 90° · 显示层 CSS + `rotateDeg` 字段 · DR-43） | — | ⬜ **待做（提示语已写）** |
+| **R10** | **打包分发**（`--onedir` + Inno Setup；模型随包 / 配置外置 / 卸载不碰照片库 · DR-44） | — | ⬜ **待做（提示语已写）** |
 | **R6** | **照片详情左右翻页**（DR-31，A 档，后端零改动） | — | ✅ 已完成（`components/photo/PhotoPager.vue`） |
 | **R7** | **人物头像**（卡片显示照片 + 人脸样本设默认 · DR-40/41） | — | ✅ 已完成（2026-10-08：`personCoversOf` + `AvatarPicker` + 16 条用例；**正式库副本实测 24/24 卡片有封面脸**，改前 0/2030 有 `avatarFaceCode`） |
 | **R8** | **照片年代修正**（人工修正拍摄年 + 编辑入口 · DR-42） | — | ✅ 已完成（2026-10-08：`pb_photo.shotYearOverride` + `comGD.sqlEffectiveShotYear` + `processor/photoTimeFix.py` + `ShotYearFixDialog.vue` + `test_photo_time_fix.py` 12 条用例全绿）；⚠️ 拖拽（P1）与 `takenAt` 修正到日（P2）未做 |
@@ -3588,6 +4004,8 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 | 11 | 照片流 + 详情 + 待确认队列 | — | ✅ 已完成（`PhotosView` / `PhotoDetailView` / `ReviewView` + 7 个新组件；**DR-16 纠错闭环全部落地**：`FaceBox` 三种描边样式 + 悬停「✗ 不是他」一次可达、`ReviewView` 双 Tab + 键盘 1/2/3/N/S/I + 批量确认、合并/拆分独立端点。`pytest` = **1175 passed / 0 failed**） |
 | 12 | 人物库/详情 + 扫描台 + 设置 + 打磨 | **M4**（自己真正用一周） | ✅ **编码已完成**（2026-10-07）。撤销 UI 已接（候选集口径也修了：一次合并只出一个候选）、质心健康度提示、备份脚本 `tools/backup.py`（DR-24：故意不做进 HTTP）、重复照片对比、`/api/settings` 四端点。**修了两个既有缺陷**：人物桶内 `photoCount` 恒为 0、撤销候选集按 N 条成员行重复出现。`pytest` = **1225 passed / 0 failed**，`npm run build` + 样式门禁通过。⚠️ 未做：`GET /api/map`（可选，见该步「已知取舍」①）。**M4 剩下的是"用一周"，不是写代码** |
 
+---
+
 ## 附录 B · 每步固定的输出格式
 
 ```
@@ -3596,14 +4014,20 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 3. 遗留问题与需要我决策的点（如果有拿不准的需求，不要自行假设，列出来问我）
 ```
 
+---
+
+## 附录 C · 当前待办与已知遗留
+
+### C-1 · 下一步做什么
+
 > 提醒：新对话里请**只粘贴当前步骤的提示语**，不要把多步一起粘过去，否则上下文会过长导致遗漏约束。
 >
-> **当前应粘贴的是「修正步骤 R9 · 照片旋转」**（本文「修正步骤 R9」那一节）。
-> 12 步主线于 2026-10-07 全部完成；R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 均已完成，
-> **R9（照片旋转）是唯一待做项**。
+> **待做两项：R9（照片旋转）、R10（打包分发）**。两节都在本文「第一部分」，各自独立、无依赖，
+> 可任选顺序。R10 **只碰「进程模型 / 路径解析 / 配置读取」，不动业务逻辑**，所以与 R9 不冲突。
+> 12 步主线于 2026-10-07 全部完成；R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 均已完成。
 >
-> ⚠️ **编号提醒**：`R7` = 人物头像（DR-40/41，已完成）、`R8` = 照片年代修正（DR-42，已完成）、
-> **`R9` = 照片旋转（DR-43，待做）**。别把 R9 叫成 R7。
+> ⚠️ **编号提醒**：`R7` = 人物头像（DR-40/41）、`R8` = 照片年代修正（DR-42）、
+> `R9` = 照片旋转（DR-43）、`R10` = 打包分发（DR-44）。都是**已完成或待做**，别互相叫错。
 >
 > **R9 完成后（按优先级）**
 > 1. **M4 一周自测**（最重要，不是写代码）：按 `开发计划.md` §八 的建议用法真用一周，

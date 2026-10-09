@@ -194,6 +194,24 @@ def effectiveYearOf(row: dict):
         return None
 
 
+def rotateDegOf(row: dict) -> int:
+    """pb_photo 行 -> 人工旋转角度 int（DR-43）。**只认 0/90/180/270**。
+
+    口径与 Python 侧唯一写入口 `processor/photoRotate.normalizeAngle` 一致：
+    脏值（NULL / 空 / 非数字 / 越界）一律当 **0**（未修正）而不是原样透出 ——
+    前端拿到一个 45 去 `rotate(45deg)` 会得到一个**斜着的**照片，
+    而用户根本没有"任意角度"这个功能，谁也说不清它是从哪来的。
+    """
+    value = (row or {}).get("rotateDeg")
+    if value is None or str(value).strip() == "":
+        return 0
+    try:
+        angle = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return angle if angle in (0, 90, 180, 270) else 0
+
+
 def photoSummary(row: dict) -> dict:
     """pb_photo 行 -> 照片列表项。
 
@@ -257,6 +275,12 @@ def photoSummary(row: dict) -> dict:
         "cameraModel": row.get("cameraModel") or None,
         "width": int(width) if width is not None else None,
         "height": int(height) if height is not None else None,
+        # DR-43：人工旋转角度（0/90/180/270，0=未修正）。**显示属性**，不是识别事实。
+        # ⚠️ 漏透出这一列的后果是最难发现的那种不一致：接口 200、字段缺失、
+        #    「照片流里转了、地点详情里没转」——界面静默错，不报任何错。
+        # ⚠️ 行里没有这一列（某条 SQL 没选它）-> 当 0（未修正），
+        #    不能因为漏选列就让整张照片显示不出来。
+        "rotateDeg": rotateDegOf(row),
         "fileSize": int(row.get("fileSize") or 0),
         "mimeType": row.get("mimeType") or None,
         "faceCount": int(row.get("faceCount") or 0),
@@ -479,7 +503,7 @@ def getTimeline(year: int = Query(default=None, ge=1, le=9999,
             "SELECT COUNT(*) AS rowNum FROM pb_photo p WHERE " + cond,
             tuple(values)) or 0)
         rows = query.selectList(
-            "SELECT p.photoCode, p.relPath, p.takenAt, p.shotYear, p.shotYearOverride, p.placeName,"
+            "SELECT p.photoCode, p.relPath, p.takenAt, p.shotYear, p.shotYearOverride, p.rotateDeg, p.placeName,"
             " p.cameraModel, p.width, p.height, p.fileSize, p.mimeType,"
             " p.faceCount, p.isDuplicate, p.isMissing, p.scanState"
             " FROM pb_photo p WHERE " + cond +
@@ -523,7 +547,7 @@ def getTimeline(year: int = Query(default=None, ge=1, le=9999,
         "SELECT COUNT(*) AS rowNum FROM pb_photo p WHERE " + cond, tuple(values))
     totalIn = int(countRow or 0)
     rows = query.selectList(
-        "SELECT p.photoCode, p.relPath, p.takenAt, p.shotYear, p.shotYearOverride, p.placeName,"
+        "SELECT p.photoCode, p.relPath, p.takenAt, p.shotYear, p.shotYearOverride, p.rotateDeg, p.placeName,"
         " p.cameraModel, p.width, p.height, p.fileSize, p.mimeType,"
         " p.faceCount, p.isDuplicate, p.isMissing, p.scanState"
         " FROM pb_photo p WHERE " + cond +
@@ -532,6 +556,49 @@ def getTimeline(year: int = Query(default=None, ge=1, le=9999,
     return {"ok": True, "scope": "photos", "total": total, "year": int(year),
             "month": int(month), "ym": ym, "unknownCount": unknownCount,
             "page": dto.pageBody([photoSummary(r) for r in rows], p, s, totalIn)}
+
+
+def anchorOffsetOf(cond: str, values=(), sortColumn: str = "p.takenAt",
+                   anchorPhotoCode: str = None):
+    """锚点照片在**当前筛选 + `sortColumn DESC`** 下的行偏移（0 基）；不适用时返回 None。
+
+    为什么需要它（DR-31 补：翻页范围落在「看不见的那一段」）
+    --------------------------------------------------
+      照片详情页从人物 / 地点详情进来时带 `?scope=`，左右箭头沿**那一批照片**
+      翻，服务端按 `takenAt DESC` 分页（最新的在前）。而用户是从时间轴 /
+      人脸样本里点进去的，很可能是**一张老照片**：某个人的 2686 张照片里，
+      2005 年那张排在四十多页之后 —— 前端只拉了第 1 页（60 条），
+      于是「当前照片不在已加载列表里」⇒ **两个箭头全禁用**，
+      界面上就是「从人物库进来之后翻页坏了」，而且不报任何错。
+
+      不做「前端从第 1 页顺序加载直到找到」：那是 40 次请求 + 2400 行
+      没人会看的缩略图。让服务端把「它在这一批里的第几页」算出来，
+      前端一次请求就能定位到它。
+
+    ⚠️ 返回 None = **不定位**（锚点不存在 / 不满足筛选 / 排序键为空）：
+       调用方保持原 `page` 参数 —— 宁可回第 1 页，也不要猜一个错的位置。
+    ⚠️ 只在 **DESC + 排序键非空** 时定位。调用方只有「scope 翻页」一种，
+       它的排序固定 `takenAt DESC`；NULL 在 ASC / DESC 下的位置得分别处理，
+       猜错会让翻页跳到完全无关的一段 —— 比「不定位」坏得多。
+    """
+    code = str(anchorPhotoCode or "").strip()
+    if not code:
+        return None
+    # 锚点必须先**在筛选结果里**（否则算出来的页是另一批照片的页码）
+    rows = query.selectList(
+        "SELECT p.recID AS recID, " + sortColumn + " AS sortValue FROM pb_photo p"
+        " WHERE p.photoCode = %s AND " + cond,
+        (code,) + tuple(values))
+    if not rows or rows[0].get("sortValue") is None:
+        return None
+    value = rows[0].get("sortValue")
+    recID = rows[0].get("recID")
+    # DESC：排在锚点前面的 = 排序键更大的 + 键相同但 recID 更大的
+    return int(query.selectValue(
+        "SELECT COUNT(*) AS rowNum FROM pb_photo p WHERE " + cond +
+        " AND (" + sortColumn + " > %s"
+        " OR (" + sortColumn + " = %s AND p.recID > %s))",
+        tuple(values) + (value, value, recID)) or 0)
 
 
 # ============================================================
@@ -553,7 +620,10 @@ def listPhotos(page: int = Query(default=1, ge=1),
                isMissing: int = Query(default=None, description="1 只看库里有磁盘上没有的"),
                keyword: str = Query(default=None, description="路径 / 地点 / 机型 模糊匹配"),
                orderBy: str = Query(default="takenAt", description="排序字段（白名单）"),
-               desc: int = Query(default=1, description="1 倒序（时间线默认）/ 0 正序")):
+               desc: int = Query(default=1, description="1 倒序（时间线默认）/ 0 正序"),
+               anchorPhotoCode: str = Query(default=None,
+                                            description="锚点照片：返回它所在的那一页"
+                                                        "（scope 翻页定位用，见 anchorOffsetOf）")):
     """照片网格 / 列表。分页统一 `{page,size,total,items}`。
 
     多人筛选（AND / OR）
@@ -576,6 +646,14 @@ def listPhotos(page: int = Query(default=1, ge=1),
        `placeName` 再精确匹配，于是**两种写法返回同一批照片**。
        ⚠️ 仍然**不是 LIKE**：中文名这一侧同理，「…和静县」与「…和什托洛盖乡」
        模糊匹配会互相命中，用户会以为筛错了。
+
+    锚点定位（`anchorPhotoCode`）
+    --------------------------
+      给了它，且这张照片**在本筛选结果里**时，返回的是**它所在的那一页**
+      （入参 `page` 被忽略；响应里的 `page` 是算出来的页）——
+      照片详情页的 scope 翻页靠它一次就落到正确位置，不必从第 1 页顺序翻。
+      不适用（照片不满足筛选 / 排序键为空 / 排序是升序）时就当没给，
+      按原 `page` 返回。见 `anchorOffsetOf()`。
     """
     p, s = dto.clampPage(page, size)
     at = dto.offsetOf(p, s)
@@ -647,8 +725,16 @@ def listPhotos(page: int = Query(default=1, ge=1),
     total = int(query.selectValue("SELECT COUNT(*) AS rowNum FROM pb_photo p WHERE " + cond,
                                  tuple(values)) or 0)
     sortColumn = PHOTO_SORT_COLUMNS[orderBy]
+    # DR-31 补：入口声明了 scope 时，前端把「当前这张照片」当锚点传进来，
+    # 服务端算出它在这一批里的页 —— 否则一张排在第 40 页的老照片会让
+    # 「人物库进来」的左右箭头全禁用（见 anchorOffsetOf 的注释）。
+    if int(desc):
+        anchorAt = anchorOffsetOf(cond, values, sortColumn, anchorPhotoCode)
+        if anchorAt is not None:
+            p = anchorAt // s + 1
+            at = dto.offsetOf(p, s)
     rows = query.selectList(
-        "SELECT p.photoCode, p.relPath, p.takenAt, p.shotYear, p.shotYearOverride, p.placeName,"
+        "SELECT p.photoCode, p.relPath, p.takenAt, p.shotYear, p.shotYearOverride, p.rotateDeg, p.placeName,"
         " p.cameraModel, p.width, p.height, p.fileSize, p.mimeType,"
         " p.faceCount, p.isDuplicate, p.isMissing, p.scanState"
         " FROM pb_photo p WHERE " + cond +
@@ -1202,6 +1288,7 @@ def listPersonFaces(personCode: str,
         " f.isStranger AS isStranger, f.quality AS quality, f.detScore AS detScore,"
         " f.embedding AS embedding, f.regYMDHMS AS regYMDHMS,"
         " p.shotYear AS shotYear, p.shotYearOverride AS shotYearOverride,"
+        " p.rotateDeg AS rotateDeg,"
         " p.takenAt AS takenAt, p.relPath AS relPath"
         " FROM pb_face f JOIN pb_photo p ON p.photoCode = f.photoCode"
         " WHERE %s ORDER BY f.shotBucket ASC, f.regYMDHMS ASC LIMIT %%s" % cond,
@@ -1263,6 +1350,7 @@ def getPersonTimeline(personCode: str,
             "SELECT f.shotBucket AS bucketKey, p.photoCode AS photoCode,"
             " p.relPath AS relPath, p.takenAt AS takenAt,"
             " p.shotYear AS shotYear, p.shotYearOverride AS shotYearOverride,"
+            " p.rotateDeg AS rotateDeg,"
             " p.faceCount AS faceCount, p.placeName AS placeName,"
             " p.cameraModel AS cameraModel, p.width AS width, p.height AS height,"
             " p.fileSize AS fileSize, p.mimeType AS mimeType,"
@@ -1563,6 +1651,14 @@ def getPhoto(photoCode: str):
         raise dto.ApiError(dto.CODE_NOT_FOUND,
                            "photoCode=%s 在 pb_photo 里不存在" % photoCode)
     out = photoSummary(row)
+    # ⚠️ DR-43：`orientation` 必须**同时**在顶层给一份。
+    #    前端的 `displaySize(photo, rotateDeg)` 读的是 `photo.orientation`
+    #    （顶层），它要按 ①EXIF 方向 ②人工旋转 依次折算**显示方向**的宽高比；
+    #    只放在 `exif.orientation` 里的话，orientation=6 的照片主图容器会按
+    #    未纠正的横图比例撑开、而浏览器显示的是竖图 —— 人脸框整体错位，
+    #    且这个错**只在带 EXIF 方向的照片上**出现（绝大多数照片看不出问题）。
+    #    与 `/duplicates/compare` 的 side() 同一个做法（那里早就这么给了）。
+    out["orientation"] = row.get("orientation")
     out["exif"] = {
         "takenAt": row.get("takenAt") or None,
         "cameraModel": row.get("cameraModel") or None,

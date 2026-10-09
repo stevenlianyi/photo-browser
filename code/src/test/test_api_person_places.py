@@ -353,3 +353,33 @@ def test_detailPlacePhotosAndYearsUseAggregationKey(api_env):
     assert body["items"][0]["placeName"] == "华盛顿"
     assert {one["year"]: one["count"] for one in body["years"]} == {2013: 1, 2014: 1}
     assert body["place"]["placeName"] == "华盛顿"
+
+
+def test_detailPlacePhotosAnchorLocatesPage(api_env):
+    """`anchorPhotoCode` 在地点照片流上同样定位（详情页 `scope=place:` 用）。
+
+    照片详情页从「地点详情」点进来时，当前照片可能是这个地点里**最老的一张**；
+    不定位的话前端只加载第 1 页 ⇒ 两个箭头全禁用（同 `/api/photos` 的那个症状）。
+    """
+    client = api_env["client"]
+    _addPhoto("PH_DIR_US1", "2013.07.26 华盛顿/a.jpg", 2013,
+              placeName=None, placeNameDir="华盛顿")
+    _addPhoto("PH_DIR_US2", "2014.07.26 华盛顿/b.jpg", 2014,
+              placeName=None, placeNameDir="华盛顿")
+    _addPhoto("PH_DIR_US3", "2015.07.26 华盛顿/c.jpg", 2015,
+              placeName=None, placeNameDir="华盛顿")
+    client.post("/api/places/rebuild")
+    from processor.place import placeStore
+    code = placeStore.makePlaceCode("华盛顿")
+
+    # takenAt DESC：2015 / 2014 / 2013 -> 最老那张在第 3 页
+    body = client.get("/api/places/%s/photos" % code,
+                      params={"size": 1, "anchorPhotoCode": "PH_DIR_US1"}).json()
+    assert body["total"] == 3
+    assert body["page"] == 3
+    assert body["items"][0]["photoCode"] == "PH_DIR_US1"
+    # 锚点不在这个地点里 -> 不定位，退回入参 page
+    other = client.get("/api/places/%s/photos" % code,
+                       params={"size": 1, "page": 2,
+                               "anchorPhotoCode": "PH_2013_01"}).json()
+    assert other["page"] == 2

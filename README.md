@@ -147,6 +147,7 @@ cd code\src
 | **R4** | **地点字典基础层**（`pb_place` + `placeStore` + `/api/places`） | ✅ 已完成 |
 | **R5** | **地点界面**（地点 → 照片流 + 人物详情时间轴后的「去过的地方」· DR-37/38/39） | ✅ 已完成（`api/place.py` / `PlacesView` / `PlaceDetailView` / `PersonPlaces` + 路由与侧栏接线） |
 | **R9** | **照片旋转**（左右转 90° · 显示层 CSS + `pb_photo.rotateDeg` · DR-43） | ⬜ **待做（提示语已写）** |
+| **R10** | **打包分发**（独立 exe + 安装包 · `d:\PhotoLib` 默认目录 · DR-44） | ⬜ **待做（提示语已写）** |
 | **R7** | **人物头像**（人物库卡片显示照片 + 人脸样本设默认头像 · DR-40/41） | ✅ 已完成（2026-10-08；`AvatarPicker` + `personCoversOf`） |
 | **R8** | **照片年代修正**（人工修正拍摄年 → 年代桶跟着对 · DR-42） | ✅ 已完成（2026-10-08；`pb_photo.shotYearOverride` + 照片详情「年代」修正入口；拖拽与 `takenAt` 修正留作 P1/P2） |
 | **R2** | **分桶口径修复**（自适应分桶从未生效 · DR-20/21/22） | ✅ 代码已落地（`test_rebucket.py` 36 用例全绿）；⚠️ **验收证据仍欠**（见下） |

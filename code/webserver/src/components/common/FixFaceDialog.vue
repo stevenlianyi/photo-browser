@@ -35,7 +35,7 @@ import { computed, ref, watch } from 'vue'
 import { Search, Split, TriangleAlert, UserPlus, X } from 'lucide-vue-next'
 import PersonForm from '@/components/common/PersonForm.vue'
 import { faceUrl } from '@/api/static'
-import { faceStateOf, similarityText } from '@/utils/faceState'
+import { faceStateOf, faceStrokeStyle, similarityText } from '@/utils/faceState'
 import { baseName } from '@/utils/format'
 import { relationLabelOf, usePersonsStore } from '@/store/persons'
 
@@ -98,6 +98,11 @@ const action = ref(props.mode)
 const pickedPerson = ref('')
 /** 已选中的那个人（选中那一刻的对象，见下方 picked 的说明） */
 const pickedItem = ref(null)
+/**
+ * 裁剪图**可能不在磁盘上**（`/api/face` 对查不到的图回 404）——
+ * 浮层最上方挂一个浏览器的破图图标，比什么都不显示更难解释，所以回退成占位块。
+ */
+const brokenFaces = ref({})
 const keyword = ref('')
 const alsoSiblings = ref(false)
 const confirmStranger = ref(false)
@@ -130,12 +135,25 @@ watch(
     alsoSiblings.value = false
     confirmStranger.value = false
     showNewPerson.value = false
+    brokenFaces.value = {}
   },
 )
 
 const single = computed(() => (props.faces || []).length === 1)
 const primary = computed(() => props.faces?.[0] || null)
 const primaryMeta = computed(() => faceStateOf(primary.value))
+
+/**
+ * 预览用的人脸 = 本次要改判的那几张（**不含**勾选「其他脸一起改判」后追加的兄弟脸）：
+ * 这块预览回答的是「我点的是哪张脸」，不是「最后会改到几张」——
+ * 后者由复述文案里的 targetFaces.length 负责。
+ */
+const previewFaces = computed(() => (props.faces || []).filter((face) => face?.faceCode))
+
+function markFaceBroken(faceCode) {
+  if (!faceCode) return
+  brokenFaces.value = { ...brokenFaces.value, [faceCode]: true }
+}
 
 /** 实际会被改判的那些脸（勾了「其他脸也否决」就把同照片的其它脸带上） */
 const targetFaces = computed(() => {
@@ -365,6 +383,51 @@ function close() {
     :close-on-click-modal="false"
     @update:model-value="emit('update:modelValue', $event)"
   >
+    <!-- 人脸预览**必须排在最上方**：用户是「这张脸认错了」进来的，
+         浮层里第一件该看见的东西就是那张脸。先摆候选列表、让人读完相似度
+         再回头核对脸，等于让人凭记忆比对 —— 队列里翻过几屏之后记忆并不可靠。
+         预览用**带状态描边的裁剪图**（与 FaceBox / AvatarPicker 同一套四态编码）：
+         「待确认」与「机器认的」在缩略图上就得能分辨，否则用户会把
+         一张「机器刚认的」脸当成「还没归属的」脸来改判。 -->
+    <section
+      v-if="previewFaces.length"
+      class="mb-3 rounded-btn border border-line bg-card p-3"
+      aria-label="待改判的人脸预览"
+    >
+      <div class="flex items-baseline justify-between gap-2">
+        <span class="text-body font-medium text-ink">
+          {{ isSplit ? '要拆出的脸' : '要改判的脸' }}
+        </span>
+        <span class="pb-hint">
+          <span aria-hidden="true">{{ primaryMeta.icon }}</span> {{ primaryMeta.label }}
+          <template v-if="previewFaces.length > 1"> · 共 {{ previewFaces.length }} 张</template>
+        </span>
+      </div>
+      <div class="mt-2 flex flex-wrap items-start gap-2">
+        <template v-for="face in previewFaces" :key="face.faceCode">
+          <img
+            v-if="!brokenFaces[face.faceCode]"
+            :src="faceUrl(face.faceCode)"
+            class="shrink-0 rounded-thumb border object-cover"
+            :class="[single ? 'h-32 w-32' : 'h-16 w-16', faceStateOf(face).borderClass]"
+            :style="faceStrokeStyle(faceStateOf(face))"
+            :alt="`要改判的人脸裁剪图（${face.faceCode}）`"
+            loading="lazy"
+            @error="markFaceBroken(face.faceCode)"
+          />
+          <span
+            v-else
+            class="inline-flex shrink-0 items-center justify-center rounded-thumb border bg-surface px-1 text-center text-caption text-ink-weak"
+            :class="[single ? 'h-32 w-32' : 'h-16 w-16', faceStateOf(face).borderClass]"
+            :style="faceStrokeStyle(faceStateOf(face))"
+            :title="`裁剪图暂不可用（${face.faceCode}）`"
+          >
+            裁剪图暂不可用
+          </span>
+        </template>
+      </div>
+    </section>
+
     <!-- 复述：改的是哪几张、来自哪张照片、现在被认成谁 -->
     <div class="rounded-btn bg-surface p-3 text-body">
       <p class="text-ink">

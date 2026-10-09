@@ -103,15 +103,36 @@ export function shortHash(hash, head = 8, tail = 6) {
 }
 
 /**
- * 缩略图显示尺寸（4:3 还是 1:1）。
- * EXIF orientation ∈ {5,6,7,8} 时宽高是转置的，按**显示**方向取。
+ * 缩略图 / 主图显示尺寸 —— **最终显示方向**的宽高。
+ *
+ * 这是**唯一**的几何入口（DR-43）：宽高比、容器 aspect-ratio、「尺寸」那一行
+ * 全部从这里取。两次转置叠在同一条路径上，顺序不可颠倒：
+ *   ① EXIF orientation ∈ {5,6,7,8} -> 宽高转置（相机自己记的方向）；
+ *   ② 人工旋转 rotateDeg ∈ {90,270} -> 再转置一次（DR-43，用户转的方向）。
+ * 两次**互不影响**：rotateDeg=0 时行为与加这个参数之前逐字相同。
+ *
+ * ⚠️ 不要另起一个「带旋转的 displaySize」：两处各算一遍的后果是
+ *    「主图容器按旋转后的比例、尺寸那一行按未旋转的」——
+ *    同一张照片自相矛盾，而且两处代码各自看都对。
+ *
+ * @param {object} photo pb_photo 派生的行（含 width/height/orientation）
+ * @param {number|string} [rotateDeg] 人工旋转角度（0/90/180/270）
  */
-export function displaySize(photo) {
+export function displaySize(photo, rotateDeg = 0) {
   if (!photo) return { width: 0, height: 0 }
   let width = Number(photo.width) || 0
   let height = Number(photo.height) || 0
   const orientation = Number(photo.orientation) || 1
   if (orientation >= 5 && orientation <= 8) {
+    const tmp = width
+    width = height
+    height = tmp
+  }
+  // 人工旋转：只有 90 / 270 换宽高（180 是中心对称，画布尺寸不变）。
+  // 取模是为了容忍调用方传 450 / -90 这类"累加后没归约"的值——
+  // 传进来的**必然是**已经被后端校验过的 0/90/180/270，这里只做防御。
+  const deg = ((Number(rotateDeg) || 0) % 360 + 360) % 360
+  if (deg === 90 || deg === 270) {
     const tmp = width
     width = height
     height = tmp

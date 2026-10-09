@@ -18,6 +18,7 @@
      不该出现在界面上。
 -->
 <script setup>
+import { ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { UserRound } from 'lucide-vue-next'
 import { faceUrl } from '@/api/static'
@@ -30,6 +31,33 @@ const props = defineProps({
   /** 该地点的照片总数（空状态文案里要带上，见文件头） */
   photoTotal: { type: Number, default: 0 },
 })
+
+/**
+ * 头像脸码 = 服务端 `browse.personCoversOf()` 解析好的 `coverFaceCode`（DR-40）。
+ *
+ * ⚠️ **不要**用 `avatarFaceCode`：它只是「用户选过的那张」，正式库里绝大多数
+ *    为空，且可能已失效。两级回退（默认脸 → 代表脸）在服务端做完了，
+ *    这里再退一次就是两套口径 —— 这正是本页人脸不显示的根因：
+ *    判空用的是 `thumbUrl`（基于代表脸），渲染却用 `faceUrl(avatarFaceCode)`
+ *    ⇒ `avatarFaceCode` 为空时 `<img>` 的 src 成了 `/api/face/`，404 破图。
+ */
+function avatarFaceCodeOf(person) {
+  return String(person?.coverFaceCode || '')
+}
+
+/**
+ * `/api/face` 对「库里查得到但裁剪图还没落盘」的脸也回 404（见 api/static.py）。
+ * 那时必须退回占位图标 —— 挂一个破图比没有头像更难解释。
+ * 逐项记录（列表在同一个组件里 v-for，配合 `personCode` 定位）。
+ */
+const brokenCodes = ref(new Set())
+function onAvatarError(code) {
+  brokenCodes.value = new Set(brokenCodes.value).add(code)
+}
+function showAvatar(person) {
+  return Boolean(avatarFaceCodeOf(person)) && !brokenCodes.value.has(person.personCode)
+}
+
 
 /** 年份跨度：只有一年时不要写成 `2013–2013`（那看起来像渲染坏了） */
 function yearSpanOf(person) {
@@ -64,8 +92,9 @@ function yearSpanOf(person) {
             class="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-line bg-surface"
             aria-hidden="true"
           >
-            <img v-if="person.thumbUrl" :src="faceUrl(person.avatarFaceCode)"
-                 alt="" class="h-full w-full object-cover" loading="lazy" />
+            <img v-if="showAvatar(person)" :src="faceUrl(avatarFaceCodeOf(person))"
+                 alt="" class="h-full w-full object-cover" loading="lazy"
+                 @error="onAvatarError(person.personCode)" />
             <UserRound v-else class="h-5 w-5 text-ink-weak" />
           </span>
           <span class="min-w-0">

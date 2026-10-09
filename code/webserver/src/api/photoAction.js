@@ -70,3 +70,28 @@ export function fixShotYear(photoCode, shotYear, confirm) {
     { params: { confirm: confirm ? 1 : 0 } },
   )
 }
+
+/* ------------------------------------------------------------
+ * 人工旋转（DR-43）
+ * ------------------------------------------------------------
+ * 只写 `pb_photo.rotateDeg`（0/90/180/270，顺时针为正）—— **原图一个字节都不动**，
+ * 缩略图缓存不失效，`/api/original` 的 Range 直传不受影响（没有服务端转码）。
+ *
+ * 三条纪律：
+ *   ① **不需要 confirm**：旋转不改变任何识别事实（bbox / 归属 / 质心 / 年代档 /
+ *      faceCount 全不动），没有"必须先让用户看见的影响面"，而且完全可逆
+ *      （再转回去即可）。所以这里是一步到位的写，不弹影响面。
+ *   ② **不落 pb_review_log**：那条链只装归属事实，旋转是纯显示属性。
+ *   ③ **只传 0/90/180/270**：角度累加在前端做 `(cur + delta + 360) % 360`，
+ *      后端不做 `% 360` 归约（传 45 / -90 / "abc" 一律 400 —— 静默归约会把
+ *      "前端角度算错了"变成看不见的 bug）。
+ *   ⚠️ 下载原图得到的**永远是原始方向**（原图不动）。这是有意为之，
+ *      不要顺手给下载链接加旋转 —— 那属于「旋转后另存」的导出功能，另开一步。
+ */
+export function rotatePhoto(photoCode, rotateDeg) {
+  return request.post(`/photos/${encodeURIComponent(photoCode)}/rotate`, { rotateDeg })
+}
+
+export function resetRotate(photoCode) {
+  return request.post(`/photos/${encodeURIComponent(photoCode)}/rotate-reset`)
+}

@@ -52,6 +52,23 @@ const hasFilter = computed(
   () => Boolean(keyword.value) || Boolean(year.value) || onlyWithPerson.value,
 )
 
+/**
+ * DR-43：封面的显示角度样式（`place.coverRotateDeg`，见 place.py 的 coversOf）。
+ *
+ * ⚠️ 这里与 `PhotoThumb` 的做法**不同**：格子是 4:3 而不是正方形，正方形转 90°
+ *    还是正方形（无缝），而 4:3 的框转 90° 后包围盒变成 3:4 —— 只转不缩放
+ *    会在左右**露出卡片底色**。所以要 `scale(4/3)` 把旋转后的画面重新盖满
+ *    （180° 的包围盒不变，不需要缩放）。
+ * ⚠️ 封面**没有人脸框**，所以这里可以只转 img（有脸框的地方必须连框一起转，
+ *    见 PhotoDetailView / ReviewView —— 那里各写了一遍"为什么"）。
+ */
+function coverStyle(place) {
+  const deg = ((Number(place?.coverRotateDeg) || 0) % 360 + 360) % 360
+  if (!deg) return {}
+  if (deg === 90 || deg === 270) return { transform: `rotate(${deg}deg) scale(4 / 3)` }
+  return { transform: `rotate(${deg}deg)` }
+}
+
 async function reload() {
   loading.value = true
   try {
@@ -231,6 +248,7 @@ function ariaLabelOf(place) {
               :src="thumbUrl(place.coverPhotoCode, 400)"
               :alt="`${placeDisplayName(place)} 的封面照片`"
               class="h-full w-full object-cover"
+              :style="coverStyle(place)"
               loading="lazy"
               decoding="async"
               draggable="false"

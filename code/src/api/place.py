@@ -466,11 +466,14 @@ def yearsOf(keys: list) -> dict:
 
 
 def coversOf(keys: list) -> dict:
-    """一批聚合键 -> `{key: 封面 photoCode}`（每处取**最新**那张）。
+    """一批聚合键 -> `{key: {"photoCode": 封面, "rotateDeg": 人工旋转角度}}`。
 
     ⚠️ 卡片封面必须走 `/api/thumb`（红线），所以这里只回 `photoCode`，
        由前端拼缩略图 URL —— 回一个文件路径就等于把「哪儿能取图」
        这件事漏给了两个地方（前端 + `api/static.py`）。
+    ⚠️ DR-43：`rotateDeg` **必须跟封面一起给**。封面是 4:3 固定框 + `object-cover`，
+       少这个值的话「照片流里转了、地点卡片上没转」—— 同一个封面在这里是躺着的，
+       而接口 200、结构齐全，只有那一个字段缺失（静默错，最难发现的那种）。
     """
     if not keys:
         return {}
@@ -478,13 +481,14 @@ def coversOf(keys: list) -> dict:
     covers = {}
     for one in query.selectList(
             "SELECT " + placeStore.placeKeySql("p") + " AS placeKey,"
-            " p.photoCode AS photoCode FROM pb_photo p"
+            " p.photoCode AS photoCode, p.rotateDeg AS rotateDeg FROM pb_photo p"
             " WHERE p.delFlag = %s AND " + where +
             " AND p.photoCode IS NOT NULL AND p.photoCode <> ''"
             " ORDER BY p.takenAt DESC, p.recID DESC",
             tuple([comGD.DEL_FLAG_NO] + list(values))):
         covers.setdefault(str(one.get("placeKey") or ""),
-                          str(one.get("photoCode") or ""))
+                          {"photoCode": str(one.get("photoCode") or ""),
+                           "rotateDeg": browse.rotateDegOf(one)})
     return covers
 
 
@@ -505,7 +509,10 @@ def attachCards(items: list) -> list:
     years = yearsOf(keys)
     for item in items:
         mine = _itemKeys(item)
-        item["coverPhotoCode"] = next((covers.get(k) for k in mine if covers.get(k)), None)
+        cover = next((covers.get(k) for k in mine if covers.get(k)), None)
+        item["coverPhotoCode"] = (cover or {}).get("photoCode")
+        # DR-43：封面的显示角度（前端 4:3 固定框要转 img + scale(4/3)，见 PlacesView）
+        item["coverRotateDeg"] = int((cover or {}).get("rotateDeg") or 0)
         item["personCount"] = sum(int(counts.get(k) or 0) for k in mine)
         merged = set()
         for key in mine:
@@ -758,7 +765,10 @@ def listPlacePhotos(placeCode: str,
                     placeCodes: str = Query(default=None, description=_PLACE_CODES_DESC),
                     page: int = Query(default=1, ge=1),
                     size: int = Query(default=dto.DEFAULT_PAGE_SIZE),
-                    year: int = Query(default=None, description="只看某一年")):
+                    year: int = Query(default=None, description="只看某一年"),
+                    anchorPhotoCode: str = Query(default=None,
+                                                 description="锚点照片：返回它所在的那一页"
+                                                             "（scope 翻页定位用）")):
     """`/photos` 的「地点已定」版本：**不需要前端拼 placeName**。
 
     ⚠️ 为什么不让前端直接调 `/photos?placeName=…`
@@ -769,8 +779,15 @@ def listPlacePhotos(placeCode: str,
         （`placeStore.placeKeySql`），所以结果必然一致。
 
     ⚠️ `years[]` 是**整个地点**的按年计数（一次 GROUP BY），不是本页的 ——
-       界面用它的数字做年份标题；用本页 items 现算的话，
-       第一页只会有「2013 年 60 张」这种**看着对但其实是分页边界**的数字。
+      界面用它的数字做年份标题；用本页 items 现算的话，
+      第一页只会有「2013 年 60 张」这种**看着对但其实是分页边界**的数字。
+
+    锚点定位（`anchorPhotoCode`）
+    --------------------------
+      与 `/photos` 同一套语义（见 `browse.anchorOffsetOf`）：给了它且这张照片
+      在本筛选结果里时，返回**它所在的那一页**（响应里的 `page` 是算出来的）。
+      照片详情页从「地点详情」点进来时带 `?scope=place:`，靠它一次落到正确位置
+      —— 否则这个地点的老照片排在几十页之后，左右箭头会全禁用。
     """
     rows = _detailRows(placeCode, placeCodes)
     keys = placeKeysOf(rows)
@@ -794,6 +811,11 @@ def listPlacePhotos(placeCode: str,
     total = int(query.selectValue(
         "SELECT COUNT(*) AS rowNum FROM pb_photo p WHERE " + sqlCond,
         tuple(args), default=0) or 0)
+    # DR-31 补：scope 翻页的首屏定位（排序固定 takenAt DESC，见 browse.anchorOffsetOf）
+    anchorAt = browse.anchorOffsetOf(sqlCond, args, "p.takenAt", anchorPhotoCode)
+    if anchorAt is not None:
+        p = anchorAt // s + 1
+        at = dto.offsetOf(p, s)
     years = [{"year": _intOrNone(one.get("shotYear")),
               "count": int(one.get("cnt") or 0)}
              for one in query.selectList(
@@ -806,6 +828,10 @@ def listPlacePhotos(placeCode: str,
         #    目录名照片在这一页上「没有地点」），用 lat/lon 判 hasGps。
         #    这两列没带的话接口 200、结构齐全，只是地点与 GPS 角标全空。
         "SELECT p.photoCode, p.relPath, p.takenAt, p.shotYear, p.shotYearOverride,"
+        # ⚠️ R9 / DR-43：rotateDeg **必须**在这里（R5 新增的第 6 处照片 SELECT）。
+        #    少这一列的症状是「照片流里转了、地点详情里没转」——
+        #    接口 200、结构齐全、只有那一个字段缺失，界面静默错。
+        " p.rotateDeg,"
         " p.placeName, p.placeNameDir, p.lat, p.lon,"
         " p.cameraModel, p.width, p.height, p.fileSize, p.mimeType,"
         " p.faceCount, p.isDuplicate, p.isMissing, p.scanState"

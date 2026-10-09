@@ -102,6 +102,31 @@ def _counts() -> dict:
 # 一、队列
 # ============================================================
 
+def _attachRotateDeg(items: list) -> list:
+    """给队列条目补上**来源照片的显示角度**（DR-43）。
+
+    为什么要在这里补：队列条目是 `pb_face` 的一行（`queue.pendingQueue`），
+    里面没有照片的列；而待确认页左半边那张大图 + 人脸框**必须一起转**
+    （框是归一化坐标，只转图不转框 = 框全错位）。所以按 photoCode 现查一次。
+
+    ⚠️ 一次批量查（`IN (...)`）而不是逐条查：队列一页 20 条、可以来自 20 张照片，
+       逐条查就是 20 次往返。photoCode 先去重 —— 一张照片里可能有多张待确认的脸。
+    ⚠️ 查不到的（照片被硬删/不存在）一律给 0：**宁可显示不转，也不要让条目缺字段**
+       —— 前端 `undefined` 参与角度累加会变成 NaN，整页图全黑。
+    """
+    codes = sorted({str(one.get("photoCode") or "") for one in (items or [])} - {""})
+    angles = {}
+    if codes:
+        marks = ", ".join(["%s"] * len(codes))
+        for row in query.selectList(
+                "SELECT p.photoCode AS photoCode, p.rotateDeg AS rotateDeg"
+                " FROM pb_photo p WHERE p.photoCode IN (%s)" % marks, tuple(codes)):
+            angles[str(row.get("photoCode") or "")] = browse.rotateDegOf(row)
+    for one in (items or []):
+        one["rotateDeg"] = angles.get(str(one.get("photoCode") or ""), 0)
+    return items
+
+
 @router.get("/review/pending", summary="待确认队列（含 Top-5 候选）")
 def getPending(page: int = Query(default=1, ge=1),
                size: int = Query(default=20, le=dto.MAX_PAGE_SIZE),
@@ -138,6 +163,7 @@ def getPending(page: int = Query(default=1, ge=1),
         items = reviewQueue.pendingQueue(limit=s, offset=at, topN=topN,
                                          preset=preset)
         items = [one for one in items if one["faceCode"] in set(codes)]
+        _attachRotateDeg(items)      # DR-43：大图与人脸框一起转，见该函数注释
         return dto.pageBody(items, p, s, min(len(codes), total))
 
     items = reviewQueue.pendingQueue(limit=s, offset=at, topN=topN,
@@ -148,6 +174,7 @@ def getPending(page: int = Query(default=1, ge=1),
         one["topCandidates"] = sorted(
             one.get("topCandidates") or [],
             key=lambda c: (-float(c.get("similarity") or 0.0), c.get("personCode") or ""))
+    _attachRotateDeg(items)          # DR-43：大图与人脸框一起转，见该函数注释
     return dto.pageBody(items, p, s, total)
 
 

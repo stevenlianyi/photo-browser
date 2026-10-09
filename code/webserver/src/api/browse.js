@@ -16,8 +16,13 @@ export function getTimeline(params = {}) {
 /** 照片列表（照片流网格 / 时间轴共用）
  *  参数：page / size / personCode / personCodes / mode / shotYearFrom /
  *       shotYearTo / placeName / hasFace / isDuplicate / isMissing /
- *       keyword / orderBy / desc
- *  mode 是多人语义：or=任一 / and=合影 */
+ *       keyword / orderBy / desc / anchorPhotoCode
+ *  mode 是多人语义：or=任一 / and=合影
+ *  ⚠️ `anchorPhotoCode` 是**定位**不是筛选：给了它且这张照片在筛选结果里时，
+ *     返回的是**它所在的那一页**（响应 page 是算出来的）。照片详情页从人物 /
+ *     地点详情进来（`?scope=`）时用它落到正确的一页 —— 不带锚点的话，
+ *     一张排在几十页之后的老照片会让左右箭头全禁用（见 PhotoDetailView
+ *     `loadScopePage` 的 'anchor' 分支）。 */
 export function listPhotos(params = {}) {
   return request.get('/photos', { params })
 }

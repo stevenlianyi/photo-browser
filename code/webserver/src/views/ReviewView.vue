@@ -105,6 +105,43 @@ function faceBoxOf(face) {
   return faceBoxStyle(face?.bbox) || {}
 }
 
+/**
+ * DR-43：来源照片的人工旋转角度。**大图与人脸框必须一起转**。
+ *
+ * ⚠️ 为什么这里不能「只转 <img>」（与详情页同一个坑）
+ * ------------------------------------------------
+ *   人脸框是 `pb_face.bbox` 归一化 x,y,w,h 转成的百分比、**绝对定位**在图上，
+ *   百分比基座是它的 offsetParent。只转 <img>、框留在外面 ⇒ 框全部错位。
+ *   所以这里同样用「外层吃旋转后比例 + 内层包住 img 与框一起转」的结构
+ *   （见模板里那段注释），bbox 语义一个字都不用改。
+ *
+ * 角度取自 `currentPhoto`（`GET /api/photos/{code}`，含 rotateDeg）；
+ * 兜底取队列条目自带的 rotateDeg（`_attachRotateDeg` 补的），两者都不在时 0。
+ */
+const rotateDeg = computed(
+  () => ((Number(currentPhoto.value?.rotateDeg ?? current.value?.rotateDeg) || 0) % 360 + 360) % 360,
+)
+
+/** 外层比例：90/270 时 4:3 -> 3:4（否则 4:3 的框装 3:4 的内容会两边露底色） */
+const frameClass = computed(() =>
+  rotateDeg.value === 90 || rotateDeg.value === 270 ? 'aspect-[3/4]' : 'aspect-[4/3]',
+)
+
+/**
+ * 内层：宽高用**未旋转**的 4:3（这是人脸框百分比的基座，也是缩略图裁切的形状），
+ * 居中 + 整体 rotate；90/270 时宽度取 `100% * 4/3` 才能转过来正好覆盖外层。
+ * 外层 `.pb-photo-frame` 自带 `overflow-hidden` → 转完四周**没有空隙**。
+ */
+const rotateInnerStyle = computed(() => {
+  const deg = rotateDeg.value
+  const swapped = deg === 90 || deg === 270
+  return {
+    aspectRatio: '4 / 3',
+    width: swapped ? 'calc(100% * 4 / 3)' : '100%',
+    transform: `translate(-50%, -50%) rotate(${deg}deg)`,
+  }
+})
+
 /** 进度：「剩余 N · 共 M 条」（跳过的是排到最后、不是完成，所以计入剩余） */
 const progressText = computed(() => {
   const base = `剩余 ${formatCount(review.remaining)} 条 · 共 ${formatCount(review.pendingTotal)} 条待确认`
@@ -651,20 +688,26 @@ watch(activeTab, (tab) => {
             <p class="pb-hint">未知人脸</p>
             <!-- ⚠️ 缩略图（不是原图）：队列页一次只看一张脸，
                  拉 3~6MB 的原图没有意义（红线：网格/队列绝不加载原图） -->
-            <div v-if="current" class="pb-photo-frame relative mt-2 aspect-[4/3] w-full">
-              <img
-                :src="thumbUrl(current.photoCode, 400)"
-                :alt="`来源照片 ${photoLabel} 的缩略图`"
-                class="block h-full w-full object-cover"
-                decoding="async"
-              />
-              <!-- 人脸框：橙色点线 = 待确认（与详情页同一套编码） -->
-              <span
-                v-if="currentFaceRow"
-                class="absolute border-2 border-dotted border-[var(--pb-warning-line)]"
-                :style="faceBoxOf(currentFaceRow)"
-                aria-hidden="true"
-              />
+            <!-- DR-43：外层吃**旋转后**的比例（90/270 时 4:3 -> 3:4），
+                 内层包住 img 与那个人脸框**一起转** —— 只转 img 的话
+                 人脸框的百分比基座没变，框会全部错位。
+                 `.pb-photo-frame` 自带 overflow-hidden，所以转完四周无空隙。 -->
+            <div v-if="current" class="pb-photo-frame relative mt-2 w-full" :class="frameClass">
+              <div class="absolute left-1/2 top-1/2" :style="rotateInnerStyle">
+                <img
+                  :src="thumbUrl(current.photoCode, 400)"
+                  :alt="`来源照片 ${photoLabel} 的缩略图`"
+                  class="block h-full w-full object-cover"
+                  decoding="async"
+                />
+                <!-- 人脸框：橙色点线 = 待确认（与详情页同一套编码） -->
+                <span
+                  v-if="currentFaceRow"
+                  class="absolute border-2 border-dotted border-[var(--pb-warning-line)]"
+                  :style="faceBoxOf(currentFaceRow)"
+                  aria-hidden="true"
+                />
+              </div>
             </div>
             <p v-else class="pb-card mt-2 px-3 py-8 text-center text-body text-ink-weak">
               正在加载…

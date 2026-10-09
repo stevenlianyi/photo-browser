@@ -189,6 +189,42 @@ export const usePhotosStore = defineStore('photos', () => {
     }
   }
 
+  /**
+   * 把一张照片的**显示角度**写回本地缓存（DR-43）。
+   *
+   * 为什么必须有这个函数而不是「旋转成功后整页 reload」
+   * -----------------------------------------------
+   *   · 详情页的主图/尺寸/人脸框都读 `photos.current`，网格读 `items`，
+   *     时间轴展开的月份读 `monthPhotos`。旋转后**只有这些地方**需要变 ——
+   *     重取一次详情是白跑一趟（还多一次 original 直传）。
+   *   · ⚠️ 更关键的是**翻页不能串角度**（最容易漏测的那条）：
+   *     `PhotoPager` 翻到下一张时读的是**那一张自己**的 rotateDeg，
+   *     所以这里必须**按 photoCode 命中才改**。写成"无条件改当前值"的话，
+   *     转完一张按 →，下一张也会是躺着的（刷新一下就好，所以极易漏测）。
+   */
+  function setRotateDeg(photoCode, rotateDeg) {
+    const code = String(photoCode || '')
+    if (!code) return
+    const deg = Number(rotateDeg) || 0
+    if (current.value && String(current.value.photoCode) === code) {
+      current.value = { ...current.value, rotateDeg: deg }
+    }
+    items.value = items.value.map((one) =>
+      String(one?.photoCode) === code ? { ...one, rotateDeg: deg } : one,
+    )
+    // 时间轴展开的月份：整块换一个对象，让依赖它的 computed 能看见变化
+    const next = {}
+    let touched = false
+    for (const [ym, list] of Object.entries(monthPhotos.value || {})) {
+      next[ym] = (list || []).map((one) => {
+        if (String(one?.photoCode) !== code) return one
+        touched = true
+        return { ...one, rotateDeg: deg }
+      })
+    }
+    if (touched) monthPhotos.value = next
+  }
+
   /** 时间轴首屏：年表（含每月计数） */
   async function fetchTimelineYears() {
     timelineLoading.value = true
@@ -323,6 +359,7 @@ export const usePhotosStore = defineStore('photos', () => {
     fetchPhotos,
     appendMore,
     fetchPhoto,
+    setRotateDeg,
     fetchTimelineYears,
     toggleYear,
     toggleMonth,

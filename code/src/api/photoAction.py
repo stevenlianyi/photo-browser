@@ -29,6 +29,23 @@
 #     （opType=BUCKET_FIX，可撤销）。理由：它改变了「这张脸属于哪个年代档」，
 #     那是归属排障链上的事实；而软删 / 标记重复不影响归属也不影响划分年代档，
 #     仍然一条日志都不落。写库逻辑在 processor/photoTimeFix.py。
+#
+# 旋转（DR-43，`/photos/{photoCode}/rotate` + `/rotate-reset`）—— 三处关键差别
+# ------------------------------------------------------------------------
+#                    软删 / 标记重复 / 年代修正      旋转
+#   两段式 confirm=1 需要（有影响面 / 不可逆语义）     **不需要**
+#   落 pb_review_log 软删与标记重复不落；年代修正落    **不落**
+#   连带重算         年代修正是 DR-22 三步联动         **零连带**
+#
+#   理由（一条就够）：**旋转不改变任何识别事实**
+#     · 不动 `bbox`、不动质心、不动 `shotBucket`、不动归属，
+#       也不动 `pb_photo.faceCount`；
+#     · 而且**完全可逆**（再转回去即可）。
+#   所以它既没有「必须先让用户看见的影响面」（对照软删的两段式），
+#   也不属于「归属纠错排障链」（对照年代修正的 BUCKET_FIX 日志）——
+#   pb_review_log 那条链必须保持只装归属事实，塞一条旋转进去就是污染。
+#   ⚠️ 别把旋转并入上面那条链：它是**纯显示属性**，与"这张脸怎么被认成这个人"
+#      没有任何关系。写库逻辑在 processor/photoRotate.py。
 
 import os
 import sys
@@ -41,11 +58,12 @@ if _SRC_DIR not in sys.path:
 from api import dto                                               # noqa: E402
 from common import miscCommon as misc                             # noqa: E402
 from processor import photoAction as photoAct                    # noqa: E402
+from processor import photoRotate                                 # noqa: E402
 from processor import photoTimeFix                                # noqa: E402
 
 from fastapi import APIRouter, Query                              # noqa: E402
 
-_VERSION = "20261006"
+_VERSION = "20261009"
 
 _LOG = misc.setLogNew("apiPhotoAction", "apiphotoaction.log")
 
@@ -219,5 +237,51 @@ def fixShotYear(photoCode: str, body: dto.ShotYearFixBody = None,
     try:
         result = photoTimeFix.applyFix(code, shotYear)
     except photoTimeFix.PhotoTimeFixError as e:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
+    return dto.okBody(executed=True, **result)
+
+
+# ============================================================
+# 五、人工旋转（DR-43）—— 翻拍件 / 扫描件的显示方向
+# ============================================================
+# ⚠️ 这两个端点与上面几个的**三处差别**写在模块头（不需要 confirm、不落
+#    pb_review_log、零连带）。一句话：旋转是**纯显示属性**，不改变任何识别事实。
+
+@router.post("/photos/{photoCode}/rotate",
+             summary="人工旋转显示角度（0/90/180/270，只改显示不动原图）")
+def rotate(photoCode: str, body: dto.RotateBody = None) -> dict:
+    """把这张照片的**显示角度**设为 `rotateDeg`（顺时针为正：90=右转 / 270=左转）。
+
+    只改 `pb_photo.rotateDeg` 一个值 —— 原图、EXIF、缩略图缓存、人脸框、归属
+    全部不变（理由见模块头那段差别表）。前端据此做一次 CSS `transform`。
+
+    ⚠️ 幂等：同值重复提交返回 `changed=false`，不报错
+       （前端"连点两次左转"就是靠这里保证不会写两次 modifyYMDHMS）。
+    ⚠️ 只接受 0 / 90 / 180 / 270，其它一律 400 —— **不做 `% 360` 归约**：
+       静默归约会把「前端算错了角度」这类 bug 变成看不见的。
+    """
+    code = _require(photoCode)
+    angle = getattr(body, "rotateDeg", None) if body is not None else None
+    try:
+        result = photoRotate.applyRotate(code, angle)
+    except photoRotate.PhotoRotateError as e:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
+    return dto.okBody(executed=True, **result)
+
+
+@router.post("/photos/{photoCode}/rotate-reset",
+             summary="重置显示角度为 0（恢复原方向）")
+def rotateReset(photoCode: str) -> dict:
+    """把这张照片的显示角度写回 0（恢复扫描件自己的方向）。
+
+    单列一个端点而不是让前端调 `rotate` 传 0：语义不同（「转到某角度」vs
+    「恢复原方向」），界面上的「重置方向」按钮直接对应它；而写的是**同一列**
+    （与 DR-42 的「修正 / 恢复自动」共用一个字段是同一个理由）。
+    ⚠️ 幂等：已经是 0 时返回 `changed=false`。
+    """
+    code = _require(photoCode)
+    try:
+        result = photoRotate.resetRotate(code)
+    except photoRotate.PhotoRotateError as e:
         raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
     return dto.okBody(executed=True, **result)

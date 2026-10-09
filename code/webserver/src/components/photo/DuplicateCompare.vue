@@ -50,6 +50,21 @@ const visible = computed({
   set: (value) => emit('update:modelValue', value),
 })
 
+/**
+ * DR-43：对比图的人工旋转样式。
+ *
+ * 两边都是固定 4:3 框 + `object-cover`、**没有人脸框**（人脸那一块用的是独立的
+ * 裁剪图 `faceUrl()`，与照片方向无关，一律不转）。所以这里可以只转 img：
+ * 90/270 时补一个 `scale(4/3)` 重新盖满，否则四角会露出卡片底色。
+ * ⚠️ 角度从 `compare[side].rotateDeg` 取（`browse.photoSummary` 已透出）。
+ */
+function sideStyle(side) {
+  const deg = ((Number(compare.value?.[side]?.rotateDeg) || 0) % 360 + 360) % 360
+  if (!deg) return {}
+  if (deg === 90 || deg === 270) return { transform: `rotate(${deg}deg) scale(4 / 3)` }
+  return { transform: `rotate(${deg}deg)` }
+}
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -221,6 +236,7 @@ function diffValue(one) {
                     :src="thumbUrl(compare[side].photoCode, 400)"
                     :alt="baseName(compare[side].relPath)"
                     class="h-full w-full object-cover"
+                    :style="sideStyle(side)"
                     loading="lazy"
                   />
                 </RouterLink>

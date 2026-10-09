@@ -390,6 +390,67 @@ def test_photosBadSortRejected(api_env):
     assert got.json()["code"] == "PARAM_INVALID"
 
 
+def test_photosAnchorLocatesPage(api_env):
+    """`anchorPhotoCode`：返回**锚点照片所在的那一页**（scope 翻页的定位）。
+
+    为什么这条必须有
+    --------------
+      照片详情页从人物 / 地点详情进来时带 `?scope=`，左右箭头沿那一批照片翻。
+      而点进去的往往是**一张老照片**（这个人的第 2000 多张），它根本不在第 1 页 ——
+      前端只拉第 1 页时「当前照片不在已加载列表里」，于是一个箭头都用不了
+      （看起来就是「从人物库进来之后翻页坏了」，且不报错）。
+      锚点定位是那个症状的唯一出路，所以**页号**必须算对。
+    """
+    client = api_env["client"]
+    # size=2 + takenAt DESC：PH_2024_06b / PH_2024_06 / PH_2020_11 / PH_2019_04
+    #                      / PH_2016_03 / PH_2013_07 / PH_DUP / PH_2013_01 / PH_NODATE
+    body = client.get("/api/photos",
+                      params={"size": 2, "anchorPhotoCode": "PH_2016_03"}).json()
+    assert body["page"] == 3                    # 它前面有 4 张 -> 第 3 页
+    assert body["items"][0]["photoCode"] == "PH_2016_03"
+
+    newest = client.get("/api/photos",
+                        params={"size": 2, "anchorPhotoCode": "PH_2024_06b"}).json()
+    assert newest["page"] == 1
+    assert newest["items"][0]["photoCode"] == "PH_2024_06b"
+
+    # 真实用法是「某人的照片 + 锚点」（详情页的 scope=person:…）
+    from processor.review import assigner as assigner
+
+    assigner.confirm("FC_PH_2013_01_0", "P_alpha")
+    assigner.confirm("FC_PH_2024_06_0", "P_alpha")
+    mine = client.get("/api/photos",
+                      params={"size": 1, "personCode": "P_alpha",
+                              "anchorPhotoCode": "PH_2013_01"}).json()
+    assert mine["total"] == 2
+    assert mine["page"] == 2
+    assert mine["items"][0]["photoCode"] == "PH_2013_01"
+
+
+def test_photosAnchorFallsBackWhenNotApplicable(api_env):
+    """锚点**不适用**时不许乱定位：退回入参 `page`（宁可第 1 页，不给错的位置）。
+
+    三种不适用：① 锚点不满足本次筛选 ② 排序键为空（NULL 落在哪一段得另算）
+                ③ 升序排序（ASC 下 NULL 在最前，是另一套规则）。
+    """
+    client = api_env["client"]
+    # ① 锚点有脸，但本次只要「无脸照片」-> 它不在结果里
+    miss = client.get("/api/photos",
+                      params={"size": 2, "page": 2, "hasFace": 0,
+                              "anchorPhotoCode": "PH_2013_01"}).json()
+    assert miss["page"] == 2
+    # ② takenAt 为空 -> 不猜
+    nodate = client.get("/api/photos",
+                        params={"size": 2, "page": 2,
+                                "anchorPhotoCode": "PH_NODATE"}).json()
+    assert nodate["page"] == 2
+    # ③ 升序不定位
+    asc = client.get("/api/photos",
+                     params={"size": 2, "desc": 0,
+                             "anchorPhotoCode": "PH_2016_03"}).json()
+    assert asc["page"] == 1
+
+
 # ============================================================
 # 五、人物 / 照片详情 / places / overview
 # ============================================================

@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>photo-browser 使用说明书</title>
+<style>
+  :root {
+    --bg: #F7F8FA;
+    --card: #FFFFFF;
+    --border: #E8EBF0;
+    --text: #1F2329;
+    --muted: #4D5566;
+    --primary: #5B8DEF;
+    --primary-weak: #EAF1FE;
+    --code-bg: #F2F4F7;
+    --warn-bg: #FFF7E6;
+    --warn-border: #FFD591;
+    --danger: #E5484D;
+    --danger-bg: #FEECEC;
+    --ok: #2BA471;
+    --code-text: #101316;
+    --shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  }
+  [data-theme="dark"] {
+    --bg: #14161A;
+    --card: #1E2128;
+    --border: #2B2F38;
+    --text: #E6E8EC;
+    --muted: #9AA3B2;
+    --primary: #7BA6F5;
+    --primary-weak: #1B2A45;
+    --code-bg: #232730;
+    --warn-bg: #2E2410;
+    --warn-border: #6B531F;
+    --danger: #FF6B6F;
+    --danger-bg: #3A1F22;
+    --ok: #4ECB91;
+    --code-text: #EFF3F9;
+    --shadow: 0 1px 3px rgba(0,0,0,.4);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  a { color: var(--primary); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* layout */
+  .layout { display: flex; min-height: 100vh; }
+  .sidebar {
+    width: 260px;
+    flex: 0 0 260px;
+    background: var(--card);
+    border-right: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 22px 16px;
+  }
+  .sidebar h1 {
+    font-size: 17px;
+    margin: 0 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .sidebar .sub { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+  .nav { list-style: none; padding: 0; margin: 0; }
+  .nav li { margin: 1px 0; }
+  .nav a {
+    display: block;
+    padding: 7px 12px;
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 14px;
+  }
+  .nav a:hover { background: var(--primary-weak); text-decoration: none; }
+  .nav a.active { background: var(--primary-weak); color: var(--primary); font-weight: 600; }
+  .theme-toggle {
+    margin-top: 18px;
+    width: 100%;
+    padding: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .theme-toggle:hover { border-color: var(--primary); }
+
+  .content { flex: 1; padding: 40px 56px; max-width: 920px; }
+  .content h2 {
+    font-size: 24px;
+    margin: 8px 0 18px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--border);
+  }
+  .content h3 { font-size: 18px; margin: 30px 0 12px; }
+  .content h4 { font-size: 15px; margin: 20px 0 8px; color: var(--muted); }
+  .content p { margin: 10px 0; }
+  .content ul, .content ol { padding-left: 22px; }
+  .content li { margin: 5px 0; }
+  .content code {
+    background: var(--code-bg);
+    color: var(--code-text);
+    padding: 2px 6px;
+    border-radius: 5px;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  pre {
+    background: var(--code-bg);
+    color: var(--code-text);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.6;
+    font-weight: 500;
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    font-size: 14px;
+  }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+  th { background: var(--primary-weak); font-weight: 600; }
+  tr:nth-child(even) td { background: var(--card); }
+
+  .callout {
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-left: 4px solid var(--primary);
+    background: var(--primary-weak);
+    font-size: 14px;
+  }
+  .callout.warn { border-color: var(--warn-border); background: var(--warn-bg); }
+  .callout.danger { border-color: var(--danger); background: var(--danger-bg); }
+  .callout.ok { border-color: var(--ok); background: var(--danger-bg); }
+  .callout b { color: var(--text); }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.ok { background: var(--ok); color: #fff; }
+  .badge.todo { background: var(--muted); color: #fff; }
+  .badge.warn { background: var(--warn-border); color: #5a3d00; }
+  footer { margin-top: 60px; padding-top: 18px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+
+  @media (max-width: 860px) {
+    .layout { flex-direction: column; }
+    .sidebar { position: static; width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
+    .content { padding: 24px 18px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <nav class="sidebar">
+    <h1>📷 photo-browser</h1>
+    <div class="sub">本地照片浏览与人脸归类 · 使用说明书</div>
+    <ul class="nav">
+      <li><a href="#intro">一、这是什么</a></li>
+      <li><a href="#start">二、怎么启动</a></li>
+      <li><a href="#first-use">三、首次使用须知</a></li>
+      <li><a href="#features">四、主要功能</a></li>
+      <li><a href="#workflow">五、关键业务流程</a></li>
+      <li><a href="#layout">六、照片库布局</a></li>
+      <li><a href="#settings">七、配置与参数</a></li>
+      <li><a href="#backup">八、备份与恢复</a></li>
+      <li><a href="#faq">九、常见问题</a></li>
+    </ul>
+    <button class="theme-toggle" id="themeToggle">🌗 切换深色 / 浅色</button>
+  </nav>
+
+  <main class="content">
+    <h2 id="intro">一、这是什么</h2>
+    <p>一个<strong>本地优先</strong>的照片浏览 + 人脸归类系统，对标 Picasa 3 但更轻。把磁盘上散落的照片，变成可按人浏览、可跨年代追溯的私人相册。</p>
+    <ul>
+      <li><strong>纯浏览、不编辑</strong>原图（原文件只读，绝不写 / 删 / 改名）。</li>
+      <li><strong>人脸识别 + 归类</strong>是核心优势：按联系人<strong>出生年月</strong>把每个人按<strong>年代分档</strong>识别，跨年龄也能保持<strong>高准确率</strong>（实测误拒率从 32.75% 降到约 19%）。</li>
+      <li>人员数据来自<strong>通讯录</strong>（CSV / vCard 导入）。</li>
+      <li>规模约 <strong>10 万张</strong>照片；单机；<strong>无需 GPU、无需装数据库服务</strong>。</li>
+    </ul>
+    <table>
+      <tr><th>存储</th><td>SQLite（单文件、零安装）</td></tr>
+      <tr><th>后端</th><td>Python + FastAPI + 原生 sqlite3</td></tr>
+      <tr><th>前端</th><td>Vue3 + Vite + Tailwind + Element Plus</td></tr>
+    </table>
+    <div class="callout">📍 软件<strong>只做浏览与归类</strong>，不会改动你的任何一张原图。删除 / 改名照片请回到文件管理器操作。</div>
+
+    <h2 id="start">二、怎么启动</h2>
+    <h3>一句话版（已装好依赖 + 已有照片库时）</h3>
+    <p>在仓库根目录执行：</p>
+    <pre><code>.\start.cmd</code></pre>
+    <p>然后打开 <strong>http://127.0.0.1:8765</strong> 。<code>Ctrl+C</code> 停止。也可以<strong>直接双击 <code>start.cmd</code></strong>。</p>
+    <div class="callout warn">⚠️ 启动失败时窗口会停住等你按键，不会一闪而过、让你对着空窗口发呆。</div>
+
+    <h3>第一次跑（换机器 / 新克隆仓库）</h3>
+    <pre><code># ① 建 venv（必须用官方源，本机默认镜像查不到 vobject）
+py -3.13 -m venv code\.venv
+code\.venv\Scripts\python.exe -m pip install -i https://pypi.org/simple -r requirements.txt
+code\.venv\Scripts\python.exe -m pip uninstall -y opencv-python      # 只留 headless
+
+# ② 前端依赖 + 构建（Node 必须 >= 22）
+cd code\webserver; npm install; npm run build; cd ..\..
+
+# ③ 本机配置（该文件 .gitignore，不入库）
+copy code\src\config\local_settings.py.example code\src\config\local_settings.py
+notepad code\src\config\local_settings.py          # 改 PHOTO_ROOT 指向你的照片目录
+
+# ④ 建库 + 扫描（只需一次）
+code\.venv\Scripts\python.exe code\src\tools\build_db.py
+code\.venv\Scripts\python.exe code\src\tools\scan_cli.py --root d:\PhotoLib\photo
+
+# ⑤ 起服务
+.\start.cmd</code></pre>
+
+    <h3>为什么是 <code>.cmd</code> 而不是 <code>.ps1</code></h3>
+    <p>PowerShell 5.1 在执行策略为 <code>Restricted</code> / <code>AllSigned</code> 时会<strong>拒绝运行 <code>.ps1</code></strong>。<code>.cmd</code> 由 cmd.exe 执行、不受该策略约束，双击也能跑。</p>
+    <div class="callout danger">⚠️ 不要为了跑本项目去改 PowerShell 执行策略（<code>Set-ExecutionPolicy</code>）——那是机器 / 用户的安全设置。若你本来就想放开，那是你自己的决定：<code>Set-ExecutionPolicy -Scope CurrentUser RemoteSigned</code>。</div>
+
+    <h3><code>start.cmd</code> 参数</h3>
+    <table>
+      <tr><th>参数</th><th>作用</th></tr>
+      <tr><td>（无）</td><td>起服务，同源提供前端 → 开 <strong>8765</strong></td></tr>
+      <tr><td><code>--dev</code></td><td>另起 Vite dev server → 开 <strong>5173</strong>（改前端代码热更时用）</td></tr>
+      <tr><td><code>--check-only</code></td><td>只做体检、不启动。<strong>改配置后先跑这个</strong></td></tr>
+      <tr><td><code>--port 8799</code></td><td>换端口（8765 被占时）</td></tr>
+      <tr><td><code>--db &lt;路径&gt;</code></td><td>换库文件（对着另一个库试调时）</td></tr>
+      <tr><td><code>--root &lt;路径&gt;</code> / <code>--thumb &lt;路径&gt;</code></td><td>覆盖原图根 / 缩略图根（本进程有效，退出即失效）</td></tr>
+    </table>
+
+    <h4>只想体检配置（改完 <code>local_settings.py</code> 后）</h4>
+    <pre><code>.\start.cmd --check-only</code></pre>
+    <pre><code>== 体检 ==
+  [ok] 前端产物：...\code\webserver\dist\index.html
+  [ok] 本机配置：...\code\src\config\local_settings.py
+  [ok] 原图  ：d:\PhotoLib\photo
+  [ok] 缩略图 ：d:\PhotoLib\thumb
+  [ok] 库   ：d:\PhotoLib\db\photolib.db
+  [ok] 库中照片 2137 张
+  [ok] 端口 8765 空闲
+
+== 体检通过（--check-only，未启动） ==</code></pre>
+
+    <h2 id="first-use">三、首次使用须知</h2>
+    <div class="callout warn">1. <strong>照片要先放进图片目录、再扫描才看得到。</strong>增加照片需要先复制到所选择的图片目录（默认 <code>d:\photoLib\photo</code>），然后在「扫描任务」里启动一个新的扫描任务才会被收录。库里 0 张照片时界面照样起得来，只是列表是空的。</div>
+    <div class="callout warn">2. <strong>「待确认」需要你先人工确认几张脸才有内容。</strong>自动归属只用人工确认过的样本算质心（防污染），所以刚上手时「我不同意」与自动归属都是空的，<strong>这是正确行为不是故障</strong>。</div>
+
+    <h2 id="features">四、主要功能</h2>
+    <ul>
+      <li><strong>照片流 / 时间线</strong>：按拍摄时间浏览全部照片，支持左右翻页（<code>←</code> <code>→</code>）。</li>
+      <li><strong>人物库</strong>：按人归类照片，显示人物头像，可查看某人跨年代的时间轴。</li>
+      <li><strong>待确认队列</strong>：相似度落在灰区的人脸进入队列，由你确认归属，不静默归类。</li>
+      <li><strong>我不同意</strong>：自动归属但未经确认的脸在此，支持整张照片一键否决。</li>
+      <li><strong>纠错闭环</strong>：浏览时发现认错了，一次点击可改判 / 置未知 / 新建 / 标陌生人，且可撤销。</li>
+      <li><strong>地点维度</strong>：人物 → 地点列表 → 时间线，查看某人「去过的地方」（含境内中文名）。</li>
+      <li><strong>联系人导入</strong>：CSV / vCard 导入人员名单，作为归类依据。</li>
+      <li><strong>扫描台</strong>：后台扫描、断点续扫、限流。</li>
+      <li><strong>双主题</strong>：浅色淡雅 / 深色 / 跟随系统，偏好写入 localStorage。</li>
+    </ul>
+
+    <h2 id="workflow">五、关键业务流程</h2>
+    <ol>
+      <li><strong>扫描限流</strong>：一次扫描处理到 <code>batchSize</code>（默认 100）张即 <code>PAUSED</code> 停止，等待指示后断点续扫（<code>lastCursor</code>）。</li>
+      <li><strong>待确认队列</strong>：相似度落在灰区（<code>T_low</code>–<code>T_high</code>）的人脸进队列，由人工确认，不静默归类。口径 = <code>personCode IS NULL AND isStranger=0</code>。</li>
+      <li><strong>纠错闭环</strong>：人脸框悬停「✗ 不是他」→ 改判到别人 / 置为未知 / 新建人物 / 标记陌生人，一次点击可达。自动归属的脸进「我不同意」，支持整张照片一键否决。合并 / 拆分写审计日志，<strong>可撤销</strong>。</li>
+      <li><strong>年龄分桶</strong>：分桶是刚需（实测 False Reject 32.75% → ~19%，降幅 42%）。策略：自适应分桶（0–18 岁 3 年 / 18 岁以上 10 年），相邻三桶取 max。</li>
+      <li><strong>质心防污染</strong>：质心只用人工确认样本计算；某桶确认样本 &lt;3 时退到兜底桶；总确认样本 &lt;3 则不参与自动匹配。</li>
+      <li><strong>年份识别</strong>：EXIF → 文件名（含毫秒时间戳）→ mtime；mtime 不可靠；截图归 UNK。</li>
+      <li><strong>原图只读</strong>：所有操作只动数据库与 <code>thumb\</code>，不改写 / 删除原图。</li>
+    </ol>
+
+    <h4>人脸四态</h4>
+    <table>
+      <tr><th>状态</th><th>条件</th><th>进「待确认」</th><th>进「我不同意」</th></tr>
+      <tr><td>未归属</td><td><code>personCode IS NULL AND isStranger=0</code></td><td>✅</td><td>—</td></tr>
+      <tr><td>自动归属（未人工确认）</td><td><code>personCode NOT NULL AND isConfirmed=0 AND isStranger=0</code></td><td>—</td><td>✅</td></tr>
+      <tr><td>人工确认</td><td><code>isConfirmed=1</code></td><td>—</td><td>—</td></tr>
+      <tr><td>陌生人</td><td><code>isStranger=1</code></td><td>—</td><td>—</td></tr>
+    </table>
+
+    <h2 id="layout">六、照片库布局</h2>
+    <p><strong>根目录由配置决定</strong>：<code>code/src/config/local_settings.py</code> 的 <code>PHOTO_ROOT</code>，默认 <code>d:\PhotoLib</code>。</p>
+    <pre><code>d:\PhotoLib\
+├── photo\        原图 —— 【绝对只读】，应用绝不写入
+├── thumb\        生成物 —— 缩略图 + 人脸裁剪图（可随时重建）
+│   ├── thumbs\<fileHash[:2]>\<fileHash>_<size>.webp     200/400/800 宽的 WebP
+│   └── faces\<faceCode[:2]>\<faceCode>.jpg              160px 人脸裁剪图
+└── db\           应用状态
+    ├── photolib.db (+ -wal / -shm)     SQLite 主库
+    └── imports\ / exports\             导入原件归档 / 导出产物</code></pre>
+    <p>三条硬约束：</p>
+    <ol>
+      <li><code>photo\</code> <strong>绝对只读</strong>——不写、不删、不改名。</li>
+      <li>缩略图不进 <code>photo\</code>（保持原图区干净）。</li>
+      <li>缩略图不入库——路径由 <code>fileHash</code> + size 推导。</li>
+    </ol>
+
+    <h2 id="settings">七、配置与参数</h2>
+    <h3>本机配置 <code>local_settings.py</code></h3>
+    <p>复制示例文件后修改（该文件不入库）：</p>
+    <pre><code>copy code\src\config\local_settings.py.example code\src\config\local_settings.py
+notepad code\src\config\local_settings.py</code></pre>
+    <p>其中最重要的是 <code>PHOTO_ROOT</code>，指向你的照片目录。</p>
+
+    <h3>常用工具命令（在 <code>code\src</code> 下用 venv 解释器）</h3>
+    <table>
+      <tr><th>命令</th><th>用途</th></tr>
+      <tr><td><code>tools\build_db.py</code></td><td>建库（幂等，老库升级补建缺的表）</td></tr>
+      <tr><td><code>tools\scan_cli.py --root &lt;目录&gt;</code></td><td>扫描原图目录</td></tr>
+      <tr><td><code>tools\gen_thumbs.py</code></td><td>缩略图补建</td></tr>
+      <tr><td><code>tools\import_contacts.py</code></td><td>联系人导入（CSV / vCard）</td></tr>
+      <tr><td><code>tools\backup.py ...</code></td><td>备份 / 恢复 / 列清单（须停服务）</td></tr>
+    </table>
+    <div class="callout warn">⚠️ 所有 Python 命令务必用 <code>code\.venv\Scripts\python.exe</code>，裸敲 <code>python</code> 会命中 WindowsApps 基础解释器，依赖不同导致行为诡异。</div>
+
+    <h2 id="backup">八、备份与恢复</h2>
+    <div class="callout danger">⚠️ 备份 / 恢复<strong>必须停服务</strong>（先 <code>Ctrl+C</code>）。服务开着时拷走的是 SQLite 的 WAL 中间态，备份「成功」但会少最近几分钟的确认记录。</div>
+    <pre><code># 用 .venv 的解释器
+code\.venv\Scripts\python.exe code\src\tools\backup.py backup                            # 备份 db\ + thumb\
+code\.venv\Scripts\python.exe code\src\tools\backup.py list                              # 列已有备份
+code\.venv\Scripts\python.exe code\src\tools\backup.py restore --code pb_20261007153012  # 恢复（先自动另存现状）</code></pre>
+    <ul>
+      <li><strong>不备份 <code>photo\</code></strong>（原图只读且不会坏）——「恢复」= 让索引回到某个时刻，不找回删掉的照片。</li>
+      <li>设置页只有<strong>只读清单 + 可照抄的命令</strong>，故意没有备份按钮。</li>
+    </ul>
+
+    <h2 id="faq">九、常见问题</h2>
+    <h4>Q：页面打开了但照片列表是空的？</h4>
+    <p>照片要先扫描才看得到。库为空时界面照样起得来。请先跑一次 <code>scan_cli.py --root &lt;你的照片目录&gt;</code>，或用 <code>.\start.cmd --check-only</code> 体检。</p>
+
+    <h4>Q：「待确认」「我不同意」都是空的？</h4>
+    <p>这是<strong>正确行为</strong>。自动归属只用人工确认过的样本算质心，刚上手时还没有确认样本，需要先人工确认几张脸。</p>
+
+    <h4>Q：双击 <code>start.cmd</code> 一闪而过 / 报脚本禁止运行？</h4>
+    <p>脚本本身是 <code>.cmd</code>，不受 PowerShell 执行策略约束。若仍异常，请在仓库根目录的命令行里手动执行 <code>.\start.cmd</code> 查看报错。</p>
+
+    <h4>Q：端口 8765 被占用了？</h4>
+    <p>换端口：<code>.\start.cmd --port 8799</code>。注意：端口被占时，8765 上可能跑着<strong>另一个库</strong>的服务，请在浏览器确认数据是否一致。</p>
+
+    <h4>Q：改了前端代码没生效？</h4>
+    <p>改完前端要重新 <code>npm run build</code>；本地热改用 <code>.\start.cmd --dev</code>（开 5173）。并确保 <code>dist/</code> 已构建（否则根路由只返回 JSON，页面全 404）。</p>
+
+    <h4>Q：怎么恢复误删的照片？</h4>
+    <p>软件<strong>不删除原图</strong>，也不备份 <code>photo\</code>。原图删除只能靠你自己的文件备份找回；<code>backup.py</code> 只恢复索引（数据库 + 缩略图）。</p>
+
+    <footer>
+      photo-browser · 本地照片浏览与人脸归类工具 · MIT License<br />
+      本说明书基于项目 README 整理，详细设计见 <code>plan/</code> 目录。
+    </footer>
+  </main>
+</div>
+
+<script>
+  // 主题切换 + 目录高亮
+  (function () {
+    var root = document.documentElement;
+    var saved = localStorage.getItem('pb-manual-theme');
+    if (saved) root.setAttribute('data-theme', saved);
+    else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      root.setAttribute('data-theme', 'dark');
+    }
+    document.getElementById('themeToggle').addEventListener('click', function () {
+      var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      localStorage.setItem('pb-manual-theme', next);
+    });
+
+    // 滚动高亮当前章节
+    var links = Array.prototype.slice.call(document.querySelectorAll('.nav a'));
+    var sections = links.map(function (a) { return document.querySelector(a.getAttribute('href')); });
+    function onScroll() {
+      var pos = window.scrollY + 120;
+      var idx = 0;
+      for (var i = 0; i < sections.length; i++) {
+        if (sections[i] && sections[i].offsetTop <= pos) idx = i;
+      }
+      links.forEach(function (l, i) { l.classList.toggle('active', i === idx); });
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  })();
+</script>
+</body>
+</html>
