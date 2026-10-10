@@ -283,6 +283,9 @@ async function openFixFromDisputed(face) {
         personCode: person.personCode,
         displayName: person.displayName,
         avatarFaceCode: person.avatarFaceCode,
+        // 头像带上服务端解析好的那张（DR-40）：只给 avatarFaceCode 的话，
+        // 「我不同意」里改判时浮层一整列人只有少数几个有头像，其余是空圆
+        coverFaceCode: person.coverFaceCode,
         similarity: null,
       })),
     ),

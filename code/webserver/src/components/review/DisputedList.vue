@@ -26,7 +26,8 @@
 <script setup>
 import { Layers, Split, X } from 'lucide-vue-next'
 import { RouterLink } from 'vue-router'
-import { faceUrl, thumbUrl } from '@/api/static'
+import PersonAvatar from '@/components/common/PersonAvatar.vue'
+import { thumbUrl } from '@/api/static'
 import { similarityText } from '@/utils/faceState'
 // 进照片详情要**声明来源**：详情页的「返回」才知道该回哪（见 utils/photoReturn.js）
 import { photoDetailLink } from '@/utils/photoReturn'
@@ -120,17 +121,8 @@ function ownerName(group) {
               :key="face.faceCode"
               class="flex flex-wrap items-center gap-2 rounded-btn bg-surface px-2 py-1.5"
             >
-              <img
-                v-if="face.avatarFaceCode"
-                :src="faceUrl(face.avatarFaceCode)"
-                class="h-6 w-6 shrink-0 rounded-full border border-line object-cover"
-                alt=""
-              />
-              <span
-                v-else
-                class="h-6 w-6 shrink-0 rounded-full border border-line bg-card"
-                aria-hidden="true"
-              />
+              <!-- 机器归属人的头像 = 人脸图 → 通讯录头像 → 首字母 -->
+              <PersonAvatar :person="face" size="xs" />
               <span class="min-w-0 flex-1 truncate text-caption text-ink-sub">
                 机器认成
                 <b class="text-ink">{{ face.displayName || '某人' }}</b>，相似度

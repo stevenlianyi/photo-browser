@@ -8,8 +8,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "postbuild": "node scripts/check-style-order.mjs",
+    "postbuild": "node scripts/check-style-order.mjs && npm run check:avatar",
     "check:styles": "node scripts/check-style-order.mjs",
+    "//check:avatar": "头像三级回退的可执行校验（这条链错了不会报错、只会安静退化，必须真跑）。产物落在 dist-ssr/（已 gitignore）",
+    "check:avatar": "vite build --ssr scripts/check-avatar-fallback.mjs --outDir dist-ssr/avatar-check --emptyOutDir && node dist-ssr/avatar-check/check-avatar-fallback.js",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -48,7 +48,7 @@ import PersonForm from '@/components/common/PersonForm.vue'
 import PersonPlaces from '@/components/common/PersonPlaces.vue'
 import { disableContact, getImpact, patchContact } from '@/api/contacts'
 import { fixFace, getRevertible, getReviewLog, undoOperation } from '@/api/review'
-import { faceUrl } from '@/api/static'
+import { useAvatarSources } from '@/utils/avatar'
 import { faceStateOf, similarityText } from '@/utils/faceState'
 import { baseName, formatBucketKey, formatCount } from '@/utils/format'
 // 进照片详情要**声明来源与翻页范围**：否则详情页的「返回」只会回照片流、
@@ -86,23 +86,26 @@ const historyLoading = ref(false)
 const families = computed(() => persons.families)
 
 /**
- * 头像 = 服务端解析好的 `coverFaceCode`（DR-40）：用户指定的默认（**得还活着**）
- * → 代表脸。两级判断都在 `personCoversOf()` 里做完了。
+ * 头像走统一的降级链（`utils/avatar.js` 的 `useAvatarSources`）：
+ *   ① 人脸裁剪图 —— 服务端解析好的 `coverFaceCode`（DR-40：默认头像 → 代表脸，
+ *      两级判断都在 `personCoversOf()` 里做完了）
+ *   ② 通讯录头像 —— vCard 内嵌照片（`contactAvatarUrl`）：**通讯录导入的人
+ *      往往一张脸都没有**，没有这一级他们永远只有首字母
+ *   ③ 首字母
  *
  * ⚠️ 不再自己取「第一张确认样本」：那与人物库卡片的口径不一致
  *    （列表是「确认优先 + 质量最高的一张」，详情是「样本列表里的第一张」），
  *    同一张脸在两处显示不同，用户会以为自己看错了人。
  * ⚠️ 也**不要**拿 `avatarFaceCode` 兜底 —— 它可能是失效的那张（见 DR-41④）。
- * ⚠️ 裁剪图仍可能 404（脸在库里但裁剪图还没落盘）—— 由 `@error` 回退图标兜底，
- *    服务端不做文件系统探测。
+ * ⚠️ 前两级都可能 404（裁剪图/头像文件还没落盘）—— 服务端不为列表探测
+ *    文件系统，所以只能用 `@error` 逐级往后退（这条链只允许有一份实现）。
  */
-const avatarFaceCode = computed(() => person.value?.coverFaceCode || '')
-const avatarSrc = computed(() => (avatarFaceCode.value ? faceUrl(avatarFaceCode.value) : ''))
-const avatarBroken = ref(false)
-watch(avatarSrc, () => {
-  avatarBroken.value = false
-})
-const showAvatar = computed(() => Boolean(avatarSrc.value) && !avatarBroken.value)
+const {
+  src: avatarSrc,
+  showImage: showAvatar,
+  onError: onAvatarError,
+  initial: avatarInitial,
+} = useAvatarSources(() => person.value)
 
 const photoCount = computed(() => Number(person.value?.photoCount) || 0)
 const faceCount = computed(() => Number(person.value?.faceCount) || 0)
@@ -556,9 +559,10 @@ async function setDefaultAvatar(sample) {
                 :src="avatarSrc"
                 alt=""
                 class="h-full w-full object-cover"
-                @error="avatarBroken = true"
+                @error="onAvatarError"
               />
-              <UserRound v-else class="h-7 w-7 text-ink-weak" />
+              <!-- 没有脸、也没有通讯录头像时给首字母（与人物卡片同口径） -->
+              <span v-else class="text-title text-ink-weak">{{ avatarInitial }}</span>
             </span>
             <div class="min-w-0">
               <h2 class="truncate text-title text-ink">{{ person.displayName }}</h2>

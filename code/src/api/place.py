@@ -917,6 +917,9 @@ def listPlacePersons(placeCode: str,
                       "avatarFaceCode": avatar,
                       "coverFaceCode": cover,
                       "thumbUrl": ("/api/face/%s" % cover) if cover else None,
+                      # 通讯录头像 = 头像三级回退的最后一级（见 browse.personSummary）
+                      "contactAvatarUrl": (("/api/avatar/%s" % code)
+                                           if found.get("avatarFile") else None),
                       "photoCount": int(one.get("photoCount") or 0),
                       "firstShotYear": _intOrNone(one.get("firstShotYear")),
                       "lastShotYear": _intOrNone(one.get("lastShotYear")),

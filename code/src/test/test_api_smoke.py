@@ -75,6 +75,8 @@ EXPECTED_PATHS: dict = {
     "/api/thumb/{photoCode}": ["get"],
     "/api/original/{photoCode}": ["get"],
     "/api/face/{faceCode}": ["get"],
+    # 通讯录头像（头像三级回退的最后一级；R7 的已知取舍 ① 在这里补上）
+    "/api/avatar/{personCode}": ["get"],
     "/api/media/stats": ["get"],
     # 步骤 9 新增：地点字典重建
     "/api/places": ["get"],
@@ -611,7 +613,7 @@ def test_headStillWorksOnStaticRoutes(api_env):
     """
     client = api_env["client"]
     for url in ("/api/thumb/PH_2013_01", "/api/original/PH_2013_01",
-                "/api/face/FC_PH_2013_01_0"):
+                "/api/face/FC_PH_2013_01_0", "/api/avatar/P_alpha"):
         got = client.head(url)
         assert got.status_code != 405, "%s 的 HEAD 没注册（405）" % url
         assert got.status_code == client.get(url).status_code, \

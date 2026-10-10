@@ -34,6 +34,7 @@
 import { computed, ref, watch } from 'vue'
 import { Search, Split, TriangleAlert, UserPlus, X } from 'lucide-vue-next'
 import PersonForm from '@/components/common/PersonForm.vue'
+import PersonAvatar from '@/components/common/PersonAvatar.vue'
 import { faceUrl } from '@/api/static'
 import { faceStateOf, faceStrokeStyle, similarityText } from '@/utils/faceState'
 import { baseName } from '@/utils/format'
@@ -52,7 +53,12 @@ const props = defineProps({
   faces: { type: Array, default: () => [] },
   /** 同一张照片里的其它脸（供「这张照片的其他脸也否决」勾选） */
   siblings: { type: Array, default: () => [] },
-  /** 候选人物 [{personCode, displayName, avatarFaceCode, similarity, relation}] */
+  /**
+   * 候选人物 [{personCode, displayName, avatarFaceCode, coverFaceCode,
+   *           contactAvatarUrl, similarity, relation}]
+   * ⚠️ 头像读的是服务端解析好的那张（`coverFaceCode`，DR-40）——`avatarFaceCode`
+   *    只是待确认队列那条数据链的名字。三级回退见 PersonAvatar.vue。
+   */
   candidates: { type: Array, default: () => [] },
   /** 全库人物（**仅 mode="split" 用**）：「它属于谁」的答案常常不在候选里 */
   persons: { type: Array, default: () => [] },
@@ -596,17 +602,13 @@ function close() {
               :aria-pressed="pickedPerson === candidate.personCode"
               @click="pick(candidate)"
             >
-              <img
-                v-if="candidate.avatarFaceCode"
-                :src="faceUrl(candidate.avatarFaceCode)"
-                class="h-8 w-8 shrink-0 rounded-full border border-line object-cover"
-                alt=""
-              />
-              <span
-                v-else
-                class="h-8 w-8 shrink-0 rounded-full border border-line bg-surface"
-                aria-hidden="true"
-              />
+              <!--
+                头像走**三级回退**（人脸图 → 通讯录头像 → 首字母）：
+                这里原来只读 `candidate.avatarFaceCode`（= 用户手工指定的默认头像，
+                正式库里绝大多数为空）⇒ 一列搜索结果里只有少数几个有头像、
+                其余是空圆，而且不报错。见 components/common/PersonAvatar.vue。
+              -->
+              <PersonAvatar :person="candidate" size="sm" />
               <span class="min-w-0 flex-1">
                 <span class="block truncate text-body text-ink">{{ candidate.displayName }}</span>
                 <span

@@ -589,6 +589,14 @@ VCARD_SUBDIR: str = "vcards"
 #: 且它是**用户自己放进通讯录的图**（已经被压缩过），
 #: 再编码一次只会变模糊 —— 所以直接存原始字节。
 VCARD_AVATAR_EXT: str = ".jpg"
+# /api/avatar/{personCode} 的 Cache-Control。
+# ⚠️⚠️ **不能**沿用 THUMB_CACHE_CONTROL（那是 `immutable` + 一年）——
+#   缩略图是内容寻址且**永不原地改写**，通讯录头像恰恰相反：重新导入时
+#   **同一个 sha1 文件名被覆盖**（用户换了头像就该跟着变，见 thumbStore.write_vcard_avatar）。
+#   给 immutable 的话浏览器连 revalidate 都不做 ⇒ 换过头像的人永远显示旧照片，
+#   而且**不报错**，只能靠清缓存发现。
+#   这里靠 ETag（文件 size+mtime）做条件请求：命中就 304，改过就自动换图。
+VCARD_AVATAR_CACHE_CONTROL: str = "private, max-age=0, must-revalidate"
 # 分桶取hash 前几位
 HASH_BUCKET_LEN: int = 2
 

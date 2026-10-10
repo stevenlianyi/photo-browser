@@ -2,7 +2,7 @@
 #encoding: utf-8
 
 #Filename: test_api_person_avatar.py
-#Description: R7 人物头像接口测试（DR-40 代表脸回退 / DR-41 默认头像）
+#Description: 人物头像接口测试（DR-40 代表脸回退 / DR-41 默认头像 / 通讯录头像）
 #
 # 逐条对应 R7 的验收清单
 #   ① 一页 24 人的卡片都有脸可显示（`coverFaceCode` 非空）
@@ -14,8 +14,13 @@
 #   ⑦ 传不存在的 faceCode -> 404（与「编码查不到」同构），不是 500 也不静默成功
 #   ⑧ **机器认的（未确认）**样本也能设默认 —— 头像是展示，不是归属
 #   ⑨ 默认那张脸被移除后：`avatarFaceCode` **留着不动**、展示层自动降级（DR-41 ④）
-#   ⑩ 四处接线的另外两处（`/api/contacts` 列表、`/api/places/{code}/persons`）
-#      也要带同一口径的头像
+#   ⑩ 所有给出头像的接口都要带同一口径的头像：`/api/persons`、`/api/contacts`
+#      列表、`/api/places/{code}/persons`，以及 **`/api/photos/{code}` 的
+#      「出现的人」**（最后这处漏了整整一轮 —— 它只认 `avatarFaceCode`，
+#      于是一整列人里有头像的只有少数几个，其余是空圆，且**不报错**）
+#   ⑪ **三级回退的最后一级：通讯录头像**——`GET /api/avatar/{personCode}` +
+#      `personSummary.contactAvatarUrl`。通讯录导入的人**往往一张脸都没有**，
+#      没有这一级他们永远只有姓名首字母（正式库 1012 张头像落盘却无入口）
 #
 # ⚠️ 为什么代表脸的选择要说清「人工确认优先」而不是「detScore 最高」
 #   质心只由确认样本生成（DR-16③），确认过的脸是**用户亲自核对过**的；
@@ -213,6 +218,46 @@ def test_placePersonsCarryCoverFace(api_env, assigner):
     assert one["thumbUrl"] == "/api/face/FC_PH_2013_01_0"
 
 
+def test_photoDetailPersonsCarryCoverFace(api_env, assigner):
+    """⑩ 照片详情侧栏「出现的人」也必须带同一口径的头像（第五处接线）。
+
+    ⚠️ 这一处曾经**只**认 `pb_person.avatarFaceCode`，而正式库里绝大多数为
+       空 ⇒ 侧栏里只有少数设过默认的人有头像，其余是一个**空圆**：
+       不是破图、不报错，只有用眼睛看才会发现（与 DR-40 修卡片前的
+       「一片首字母」是同一个坑的第二次踩）。
+    """
+    client = api_env["client"]
+    _confirm(assigner, "FC_PH_2013_01_0", "P_alpha")
+    assigner.autoAssign("FC_PH_2013_01_1", "P_beta", 0.6)
+
+    body = client.get("/api/photos/PH_2013_01").json()
+    byCode = {one["personCode"]: one for one in body["persons"]}
+    assert set(byCode) == {"P_alpha", "P_beta"}
+
+    # 两个人都**没设过**默认头像，但都必须有脸可显示（这就是本条用例的全部意义）
+    for code, faceCode in (("P_alpha", "FC_PH_2013_01_0"),
+                           ("P_beta", "FC_PH_2013_01_1")):
+        assert byCode[code]["avatarFaceCode"] is None
+        assert byCode[code]["coverFaceCode"] == faceCode
+        assert byCode[code]["thumbUrl"] == "/api/face/%s" % faceCode
+
+
+def test_photoDetailPersonsSkipStaleDefaultAvatar(api_env, assigner):
+    """⑩ 设过的默认头像**失效**（那张脸被软删）时侧栏同样要降级 —— 否则空圆。"""
+    client = api_env["client"]
+    _confirm(assigner, "FC_PH_2013_01_0", "P_alpha")
+    _confirm(assigner, "FC_PH_2013_01_1", "P_alpha")
+    client.patch("/api/contacts/P_alpha", json={"avatarFaceCode": "FC_PH_2013_01_0"})
+    _softDeleteFace("FC_PH_2013_01_0")
+
+    body = client.get("/api/photos/PH_2013_01").json()
+    one = body["persons"][0]
+    assert one["personCode"] == "P_alpha"
+    assert one["avatarFaceCode"] == "FC_PH_2013_01_0"      # 刻意不清库（DR-41④）
+    assert one["coverFaceCode"] == "FC_PH_2013_01_1"       # 展示降级
+    assert one["thumbUrl"] == "/api/face/FC_PH_2013_01_1"
+
+
 # ============================================================
 # 二、B 半：默认头像的写入口（DR-41）
 # ============================================================
@@ -337,3 +382,103 @@ def test_defaultFaceRemovedDoesNotClearAvatar(api_env, assigner):
     assert one["avatarFaceCode"] == "FC_PH_2013_01_0"      # 刻意不清理
     assert one["coverFaceCode"] == "FC_PH_2013_01_1"       # 展示层自动降级
     assert one["thumbUrl"] == "/api/face/FC_PH_2013_01_1"
+
+
+# ============================================================
+# 三、C 半：通讯录头像（`avatarFile` -> GET /api/avatar/{personCode}）
+# ============================================================
+#
+# ⚠️ 为什么这半单独测：它是头像三级回退里**唯一不依赖「这个人有脸」**的一级。
+#   通讯录导入的人（`source=1`）大多一张脸都没有 —— 没跑过匹配、也没人工确认过，
+#   于是前两级都落不到。正式库 **1012 张头像已落盘却一直没有读取入口**，
+#   界面上只能看到姓名首字母。
+
+def _writeVcardAvatar(personCode, data=b"\xff\xd8\xff\xe0vcard-photo"):
+    """给某个人落一张通讯录头像，并把相对路径写进 `pb_person.avatarFile`。
+
+    与 `tools/import_contacts.py` 的写入路径**完全同源**（write_vcard_avatar +
+    updateTableGeneral），所以这里造出来的状态就是导入器造出来的那个状态。
+    """
+    from database.auto_generated import sqliteCommon as sqliteCommon
+    from processor.media import thumbStore
+
+    rel = thumbStore.write_vcard_avatar(personCode, data)
+    sqliteCommon.updateTableGeneral("pb_person", "personCode = %s", (personCode,),
+                                    {"avatarFile": rel})
+    return rel
+
+
+def test_avatarEndpointServesVcardPhoto(api_env):
+    """⑪ 一个**没有任何脸**的人也能有图：原始字节原样返回（不重编码）。"""
+    client = api_env["client"]
+    _writeVcardAvatar("P_alpha", b"\xff\xd8\xff\xe0hello-vcard")
+
+    got = client.get("/api/avatar/P_alpha")
+    assert got.status_code == 200, got.text
+    assert got.content == b"\xff\xd8\xff\xe0hello-vcard", \
+        "头像必须原样返回：vCard 里的图已经被压缩过，再编码一次只会更糊"
+    assert got.headers["content-type"].startswith("image/")
+
+
+def test_avatarEndpoint404ForPersonWithoutPhoto(api_env):
+    """⑪ 没导过头像的人 -> 404（**正常结果**，前端据此退到首字母，不是报错）。"""
+    client = api_env["client"]
+    assert client.get("/api/avatar/P_alpha").status_code == 404
+    # 库里压根没有这个人
+    assert client.get("/api/avatar/P_NOT_EXIST").status_code == 404
+
+
+def test_avatarEndpoint404WhenFileMissing(api_env):
+    """⑪ 列里有、盘上没了 -> 404（以**磁盘**为准，绝不拿库里的字符串拼路径）。"""
+    import os
+
+    from processor.media import thumbStore
+
+    client = api_env["client"]
+    _writeVcardAvatar("P_beta")
+    assert client.get("/api/avatar/P_beta").status_code == 200
+    os.remove(thumbStore.vcardAvatar_abspath("P_beta"))
+    assert client.get("/api/avatar/P_beta").status_code == 404
+
+
+def test_avatarEtagFollowsTheFileNotTheCode(api_env):
+    """⑪ ETag 必须跟着**文件**走：重新导入是**原地覆盖**同名文件。
+
+    ⚠️ 这条是本端点最容易写错的地方：缩略图/人脸图是内容寻址、永不改写，
+      所以它们的 ETag 可以用编码派生；通讯录头像会被覆盖 ——
+      用编码派生的 ETag + `immutable` 缓存 ⇒ 换过头像的人**永远显示旧照片**，
+      而且不报错。所以 ETag 取文件 size+mtime，缓存也必须可再验证。
+    """
+    client = api_env["client"]
+    _writeVcardAvatar("P_gamma", b"\xff\xd8\xff\x01")
+    first = client.get("/api/avatar/P_gamma")
+    etag = first.headers["etag"]
+    assert "immutable" not in first.headers.get("cache-control", ""), \
+        "头像会被原地覆盖，不能给 immutable 缓存"
+
+    again = client.get("/api/avatar/P_gamma", headers={"If-None-Match": etag})
+    assert again.status_code == 304, "内容没变时应当 304（省掉重复传输）"
+
+    # 换个头像重新导入 = 同一个文件被覆盖
+    _writeVcardAvatar("P_gamma", b"\xff\xd8\xff\x02-brand-new-photo")
+    third = client.get("/api/avatar/P_gamma")
+    assert third.status_code == 200, third.text
+    assert third.headers["etag"] != etag, "文件变了 ETag 必须跟着变（否则永远显示旧图）"
+    assert third.content == b"\xff\xd8\xff\x02-brand-new-photo"
+
+
+def test_personSummaryCarriesContactAvatarUrl(api_env):
+    """⑪ 列表接口要把这一级**指出来**（不做 exists 探测：列表不碰文件系统）。"""
+    client = api_env["client"]
+
+    before = _personOf(client, "P_alpha")
+    assert before["contactAvatarUrl"] is None, "没导过头像的人不该给 URL"
+
+    _writeVcardAvatar("P_alpha")
+    after = _personOf(client, "P_alpha")
+    assert after["contactAvatarUrl"] == "/api/avatar/P_alpha"
+    # 这个 URL 真的能用（三级回退的最后一级不是画饼）
+    assert client.get(after["contactAvatarUrl"]).status_code == 200
+
+    items = client.get("/api/persons", params={"keyword": "阿尔法"}).json()["items"]
+    assert items[0]["contactAvatarUrl"] == "/api/avatar/P_alpha"

@@ -31,6 +31,9 @@
 
   侧栏「出现的人」（§4.4）
   ----------------------------------------
+  头像由**服务端**按 DR-40 解析（默认头像 → 代表脸），前端只管
+  「`/api/face` 404 时退首字母」。原实现里服务端只认「用户设过的默认头像」，
+  而正式库里绝大多数人为空 ⇒ 一整列里只有少数有头像、其余是空圆，**不报错**。
   ⑥ 每行三个出口：**详情**（去看 TA 的档案）/ **确认**（人工确认）/ **改判**
      （认错了）。「确认」把这个人在这张照片里**机器认的**（`state=disputed`）
      脸一次确认为人工归属 —— 这是浏览时最常发生的一步，原来在这张照片上
@@ -83,6 +86,7 @@ import {
   X,
 } from 'lucide-vue-next'
 import FaceBox from '@/components/photo/FaceBox.vue'
+import PersonAvatar from '@/components/common/PersonAvatar.vue'
 import PhotoPager from '@/components/photo/PhotoPager.vue'
 import ShotYearFixDialog from '@/components/photo/ShotYearFixDialog.vue'
 import FixFaceDialog from '@/components/common/FixFaceDialog.vue'
@@ -160,6 +164,10 @@ function nameOf(face) {
   return personMap.value[face?.personCode]?.displayName || face.personCode
 }
 
+// 「出现的人」的头像：`person.coverFaceCode` 由服务端按 DR-40 解析好
+// （用户指定的默认 → 代表脸），前端只用 `PersonAvatar` 的三级回退
+// （人脸图 → 通讯录头像 → 首字母）—— 两端各退一次就是两套口径。
+
 const faces = computed(() => photo.value?.faces || [])
 const pendingFaces = computed(() => faces.value.filter((f) => f.state === 'pending'))
 
@@ -203,6 +211,9 @@ function candidatesOf(face) {
       personCode: person.personCode,
       displayName: person.displayName,
       avatarFaceCode: person.avatarFaceCode,
+      // 头像要带上服务端解析好的那张（DR-40）：只给 avatarFaceCode 的话，
+      // 浮层里一整列人只有少数设过默认头像的有图，其余是空圆
+      coverFaceCode: person.coverFaceCode,
       similarity: null,
     })),
   )
@@ -1298,17 +1309,8 @@ watch(photoCode, (code) => {
                 :key="person.personCode"
                 class="flex items-center gap-2"
               >
-                <img
-                  v-if="person.thumbUrl"
-                  :src="person.thumbUrl"
-                  class="h-8 w-8 shrink-0 rounded-full border border-line object-cover"
-                  alt=""
-                />
-                <span
-                  v-else
-                  class="h-8 w-8 shrink-0 rounded-full border border-line bg-surface"
-                  aria-hidden="true"
-                />
+                <!-- 头像 = 人脸图（服务端解析的 coverFaceCode）→ 通讯录头像 → 首字母 -->
+                <PersonAvatar :person="person" size="sm" />
                 <span class="min-w-0 flex-1">
                   <span class="block truncate text-body text-ink">{{ person.displayName }}</span>
                   <span class="block text-caption text-ink-weak">

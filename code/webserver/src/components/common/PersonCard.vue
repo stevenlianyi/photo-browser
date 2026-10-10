@@ -23,10 +23,10 @@
      上浮只改 transform: translateY，不影响布局。
 -->
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import { CircleSlash, TriangleAlert, UserRound } from 'lucide-vue-next'
-import { faceUrl } from '@/api/static'
+import { useAvatarSources } from '@/utils/avatar'
 import { healthOf, relationLabelOf } from '@/store/persons'
 import { EMPTY } from '@/utils/format'
 
@@ -41,34 +41,23 @@ const emit = defineEmits(['edit', 'disable'])
 const isDisabled = computed(() => String(props.person?.delFlag) === '1')
 
 /**
- * 头像脸码 = 服务端解析好的 `coverFaceCode`（DR-40）。
+ * 头像走**统一的降级链**（`utils/avatar.js` 的 `useAvatarSources`）：
+ *   ① 人脸裁剪图 —— 服务端解析好的 `coverFaceCode`（DR-40：默认头像 → 代表脸）
+ *   ② 通讯录头像 —— vCard 内嵌照片（`contactAvatarUrl`）
+ *   ③ 首字母
  *
- * ⚠️ **不要**再用 `avatarFaceCode` 兜底：它只是「用户选过的那张」，
+ * ⚠️ **不要**再用 `avatarFaceCode` 兜底：它只是「用户手工选过的那张」，
  *    可能已经**失效**（那张脸被移除/合并走了，而 DR-41④ 刻意不在写路径上清理）。
- *    真正的两级回退（默认 → 代表脸）在服务端 `personCoversOf()` 里做完了，
- *    这里认一个字段就够 —— 两端各退一次会出现两套口径。
+ * ⚠️ 也不要在这里自己判 `exists` / 自己写 `@error` 回退：服务端刻意不为列表
+ *    探测文件系统（DR-40），「图在不在盘上」只有浏览器加载失败才知道 ——
+ *    这条链只允许有一份实现（同一个坑踩过四次：卡片 → 照片详情 → 改判浮层）。
  */
-const avatarFaceCode = computed(() => props.person?.coverFaceCode || '')
-
-const avatarSrc = computed(() => (avatarFaceCode.value ? faceUrl(avatarFaceCode.value) : ''))
-
-/**
- * ⚠️ 裁剪图**可能不在磁盘上**（`/api/face` 对查不到的图回 404，见
- *    api/static.py 的 getFace：「库里查得到但裁剪图还没落盘」也会 404）。
- *    那时必须回退首字母 —— 卡片上挂一个破图图标比没有头像更难解释。
- *    服务端刻意不做 exists 探测（列表接口不碰文件系统），所以这件事只能在
- *    这里兜。
- */
-const avatarBroken = ref(false)
-// 换了人 / 换了默认头像就重置：否则一次加载失败会把这个组件「永久锁死」在
-// 首字母状态（列表刷新后明明有了新头像也不显示）。
-watch(avatarSrc, () => {
-  avatarBroken.value = false
-})
-const showAvatar = computed(() => Boolean(avatarSrc.value) && !avatarBroken.value)
-
-/** 首字母：中文取第一个字，英文取首字母大写 */
-const initial = computed(() => String(props.person?.displayName || '?').trim().charAt(0) || '?')
+const {
+  src: avatarSrc,
+  showImage: showAvatar,
+  onError: onAvatarError,
+  initial,
+} = useAvatarSources(() => props.person)
 
 /**
  * 年代跨度：`1998–2021`。只有一年时不要写成 `2007–2007` ——
@@ -133,7 +122,7 @@ const ariaLabel = computed(
           decoding="async"
           loading="lazy"
           draggable="false"
-          @error="avatarBroken = true"
+          @error="onAvatarError"
         />
         <span
           v-else

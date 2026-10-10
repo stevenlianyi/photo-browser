@@ -349,6 +349,15 @@ def personSummary(row: dict, photoCount: int = 0, faceCount: int = 0,
         # ⚠️ 头像 URL 指向 coverCode（不是 avatarFaceCode）：默认没设过的人
         #    也要能显示照片，否则卡片又退回一片首字母（DR-40）。
         "thumbUrl": ("/api/face/%s" % coverCode) if coverCode else None,
+        # 通讯录头像（vCard 内嵌 PHOTO）= 头像三级回退的**第三级**（DR-40）：
+        #   默认头像 → 代表脸 → **通讯录头像** → 首字母。
+        # ⚠️ 判据只是「**库列非空**」，不是 `thumbStore.exists()` ——
+        #    列表接口一律不碰文件系统（DR-40 同一条纪律：一页 24 次 stat，
+        #    磁盘异常会把列表一起拖死）。文件真的不在时 `/api/avatar` 回 404，
+        #    前端在图片加载失败时自然退到首字母。
+        # ⚠️ 没有这一级时，**通讯录导入的人永远只有首字母**：他们大多一张脸
+        #    都没有，前两级都落不到（正式库 1012 人有头像却没有任何显示入口）。
+        "contactAvatarUrl": ("/api/avatar/%s" % code) if row.get("avatarFile") else None,
         "detailUrl": "/api/persons/%s" % code,
     }
     out["categories"] = categoriesOf(code) if withCategories else []
@@ -1042,6 +1051,11 @@ def listPersons(page: int = Query(default=1, ge=1),
         " p.familyName AS familyName, p.familyGroupCode AS familyGroupCode,"
         " p.relation AS relation, p.email AS email, p.phone AS phone,"
         " p.birthday AS birthday, p.avatarFaceCode AS avatarFaceCode,"
+        # ⚠️ `avatarFile` 必须在这里选出来：`personSummary` 用它拼
+        #    `contactAvatarUrl`（通讯录头像 = 头像三级回退的第三级）。
+        #    漏了它不会报错 —— 只是**所有人**的 contactAvatarUrl 都变成 None，
+        #    界面上重新变成一片首字母（正是这条回退链要解决的问题本身）。
+        " p.avatarFile AS avatarFile,"
         " p.source AS source, p.isConfirmed AS isConfirmed, p.delFlag AS delFlag,"
         " p.memo AS memo FROM pb_person p WHERE " + cond +
         " ORDER BY " + PERSON_SORT_SQL[orderBy][1 if int(desc) else 0] +
@@ -1645,6 +1659,13 @@ def getPhoto(photoCode: str):
       stranger  陌生人（永久排除）
     这四态由 personCode / isConfirmed / isStranger 三字段推导（DR-16①），
     **不新增 matchType 字段**。
+
+    `persons[]`（侧栏「出现的人」）每项的头像走**与人物库同一出口**
+    （`personCoversOf()`，DR-40）：`avatarFaceCode` = 用户指定的默认（可能为空、
+    也可能已失效）、`coverFaceCode` = 实际展示的那张、`thumbUrl` 由它拼出。
+    前端渲染认 `coverFaceCode` / `thumbUrl`，**不要自己再回退一次** ——
+    那会让「同一个人的头像在人物库是照片、在这里是空圆」。代表脸为空
+    （这个人一张脸都没有）时才轮到前端退首字母。
     """
     row = photoRow(photoCode)
     if not row:
@@ -1723,13 +1744,26 @@ def getPhoto(photoCode: str):
             else:
                 persons[person]["autoFaceCount"] += 1
 
+    # 头像口径与人物库 / 联系人 / 地点在场的人**同一出口**（DR-40）：
+    #   `personCoversOf()` = 用户指定的默认（那张脸还活着才认）→ 代表脸
+    #   （人工确认优先 → detScore/quality 最高）。
+    # ⚠️ 这里曾经**只**认 `pb_person.avatarFaceCode`，而正式库里绝大多数为空
+    #    ⇒ 侧栏「出现的人」里只有少数设过默认的人有头像，其余是一个**空圆**
+    #    —— 不报错、不是破图，只有用眼睛看才会发现（与 DR-40 修卡片前
+    #    「一片首字母」是同一个坑的第二次踩）。逐人 `personRow` 是既有写法，
+    #    代表脸这一步必须**批量**（见 personCoverOf 的 N+1 说明）。
+    foundRows = []
     for code, one in persons.items():
-        found = personRow(code)
+        found = personRow(code) or {}
         if found:
             one["displayName"] = str(found.get("displayName") or code)
             one["avatarFaceCode"] = found.get("avatarFaceCode") or None
-            one["thumbUrl"] = ("/api/face/%s" % found.get("avatarFaceCode")
-                               if found.get("avatarFaceCode") else None)
+        foundRows.append(dict(found, personCode=code))
+    covers = personCoversOf(foundRows)
+    for code, one in persons.items():
+        cover = covers.get(code) or None
+        one["coverFaceCode"] = cover
+        one["thumbUrl"] = ("/api/face/%s" % cover) if cover else None
     out["faceCount"] = int(row.get("faceCount") or 0)
     out["faces"] = faces
     out["persons"] = sorted(persons.values(), key=lambda it: it["displayName"])

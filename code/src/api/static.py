@@ -2,9 +2,9 @@
 #encoding: utf-8
 
 #Filename: static.py
-#Description: photo-browser 图片文件服务（步骤 4）—— 缩略图 / 原图 / 人脸裁剪图
+#Description: photo-browser 图片文件服务（步骤 4）—— 缩略图 / 原图 / 人脸裁剪图 / 通讯录头像
 #
-# 三个端点
+# 四个端点
 # ----------
 #   GET|HEAD /api/thumb/{photoCode}?size=400
 #       缩略图。命中磁盘直接 FileResponse；未命中**按需生成**。
@@ -14,6 +14,12 @@
 #       MIME 按扩展名；支持 HEAD。
 #   GET|HEAD /api/face/{faceCode}
 #       人脸裁剪图（160px JPEG）。步骤 5 才有数据，本步先留好接口与路径推导。
+#   GET|HEAD /api/avatar/{personCode}
+#       **通讯录头像**（vCard 内嵌 PHOTO，落盘在 thumb\vcards\）。
+#       它是头像三级回退的第三级：通讯录导入的人往往**一张脸都没有**，
+#       没有这一级就只能显示姓名首字母（正式库 1012 人有头像却一直没入口）。
+#       ⚠️ ETag/Cache-Control 与上面两个**故意不同**（头像会被原地覆盖），
+#          理由写在 getContactAvatar 的 docstring 里。
 #
 # 三条纪律
 # --------
@@ -226,6 +232,19 @@ def faceRow(faceCode: str) -> dict:
         return {}
     rows = sqliteCommon.query_pb_face("pb_face", faceCode=str(faceCode),
                                      delFlag=comGD.DEL_FLAG_NO, limitNum=1)
+    return rows[0] if rows else {}
+
+
+def personRow(personCode: str) -> dict:
+    """按 personCode 取一条 pb_person（未删）。查不到返回 {}。
+
+    只用于 `/api/avatar` 的存在性判定（人没了/停用了就不该再给出头像）。
+    不读 `avatarFile` 去拼路径 —— 路径由 personCode 推导，见 getContactAvatar。
+    """
+    if not personCode:
+        return {}
+    rows = sqliteCommon.query_pb_person("pb_person", personCode=str(personCode),
+                                        delFlag=comGD.DEL_FLAG_NO, limitNum=1)
     return rows[0] if rows else {}
 
 
@@ -467,7 +486,68 @@ def getFace(faceCode: str, request: Request):
 
 
 # ============================================================
-# 六、诊断端点（验收与排障用）
+# 六、GET /api/avatar/{personCode}（通讯录头像）
+# ============================================================
+
+@router.get("/avatar/{personCode}",
+            summary="通讯录头像（vCard 内嵌照片 · 头像三级回退的第三级）")
+@router.head("/avatar/{personCode}", include_in_schema=False)
+def getContactAvatar(personCode: str, request: Request):
+    """按 personCode 返回**通讯录头像**（vCard 里内嵌的那张 PHOTO）。
+
+    为什么需要这个端点
+    ------------------
+      通讯录导入（`import_contacts`）会把 vCard 里的 PHOTO 落盘到
+      `thumb\\vcards\\<xx>\\<sha1(personCode)>.jpg`，并把相对路径写进
+      `pb_person.avatarFile`（正式库 **1012 张**已落盘）。
+      但在本端点出现之前，**这些照片没有任何读取入口**（前端没引用、
+      也没有路由）⇒ 通讯录导入的人永远只显示**姓名首字母**。
+
+    它是头像三级回退里的一级（DR-40：默认头像 → 代表脸 → **通讯录头像** → 首字母）：
+    前两级的前提都是「这个人有脸」，而**通讯录导入的人往往一张脸都没有**
+    （没跑过匹配、也没人工确认过任何样本）⇒ 全靠这一级才有图可看。
+
+    路径推导（**不查 avatarFile 拼路径**）
+    ------------------------------------
+      `thumbStore.vcardAvatar_abspath()` 是路径的唯一真相（DR-1）：
+      文件名是 `sha1(personCode)`，由编码推导而来、**不含任何用户输入**，
+      因此不存在目录穿越。`pb_person.avatarFile` 只是这份推导的缓存，
+      它与磁盘漂移时一律**以磁盘为准**（`exists` 为假就 404，
+      绝不拿库里的字符串去拼路径）。
+
+    ⚠️ ETag / Cache-Control 与 /thumb /face 的**口径不同**（不是抄错）
+      缩略图与人脸图是**内容寻址、永不原地改写**的，所以能用标识派生的 ETag
+      + `immutable` 的一年缓存。通讯录头像恰恰相反：重新导入时**同一个
+      sha1 文件名被覆盖**（用户换了头像就该跟着变）⇒ 必须用**文件自身**的
+      size+mtime 做 ETag，并让浏览器每次都 revalidate（否则换了头像
+      永远显示旧图，而且不报错）。
+    """
+    if not personRow(personCode):
+        raise _notFound("库中无此 personCode: %s" % personCode)
+    try:
+        relpath = thumbStore.vcardAvatar_relpath(personCode)
+        absPath = thumbStore.vcardAvatar_abspath(personCode)
+    except thumbStore.ThumbStoreError as e:
+        raise HTTPException(status_code=400, detail="通讯录头像路径推导失败: %s" % e)
+    if not thumbStore.exists(absPath):
+        # 没导过头像的人（或头像文件被删了）：404 是**正常**结果，
+        # 前端据此退到首字母 —— 这正是三级回退里最后一级的触发条件。
+        raise _notFound("该联系人没有通讯录头像（%s）: %s" % (relpath, personCode))
+    try:
+        info = os.stat(absPath)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail="通讯录头像无法读取: %s" % e)
+    etag = _quoteEtag("vc_%s_%s_%d_%d" % (personCode, thumbStore.VCARD_AVATAR_EXT,
+                                          int(info.st_size), int(info.st_mtime_ns)))
+    cacheHeaders = {"ETag": etag,
+                    "Cache-Control": basicSettings.VCARD_AVATAR_CACHE_CONTROL}
+    if _matchesEtag(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers=cacheHeaders)
+    return FileResponse(absPath, media_type=mimeOf(absPath), headers=cacheHeaders)
+
+
+# ============================================================
+# 七、诊断端点（验收与排障用）
 # ============================================================
 
 @router.get("/media/stats", summary="缩略图目录统计（验收/排障）")

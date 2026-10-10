@@ -326,7 +326,10 @@ def listContacts(page: int = Query(default=1, ge=1),
         " p.familyName AS familyName, p.familyGroupCode AS familyGroupCode,"
         " p.relation AS relation, p.email AS email, p.phone AS phone,"
         " p.birthday AS birthday, p.vcardUid AS vcardUid,"
-        " p.avatarFaceCode AS avatarFaceCode, p.source AS source,"
+        " p.avatarFaceCode AS avatarFaceCode,"
+        # 通讯录头像（`personSummary` 用它拼 contactAvatarUrl）：联系人页正是
+        # 「导入的人」最集中的地方，漏了它这里就又是一片首字母。
+        " p.avatarFile AS avatarFile, p.source AS source,"
         " p.isConfirmed AS isConfirmed, p.delFlag AS delFlag, p.memo AS memo"
         " FROM pb_person p WHERE " + cond +
         " ORDER BY p.displayName ASC, p.personCode ASC LIMIT %s OFFSET %s",

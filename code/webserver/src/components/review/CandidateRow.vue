@@ -24,12 +24,12 @@
 <script setup>
 import { computed } from 'vue'
 import { TriangleAlert, X } from 'lucide-vue-next'
-import { faceUrl } from '@/api/static'
+import PersonAvatar from '@/components/common/PersonAvatar.vue'
 import { confidenceOf, similarityText } from '@/utils/faceState'
 import { relationLabelOf } from '@/store/persons'
 
 const props = defineProps({
-  /** { personCode, displayName, avatarFaceCode, similarity, relation, bucketKey } */
+  /** { personCode, displayName, avatarFaceCode, coverFaceCode, contactAvatarUrl, similarity, relation, bucketKey } */
   candidate: { type: Object, required: true },
   /** 左上角序号（0 起）；对应键盘 1/2/3 */
   index: { type: Number, default: 0 },
@@ -56,8 +56,9 @@ const level = computed(() =>
   }),
 )
 
-/** 灰区 = 机器没把握的区间，正是需要人工判断的那些（标签文案已含这层意思） */
-const hasAvatar = computed(() => Boolean(props.candidate?.avatarFaceCode))
+// 头像由 PersonAvatar 统一处理（三级回退：人脸图 → 通讯录头像 → 首字母）。
+// 这里曾经自己读 `candidate.avatarFaceCode`（= 用户手工指定的默认，绝大多数为空）
+// ⇒ 一列候选里只有少数几个有头像，其余是空圆，且不报错。
 </script>
 
 <template>
@@ -72,17 +73,8 @@ const hasAvatar = computed(() => Boolean(props.candidate?.avatarFaceCode))
       >{{ ordinal }}</kbd
     >
 
-    <img
-      v-if="hasAvatar"
-      :src="faceUrl(candidate.avatarFaceCode)"
-      class="h-10 w-10 shrink-0 rounded-full border border-line object-cover"
-      :alt="`${candidate.displayName} 的头像`"
-    />
-    <span
-      v-else
-      class="h-10 w-10 shrink-0 rounded-full border border-line bg-surface"
-      aria-hidden="true"
-    />
+    <!-- 头像 = 人脸图 → 通讯录头像 → 首字母（三级回退，见 PersonAvatar.vue） -->
+    <PersonAvatar :person="candidate" size="md" />
 
     <span class="min-w-0 flex-1">
       <span class="block truncate text-body text-ink">{{ candidate.displayName }}</span>

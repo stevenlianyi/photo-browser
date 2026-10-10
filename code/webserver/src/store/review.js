@@ -272,6 +272,11 @@ export const useReviewStore = defineStore('review', () => {
         // 目录是分页快照（只加载前 N 个），所以留两级兜底。
         displayName: person?.displayName || candidate.displayName || candidate.personCode,
         avatarFaceCode: candidate.avatarFaceCode || person?.avatarFaceCode || null,
+        // ⚠️ 目录（/api/persons）里带的是服务端解析好的**实际展示那张**
+        //    （coverFaceCode，DR-40）。不带上它的话，这些人只能靠队列侧的
+        //    `avatarFaceCode`（= 用户手工指定的默认，绝大多数为空）⇒ 改判浮层
+        //    的候选/搜索一列里只有少数几个有头像，其余是空圆。见 utils/avatar.js。
+        coverFaceCode: candidate.coverFaceCode || person?.coverFaceCode || null,
         relation: person?.relation || '',
       }
     })
