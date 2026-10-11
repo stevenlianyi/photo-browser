@@ -53,6 +53,7 @@ from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
 from api import browse as browseApi                               # noqa: E402
 from api import contacts as contactsApi                           # noqa: E402
 from api import dto as dto                                        # noqa: E402
+from api import eraSample as eraSampleApi                         # noqa: E402
 from api import face as faceApi                                   # noqa: E402
 from api import match as matchApi                                 # noqa: E402
 from api import photoAction as photoActionApi                     # noqa: E402
@@ -268,6 +269,10 @@ def createApp(dbFile: str = None, photoRoot: str = None, thumbRoot: str = None,
     application.include_router(matchApi.router, prefix="/api")
     application.include_router(placeApi.router, prefix="/api")
     application.include_router(browseApi.router, prefix="/api")
+    # 年代抽样（R11）：读写 pb_era_sample* 两张自己的表 + 落 zip 产物。
+    # ⚠️ 自成一个模块而不是塞进 browse.py —— 后者的文件头写着「一个字都不写」，
+    #    在里面加写接口会让那条纪律变成谎话。详见 api/eraSample.py 文件头。
+    application.include_router(eraSampleApi.router, prefix="/api")
     application.include_router(photoActionApi.router, prefix="/api")
     application.include_router(reviewApi.router, prefix="/api")
     application.include_router(contactsApi.router, prefix="/api")

@@ -124,6 +124,9 @@ TABLE_ORDER = (
     "pb_photo_person",
     "pb_scan_job",
     "pb_review_log",
+    # R11 年代抽样（DR-45~DR-50）：批次头 + 每年一条明细
+    "pb_era_sample",
+    "pb_era_sample_item",
 )
 
 TABLE_CN = {
@@ -137,6 +140,8 @@ TABLE_CN = {
     "pb_photo_person": "照片-人员关联",
     "pb_scan_job": "扫描任务",
     "pb_review_log": "纠错操作日志",
+    "pb_era_sample": "年代抽样批次",
+    "pb_era_sample_item": "年代抽样明细",
 }
 
 # §1.4 尾部标准七字段（每表必带、顺序固定）—— 生成时校验
@@ -199,6 +204,17 @@ INDEX_SPEC = {
         # 「足迹」/地图按热度排序（photoCount DESC）—— 不加索引就是全表扫 + 排序
         ("idx_pb_place_photoCount", ("photoCount",), False, None),
     ),
+    # R11 年代抽样（DR-46）：批次头 -> 某人的历史批次列表
+    "pb_era_sample": (
+        ("idx_pb_era_sample_personCode", ("personCode",), False, None),
+    ),
+    # R11 年代抽样（DR-46）：明细 -> 一次取回整批且已排好队
+    "pb_era_sample_item": (
+        ("idx_pb_era_sample_item_batchCode_pickOrder",
+         ("batchCode", "pickOrder"), False, None),
+        # 「这张照片被哪些抽样抽中过」（排障用）
+        ("idx_pb_era_sample_item_photoCode", ("photoCode",), False, None),
+    ),
 }
 
 # §五 的**期望索引名全集**（自检用：索引清单与文档漂移了就报错）
@@ -222,6 +238,11 @@ EXPECTED_INDEX_NAMES = {
     # 步骤 9 加：placeCode 来自 .txt 的 UNIQUE，另两条来自 INDEX_SPEC
     "pb_place": ("idx_pb_place_placeCode", "idx_pb_place_placeName",
                  "idx_pb_place_photoCount"),
+    # R11 年代抽样：batchCode / itemKey 来自 .txt 的 UNIQUE，其余来自 INDEX_SPEC
+    "pb_era_sample": ("idx_pb_era_sample_batchCode", "idx_pb_era_sample_personCode"),
+    "pb_era_sample_item": ("idx_pb_era_sample_item_itemKey",
+                           "idx_pb_era_sample_item_batchCode_pickOrder",
+                           "idx_pb_era_sample_item_photoCode"),
 }
 
 # 各表默认的 upsert 冲突键（业务幂等键；调用方可覆盖）
@@ -236,6 +257,8 @@ CONFLICT_COLUMNS = {
     "pb_photo_person": ("linkKey",),
     "pb_scan_job": ("jobCode",),
     "pb_review_log": ("logCode",),
+    "pb_era_sample": ("batchCode",),
+    "pb_era_sample_item": ("itemKey",),
 }
 
 # 各表 query 的等值过滤字段（都带索引，或表极小）
@@ -262,6 +285,9 @@ QUERY_FILTER_FIELDS = {
     #   这张表是「每次人工操作一行」的量级（远小于 pb_face），全表扫可接受。
     "pb_review_log": ("logCode", "opType", "faceCode", "photoCode",
                       "fromPersonCode", "toPersonCode"),
+    # R11 年代抽样：批次按 batchCode 取、按人列历史；明细按 itemKey 幂等、按 batchCode 取整批
+    "pb_era_sample": ("batchCode", "personCode"),
+    "pb_era_sample_item": ("itemKey", "batchCode", "personCode", "photoCode"),
 }
 
 # 各表允许的 ORDER BY 字段（生成器写死白名单，杜绝 ORDER BY 注入）
@@ -276,6 +302,8 @@ ORDER_FIELDS = {
     "pb_photo_person": ("recID", "photoCode", "personCode", "confidence"),
     "pb_scan_job": ("recID", "jobStatus", "jobCode"),
     "pb_review_log": ("recID", "opType", "opYMDHMS", "faceCode"),
+    "pb_era_sample": ("recID", "batchCode", "personCode", "regYMDHMS"),
+    "pb_era_sample_item": ("recID", "pickOrder", "shotYear", "batchCode", "photoCode"),
 }
 
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

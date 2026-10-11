@@ -17,6 +17,11 @@ import {
   listFamilies,
   setPersonAvatar,
 } from '@/api/contacts'
+import {
+  createEraSample as createEraSampleApi,
+  getEraSample,
+  listEraSamples,
+} from '@/api/eraSample'
 import { getPersonPlaces } from '@/api/place'
 
 export const PERSON_CATEGORIES = [
@@ -144,6 +149,20 @@ export const usePersonsStore = defineStore('persons', () => {
   const faces = ref({ items: [], counts: { confirmed: 0, disputed: 0, pending: 0, stranger: 0 } })
   const facesLoading = ref(false)
   const facesTruncated = ref(false)
+
+  /**
+   * Tab3：年代抽样（R11）。`eraSample` = 当前展示的那一批 `{batch, items}`。
+   *
+   * ⚠️ 初值是 **null**（不是 `{batch:null, items:[]}`）：null 表示
+   *    「这个人还没抽过」，与非 null 但 `items` 为空（「抽了，但一张都没抽到」）
+   *    是**两种不同的空状态**，界面文案也不同 —— 混成一个形状就分不出来了。
+   */
+  const eraSample = ref(null)
+  const eraSampleLoading = ref(false)
+  const eraSampleCreating = ref(false)
+  /** 历史批次（下拉切换用；不含明细） */
+  const eraSamples = ref([])
+  const eraSamplesLoading = ref(false)
 
   const filters = ref({
     keyword: '',
@@ -311,6 +330,100 @@ export const usePersonsStore = defineStore('persons', () => {
     }
   }
 
+  /**
+   * Tab3 年代抽样（R11）。
+   *
+   * ⚠️ **不并进 `fetchPersonDetail`**：这一块是「按需生成」的功能，
+   *    默认 Tab 是时间轴，不进 Tab3 就不该多打两个请求
+   *    （Tab2 的人脸样本本来就在首屏需要，所以它是并进去的）。
+   *    由页面在**首次切到 Tab3**时调 `fetchEraSampleDetail`（见
+   *    `PersonDetailView.ensureEraSample`）—— 切 Tab 是一次显式意图，
+   *    这时多一次往返完全合理。
+   *
+   * ⚠️ 失败时**不覆盖上一次的成功结果**（与 fetchPlaces 同款）：
+   *    接口挂了与「他还没抽过」在界面上长得一样，而后者是正常状态。
+   *    `request.js` 已经弹过 Toast，这里只保证 loading 收尾并原样抛出，
+   *    由页面决定要不要额外提示。
+   */
+  async function fetchEraSampleDetail(personCode) {
+    const code = String(personCode || '')
+    if (!code) return null
+    eraSamplesLoading.value = true
+    try {
+      const data = await listEraSamples(code, { size: 20 })
+      eraSamples.value = data?.items || []
+    } finally {
+      eraSamplesLoading.value = false
+    }
+    const latest = eraSamples.value[0]
+    if (!latest) {
+      eraSample.value = null          // 从没抽过 -> 明确的「还没抽过」状态
+      return null
+    }
+    return fetchEraSample(latest.batchCode)
+  }
+
+  /** 只看历史列表（新建一批之后刷新下拉用；**不动**当前展示的那一批） */
+  async function fetchEraSamples(personCode) {
+    const code = String(personCode || '')
+    if (!code) return []
+    eraSamplesLoading.value = true
+    try {
+      const data = await listEraSamples(code, { size: 20 })
+      eraSamples.value = data?.items || []
+      return eraSamples.value
+    } finally {
+      eraSamplesLoading.value = false
+    }
+  }
+
+  /** 切换展示的历史批次 */
+  async function fetchEraSample(batchCode) {
+    const code = String(batchCode || '')
+    if (!code) {
+      eraSample.value = null
+      return null
+    }
+    eraSampleLoading.value = true
+    try {
+      eraSample.value = await getEraSample(code)
+      return eraSample.value
+    } finally {
+      eraSampleLoading.value = false
+    }
+  }
+
+  /**
+   * 生成一次抽样（**每次都是新批次**，不覆盖旧的）。
+   *
+   * ⚠️ 成功后必须**同时**刷新历史列表：不刷的话新批次不在下拉里，
+   *    用户切走再切回来就找不回刚生成的那一批（而它明明在库里）。
+   */
+  async function createEraSample(personCode, options = {}) {
+    const code = String(personCode || '')
+    if (!code) throw new Error('personCode 不能为空')
+    eraSampleCreating.value = true
+    try {
+      eraSample.value = await createEraSampleApi(code, options)
+      await fetchEraSamples(code)
+      return eraSample.value
+    } finally {
+      eraSampleCreating.value = false
+    }
+  }
+
+  /**
+   * 清空 Tab3 的状态。
+   *
+   * ⚠️ 必须与 `clearPerson` 一起调（或在 personCode 变化时调）：
+   *    不清的话，从 A 的详情跳到 B 会先渲染出**上一个人的年代抽样**，
+   *    而它看起来完全合理 —— 只是错了（与 places 同一个坑）。
+   */
+  function clearEraSample() {
+    eraSample.value = null
+    eraSamples.value = []
+  }
+
   /** 一次把 P-05 需要的都取回来（头部 + 两个 Tab + 地点区块），避免页面自己编排 4 个请求 */
   async function fetchPersonDetail(personCode) {
     const head = await fetchPerson(personCode)
@@ -346,6 +459,8 @@ export const usePersonsStore = defineStore('persons', () => {
     // ⚠️ 地点区块也要复位：不清的话，从 A 的详情跳到 B（或返回列表再进来）
     //    会先渲染出**上一个人的地点**，而它看起来完全合理 —— 只是错了。
     places.value = { places: [], photoTotal: 0, locatedPhotoTotal: 0 }
+    // ⚠️ 年代抽样同理（R11）：不清就会渲染出**上一个人的年份队列**。
+    clearEraSample()
   }
 
   return {
@@ -365,6 +480,11 @@ export const usePersonsStore = defineStore('persons', () => {
     facesTruncated,
     places,
     placesLoading,
+    eraSample,
+    eraSampleLoading,
+    eraSampleCreating,
+    eraSamples,
+    eraSamplesLoading,
     filters,
     includeDisabled,
     hasFilter,
@@ -379,6 +499,11 @@ export const usePersonsStore = defineStore('persons', () => {
     fetchFaces,
     setAvatar,
     fetchPlaces,
+    fetchEraSampleDetail,
+    fetchEraSamples,
+    fetchEraSample,
+    createEraSample,
+    clearEraSample,
     resetFilters,
     clearPerson,
   }

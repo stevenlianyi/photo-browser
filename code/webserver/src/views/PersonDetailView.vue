@@ -9,6 +9,10 @@
         **每张可设为默认头像**（DR-41）：加**品牌色环 + ★ 默认角标**，
         但**不改编描边** —— 描边承担「归属来源」（实线=确认 / 虚线=机器认的）
         这一维，拿它表示「这是默认」会把两种语义混成一种。
+  Tab3 年代抽样：**按年**抽一张照片排成队列（与 Tab1 的**年代档**粒度不同、
+        年份口径同源），可打包 zip（R11 · DR-45 ~ DR-50）。
+        ⚠️ 它**不在首屏加载**（不并进 fetchPersonDetail）：这一块是「按需生成」
+        的功能，不进 Tab3 就不该多打两个请求 —— 见下方 ensureEraSample。
   质心健康度：自动 ≫ 确认时主动提示，用数据引导用户去纠错（DR-16）
 
   五条不能省的语义
@@ -44,6 +48,7 @@ import { ElMessage } from 'element-plus/es/components/message/index'
 import 'element-plus/theme-chalk/el-message.css'
 import BucketTimeline from '@/components/photo/BucketTimeline.vue'
 import AvatarPicker from '@/components/common/AvatarPicker.vue'
+import EraSamplePanel from '@/components/common/EraSamplePanel.vue'
 import PersonForm from '@/components/common/PersonForm.vue'
 import PersonPlaces from '@/components/common/PersonPlaces.vue'
 import { disableContact, getImpact, patchContact } from '@/api/contacts'
@@ -65,7 +70,13 @@ const review = useReviewStore()
 const personCode = computed(() => String(route.params.personCode || ''))
 const person = computed(() => persons.current)
 
+/**
+ * 当前 Tab。默认「时间轴」。
+ * ⚠️ Tab3（年代抽样）是**懒加载**的，是否已取过由 `eraLoaded` 记着
+ *    —— 见 `ensureEraSample()` 与 `load()`。
+ */
 const activeTab = ref('timeline')
+const eraLoaded = ref(false)
 
 const editVisible = ref(false)
 const submitting = ref(false)
@@ -181,12 +192,82 @@ const healthHint = computed(() => {
 
 async function load() {
   if (!personCode.value) return
+  // ⚠️ 换人时必须把 Tab3 的「已加载」标记与数据一起清掉：
+  //    不清的话，从 A 的详情跳到 B（组件被复用、activeTab 还是 eraSample）
+  //    会先把**上一个人的年份队列**渲染出来 —— 它看起来完全合理，只是错的。
+  eraLoaded.value = false
+  persons.clearEraSample()
   await Promise.all([
     persons.fetchPersonDetail(personCode.value),
     persons.fetchFamilies(),
     loadRevertible(),
   ])
+  // 换人时若正停在 Tab3，取的是**新那个人**的抽样（不是上面刚清掉的那份）
+  if (activeTab.value === 'eraSample') ensureEraSample()
 }
+
+// ============================================================
+// Tab3 年代抽样（R11）—— **懒加载**
+// ============================================================
+//
+// 为什么不在 fetchPersonDetail 里一起取（Tab2 的样本就在那里取）：
+//   年代抽样是「按需生成」的功能，默认 Tab 是时间轴 —— 不进 Tab3 就不该
+//   多打两个请求（列表 + 明细）。切 Tab 是一次显式意图，那时多一次往返合理。
+//
+// ⚠️ 失败时不重试也不清空：`request.js` 已经弹过 Toast，
+//    store 也保证「失败不覆盖上一次的成功结果」（否则接口挂掉会看起来
+//    像「他还没抽过」，而那是正常状态）。
+async function ensureEraSample() {
+  if (!personCode.value || eraLoaded.value) return
+  eraLoaded.value = true
+  try {
+    await persons.fetchEraSampleDetail(personCode.value)
+  } catch (e) {
+    // 已提示；把标记留着，避免每次切 Tab 都重试一次失败请求
+  }
+}
+
+/** 生成新批次（**不覆盖旧的** —— 每次生成都是一条历史） */
+async function onCreateEraSample(options) {
+  try {
+    await persons.createEraSample(personCode.value, options)
+  } catch (e) {
+    // 已提示
+  }
+}
+
+/** 切到某个历史批次（**不重抽**） */
+async function onSelectEraBatch(batchCode) {
+  try {
+    await persons.fetchEraSample(batchCode)
+  } catch (e) {
+    // 已提示
+  }
+}
+
+/** zip 打包完刷新一次：批次的 zip 元数据（大小/张数）要跟着更新 */
+async function onRefreshEraSample() {
+  try {
+    await persons.fetchEraSampleDetail(personCode.value)
+  } catch (e) {
+    // 已提示
+  }
+}
+
+watch(activeTab, (tab) => {
+  if (tab === 'eraSample') ensureEraSample()
+})
+
+/**
+ * Tab3 的标题。**未加载时不给数字** —— 默认 Tab 是时间轴，
+ * 首屏根本不知道有多少年，写「年代抽样（0 年）」是在说一句假话。
+ */
+const eraTabLabel = computed(() => {
+  const sample = persons.eraSample
+  if (!sample) return '年代抽样'
+  const count = Number(sample.batch?.photoCount)
+  return Number.isFinite(count) ? `年代抽样（${formatCount(count)} 年）` : '年代抽样'
+})
 
 async function loadRevertible() {
   try {
@@ -880,6 +961,23 @@ async function setDefaultAvatar(sample) {
               </p>
             </template>
           </div>
+        </el-tab-pane>
+
+        <!-- ============ Tab3 年代抽样（R11 · 每年一张 + 可打包 zip） ============ -->
+        <el-tab-pane :label="eraTabLabel" name="eraSample">
+          <EraSamplePanel
+            :person-code="personCode"
+            :display-name="String(person?.displayName || '')"
+            :photo-total="photoCount"
+            :sample="persons.eraSample"
+            :batches="persons.eraSamples"
+            :loading="persons.eraSampleLoading"
+            :creating="persons.eraSampleCreating"
+            :active="activeTab === 'eraSample'"
+            @create="onCreateEraSample"
+            @select="onSelectEraBatch"
+            @refresh="onRefreshEraSample"
+          />
         </el-tab-pane>
       </el-tabs>
     </template>

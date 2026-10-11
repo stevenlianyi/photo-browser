@@ -7,10 +7,10 @@
 #   改表 = 改 pb_*.txt + 重跑生成器；直接改这里会在下次生成时被覆盖，
 #   且 .txt 与本文件会静默不一致（字段/索引/长度全部对不上）。
 #
-#   生成时间 : 2026-10-09 10:05:44
+#   生成时间 : 2026-10-11 11:03:06
 #   生成器   : database/sqliteCodeGenerator.py v20261005
-#   数据源   : pb_family.txt, pb_person.txt, pb_person_category.txt, pb_place.txt, pb_photo.txt, pb_face.txt, pb_person_centroid.txt, pb_photo_person.txt, pb_scan_job.txt, pb_review_log.txt
-#   表数量   : 10 张，字段 187 个，索引 27 个
+#   数据源   : pb_family.txt, pb_person.txt, pb_person_category.txt, pb_place.txt, pb_photo.txt, pb_face.txt, pb_person_centroid.txt, pb_photo_person.txt, pb_scan_job.txt, pb_review_log.txt, pb_era_sample.txt, pb_era_sample_item.txt
+#   表数量   : 12 张，字段 239 个，索引 32 个
 #
 #   上层：processor / engine / api —— **业务层禁止裸 SQL，一律调本文件**（数据库设计.md §1.2）
 #   下层：common/sqliteHandle.py（读写双连接 + PRAGMA + %s->? 占位符转换）
@@ -69,6 +69,8 @@ TABLE_ORDER = (
     'pb_photo_person',   # 照片-人员关联
     'pb_scan_job',   # 扫描任务
     'pb_review_log',   # 纠错操作日志
+    'pb_era_sample',   # 年代抽样批次
+    'pb_era_sample_item',   # 年代抽样明细
 )
 
 # 表名 -> 中文名
@@ -83,6 +85,8 @@ TABLE_CN = {
     'pb_photo_person': '照片-人员关联',
     'pb_scan_job': '扫描任务',
     'pb_review_log': '纠错操作日志',
+    'pb_era_sample': '年代抽样批次',
+    'pb_era_sample_item': '年代抽样明细',
 }
 
 # 表名 -> 字段元数据列表（顺序 = .txt 里的顺序 = 建表列顺序）
@@ -857,6 +861,218 @@ TABLE_COLUMNS = {
             "notNull": False, "unique": False, "primaryKey": False,
             "autoIncrement": False, "default": None, "comment": '删除标记'},
     ],
+    'pb_era_sample': [
+        {"name": 'recID', "type": 'INT',
+            "sqliteType": 'INTEGER PRIMARY KEY AUTOINCREMENT', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": True,
+            "autoIncrement": True, "default": None, "comment": '记录ID'},
+        {"name": 'batchCode', "type": 'VARCHAR(64)',
+            "sqliteType": 'TEXT', "length": 64, "scale": None,
+            "notNull": True, "unique": True, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '批次编码 幂等键 格式 ES_yyyymmddHHMMSS_6位随机'},
+        {"name": 'personCode', "type": 'VARCHAR(64)',
+            "sqliteType": 'TEXT', "length": 64, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '抽样范围人物 关联pb_person.personCode 本期恒非空(按人物 R11)'},
+        {"name": 'personName', "type": 'VARCHAR(128)',
+            "sqliteType": 'TEXT', "length": 128, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '生成时的displayName快照 人物改名或停用后历史批次仍可显示是谁'},
+        {"name": 'grain', "type": 'VARCHAR(16)',
+            "sqliteType": 'TEXT', "length": 16, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": "'year'", "comment": '取样粒度 year=每年一张 本期唯一实现 bucket=每个年代桶一张 预留'},
+        {"name": 'mode', "type": 'VARCHAR(16)',
+            "sqliteType": 'TEXT', "length": 16, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": "'weighted'", "comment": '抽法 weighted=按人脸质量加权 uniform=均匀'},
+        {"name": 'randomSeed', "type": 'VARCHAR(32)',
+            "sqliteType": 'TEXT', "length": 32, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '随机种子 必填落库 同参数同种子可逐字复现'},
+        {"name": 'yearFrom', "type": 'SMALLINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '年份下限 含 空=不限'},
+        {"name": 'yearTo', "type": 'SMALLINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '年份上限 含 空=不限'},
+        {"name": 'includeNoYear', "type": 'TINYINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": '是否把无拍摄年份也算一档 最多1张'},
+        {"name": 'onlyConfirmed', "type": 'TINYINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": '是否只取isConfirmed=1的人工确认样本'},
+        {"name": 'excludeDuplicate', "type": 'TINYINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '1', "comment": '是否排除isDuplicate=1的重复照片 默认排除'},
+        {"name": 'candidatePhotoCount', "type": 'INT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": '生成时候选照片总数 快照'},
+        {"name": 'candidateYearCount', "type": 'INT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": '候选覆盖的年份数'},
+        {"name": 'photoCount', "type": 'INT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": '实际抽出照片数 等于明细行数'},
+        {"name": 'zipState', "type": 'VARCHAR(16)',
+            "sqliteType": 'TEXT', "length": 16, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": "'NONE'", "comment": '导出状态 NONE/READY/FAILED'},
+        {"name": 'zipRelName', "type": 'VARCHAR(256)',
+            "sqliteType": 'TEXT', "length": 256, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": 'zip相对exports目录的路径 如 era-sample/ES_xxx.zip'},
+        {"name": 'zipSize', "type": 'INT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": 'zip字节数'},
+        {"name": 'zipPhotoCount', "type": 'INT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": '成功打包张数'},
+        {"name": 'zipMissingCount', "type": 'INT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": '原图缺失未打包张数'},
+        {"name": 'zipYMDHMS', "type": 'VARCHAR(16)',
+            "sqliteType": 'TEXT', "length": 16, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": 'zip生成时间 YYYYMMDDHHMMSS'},
+        {"name": 'errMsg', "type": 'VARCHAR(512)',
+            "sqliteType": 'TEXT', "length": 512, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '失败信息'},
+        {"name": 'note', "type": 'VARCHAR(200)',
+            "sqliteType": 'TEXT', "length": 200, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '用户备注'},
+        {"name": 'label', "type": 'VARCHAR(32)',
+            "sqliteType": 'TEXT', "length": 32, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": 'label'},
+        {"name": 'memo', "type": 'VARCHAR(200)',
+            "sqliteType": 'TEXT', "length": 200, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": 'memo'},
+        {"name": 'regID', "type": 'VARCHAR(32)',
+            "sqliteType": 'TEXT', "length": 32, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '注册ID'},
+        {"name": 'regYMDHMS', "type": 'VARCHAR(16)',
+            "sqliteType": 'TEXT', "length": 16, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '注册年月日'},
+        {"name": 'modifyID', "type": 'VARCHAR(32)',
+            "sqliteType": 'TEXT', "length": 32, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '修改用户ID'},
+        {"name": 'modifyYMDHMS', "type": 'VARCHAR(16)',
+            "sqliteType": 'TEXT', "length": 16, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '修改年月日'},
+        {"name": 'delFlag', "type": 'CHAR(1)',
+            "sqliteType": 'TEXT', "length": 1, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '删除标记'},
+    ],
+    'pb_era_sample_item': [
+        {"name": 'recID', "type": 'INT',
+            "sqliteType": 'INTEGER PRIMARY KEY AUTOINCREMENT', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": True,
+            "autoIncrement": True, "default": None, "comment": '记录ID'},
+        {"name": 'itemKey', "type": 'VARCHAR(200)',
+            "sqliteType": 'TEXT', "length": 200, "scale": None,
+            "notNull": True, "unique": True, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '幂等键 batchCode:yearLabel'},
+        {"name": 'batchCode', "type": 'VARCHAR(64)',
+            "sqliteType": 'TEXT', "length": 64, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '关联pb_era_sample.batchCode'},
+        {"name": 'personCode', "type": 'VARCHAR(64)',
+            "sqliteType": 'TEXT', "length": 64, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '冗余一份 便于按人查历年抽样'},
+        {"name": 'shotYear', "type": 'SMALLINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '有效拍摄年 COALESCE(shotYearOverride,shotYear) 空=无年份组'},
+        {"name": 'yearLabel', "type": 'VARCHAR(16)',
+            "sqliteType": 'TEXT', "length": 16, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '展示用年份标签 如1958 或 NOYEAR'},
+        {"name": 'photoCode', "type": 'VARCHAR(64)',
+            "sqliteType": 'TEXT', "length": 64, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '抽中的照片 关联pb_photo.photoCode'},
+        {"name": 'faceCode', "type": 'VARCHAR(64)',
+            "sqliteType": 'TEXT', "length": 64, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '该人在此照片中的代表脸 质量最高那张'},
+        {"name": 'candidateCount', "type": 'INT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": '这一年候选照片数 1=唯一没得选'},
+        {"name": 'weight', "type": 'DECIMAL(12,6)',
+            "sqliteType": 'NUMERIC', "length": 12, "scale": 6,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '抽中那张的权重 weighted模式'},
+        {"name": 'weightSum', "type": 'DECIMAL(12,6)',
+            "sqliteType": 'NUMERIC', "length": 12, "scale": 6,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '本年权重总和 概率=weight/weightSum'},
+        {"name": 'quality', "type": 'DECIMAL(6,4)',
+            "sqliteType": 'NUMERIC', "length": 6, "scale": 4,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '该脸质量分快照'},
+        {"name": 'detScore', "type": 'DECIMAL(6,4)',
+            "sqliteType": 'NUMERIC', "length": 6, "scale": 4,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '检测分快照'},
+        {"name": 'isConfirmed', "type": 'TINYINT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": '该脸当时是否人工确认 快照'},
+        {"name": 'pickOrder', "type": 'INT',
+            "sqliteType": 'INTEGER', "length": None, "scale": None,
+            "notNull": True, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": '0', "comment": '排队序号 按年份升序 1..N'},
+        {"name": 'label', "type": 'VARCHAR(32)',
+            "sqliteType": 'TEXT', "length": 32, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": 'label'},
+        {"name": 'memo', "type": 'VARCHAR(200)',
+            "sqliteType": 'TEXT', "length": 200, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": 'memo'},
+        {"name": 'regID', "type": 'VARCHAR(32)',
+            "sqliteType": 'TEXT', "length": 32, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '注册ID'},
+        {"name": 'regYMDHMS', "type": 'VARCHAR(16)',
+            "sqliteType": 'TEXT', "length": 16, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '注册年月日'},
+        {"name": 'modifyID', "type": 'VARCHAR(32)',
+            "sqliteType": 'TEXT', "length": 32, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '修改用户ID'},
+        {"name": 'modifyYMDHMS', "type": 'VARCHAR(16)',
+            "sqliteType": 'TEXT', "length": 16, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '修改年月日'},
+        {"name": 'delFlag', "type": 'CHAR(1)',
+            "sqliteType": 'TEXT', "length": 1, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '删除标记'},
+    ],
 }
 
 # 表名 -> 索引清单（plan/数据库设计.md §五）
@@ -909,6 +1125,15 @@ TABLE_INDEXES = {
         {"name": 'idx_pb_review_log_opType', "columns": ('opType',), "unique": False, "where": None},
         {"name": 'idx_pb_review_log_isRevertible', "columns": ('isRevertible',), "unique": False, "where": 'isRevertible=1 AND revertedByLogCode IS NULL'},
     ),
+    'pb_era_sample': (
+        {"name": 'idx_pb_era_sample_batchCode', "columns": ('batchCode',), "unique": True, "where": None},
+        {"name": 'idx_pb_era_sample_personCode', "columns": ('personCode',), "unique": False, "where": None},
+    ),
+    'pb_era_sample_item': (
+        {"name": 'idx_pb_era_sample_item_itemKey', "columns": ('itemKey',), "unique": True, "where": None},
+        {"name": 'idx_pb_era_sample_item_batchCode_pickOrder', "columns": ('batchCode', 'pickOrder'), "unique": False, "where": None},
+        {"name": 'idx_pb_era_sample_item_photoCode', "columns": ('photoCode',), "unique": False, "where": None},
+    ),
 }
 
 # 表名 -> upsert 默认冲突键（业务幂等键，见 数据库设计.md §1.6）
@@ -923,6 +1148,8 @@ CONFLICT_COLUMNS = {
     'pb_photo_person': ('linkKey',),
     'pb_scan_job': ('jobCode',),
     'pb_review_log': ('logCode',),
+    'pb_era_sample': ('batchCode',),
+    'pb_era_sample_item': ('itemKey',),
 }
 
 # 表名 -> query 支持的等值过滤字段（全部带索引）
@@ -937,6 +1164,8 @@ QUERY_FILTER_FIELDS = {
     'pb_photo_person': ('linkKey', 'photoCode', 'personCode'),
     'pb_scan_job': ('jobCode', 'jobStatus', 'jobType'),
     'pb_review_log': ('logCode', 'opType', 'faceCode', 'photoCode', 'fromPersonCode', 'toPersonCode'),
+    'pb_era_sample': ('batchCode', 'personCode'),
+    'pb_era_sample_item': ('itemKey', 'batchCode', 'personCode', 'photoCode'),
 }
 
 # 表名 -> 允许为 NULL 的字段（query 的 nullFields 参数白名单：待确认队列等）
@@ -951,6 +1180,8 @@ NULLABLE_FIELDS = {
     'pb_photo_person': ('faceCode', 'confidence', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_scan_job': ('lastCursor', 'startedYMDHMS', 'finishedYMDHMS', 'errMsg', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_review_log': ('faceCode', 'photoCode', 'fromPersonCode', 'toPersonCode', 'similarity', 'detail', 'revertedByLogCode', 'opUser', 'opYMDHMS', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
+    'pb_era_sample': ('personCode', 'personName', 'yearFrom', 'yearTo', 'zipRelName', 'zipYMDHMS', 'errMsg', 'note', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
+    'pb_era_sample_item': ('personCode', 'shotYear', 'faceCode', 'weight', 'weightSum', 'quality', 'detScore', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
 }
 
 # 表名 -> 允许 ORDER BY 的字段（白名单，杜绝排序字段注入）
@@ -965,6 +1196,8 @@ ORDER_FIELDS = {
     'pb_photo_person': ('recID', 'photoCode', 'personCode', 'confidence'),
     'pb_scan_job': ('recID', 'jobStatus', 'jobCode'),
     'pb_review_log': ('recID', 'opType', 'opYMDHMS', 'faceCode'),
+    'pb_era_sample': ('recID', 'batchCode', 'personCode', 'regYMDHMS'),
+    'pb_era_sample_item': ('recID', 'pickOrder', 'shotYear', 'batchCode', 'photoCode'),
 }
 
 # 表名 -> 主键名（当前 9 张表统一是 recID，见 数据库设计.md §1.3）
@@ -979,6 +1212,8 @@ PRIMARY_KEYS = {
     'pb_photo_person': 'recID',
     'pb_scan_job': 'recID',
     'pb_review_log': 'recID',
+    'pb_era_sample': 'recID',
+    'pb_era_sample_item': 'recID',
 }
 
 
@@ -3916,6 +4151,516 @@ def delete_pb_review_log(tableName, recID, hardDelete = False):
 # pb_review_log 删表
 def drop_pb_review_log(tableName):
     """删除 pb_review_log 表及其索引（不可逆；只给「改表要重建」用）。"""
+    return dropTableGeneral(tableName)
+
+
+# ==========================================================================
+# pb_era_sample 年代抽样批次
+# ==========================================================================
+
+# pb_era_sample 建表（幂等：已存在直接返回 True，不重复建）
+def create_pb_era_sample(tableName):
+    """建 pb_era_sample 表 + 索引。返回 True = 表已就绪。"""
+    if tableName not in TABLE_COLUMNS:
+        _LOG.error("create_pb_era_sample: 非法表名 %r" % tableName)
+        return False
+    if chkTableExist(tableName):
+        return True
+    db = dbHandle()
+    if db.executeWrite(createTableSQL_pb_era_sample(tableName)) == sqliteHandle.RET_ERROR:
+        return False
+    for indexSql in indexSqlList_pb_era_sample():
+        if db.executeWrite(indexSql) == sqliteHandle.RET_ERROR:
+            db.rollbackWrite()
+            return False
+    return chkTableExist(tableName)
+
+
+
+def createTableSQL_pb_era_sample(tableName):
+    """pb_era_sample 的建表 DDL（表名来自调用方，必须是 pb_era_sample）。"""
+    sqlStr = (
+        "CREATE TABLE IF NOT EXISTS " + tableName + " ("
+        "recID INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "batchCode TEXT NOT NULL,"
+        "personCode TEXT,"
+        "personName TEXT,"
+        "grain TEXT NOT NULL DEFAULT 'year',"
+        "mode TEXT NOT NULL DEFAULT 'weighted',"
+        "randomSeed TEXT NOT NULL,"
+        "yearFrom INTEGER,"
+        "yearTo INTEGER,"
+        "includeNoYear INTEGER NOT NULL DEFAULT 0,"
+        "onlyConfirmed INTEGER NOT NULL DEFAULT 0,"
+        "excludeDuplicate INTEGER NOT NULL DEFAULT 1,"
+        "candidatePhotoCount INTEGER NOT NULL DEFAULT 0,"
+        "candidateYearCount INTEGER NOT NULL DEFAULT 0,"
+        "photoCount INTEGER NOT NULL DEFAULT 0,"
+        "zipState TEXT NOT NULL DEFAULT 'NONE',"
+        "zipRelName TEXT,"
+        "zipSize INTEGER NOT NULL DEFAULT 0,"
+        "zipPhotoCount INTEGER NOT NULL DEFAULT 0,"
+        "zipMissingCount INTEGER NOT NULL DEFAULT 0,"
+        "zipYMDHMS TEXT,"
+        "errMsg TEXT,"
+        "note TEXT,"
+        "label TEXT,"
+        "memo TEXT,"
+        "regID TEXT,"
+        "regYMDHMS TEXT,"
+        "modifyID TEXT,"
+        "modifyYMDHMS TEXT,"
+        "delFlag TEXT"
+        ");"
+    )
+    return sqlStr
+
+
+
+def indexSqlList_pb_era_sample():
+    """pb_era_sample 的索引 DDL（清单见 数据库设计.md §五，全部 IF NOT EXISTS 故幂等）。"""
+    sqlList = [
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_pb_era_sample_batchCode ON pb_era_sample(batchCode);',   # txt-UNIQUE
+        'CREATE INDEX IF NOT EXISTS idx_pb_era_sample_personCode ON pb_era_sample(personCode);',   # INDEX_SPEC
+    ]
+    return sqlList
+
+
+
+# pb_era_sample 查询记录
+def query_pb_era_sample(tableName, recID = 0, batchCode = "", personCode = "", nullFields = (),
+        delFlag = "0", mode = "full", orderBy = "recID", descFlag = False,
+        limitNum = 0, offsetNum = 0):
+    """查 pb_era_sample。
+
+    参数
+    ----
+    recID        : int  —— 主键精确查，>0 时生效
+    batchCode    : str  —— 非空时等值过滤
+    personCode   : str  —— 非空时等值过滤
+    nullFields   : tuple  —— 追加 'field IS NULL' 条件，字段必须在 NULLABLE_FIELDS 白名单内
+    delFlag      : str  —— "0" 只看未删（默认）；"1" 只看已删；"" / "*" 不限
+    mode         : str  —— "full" 全部列；"light" 剔除 BLOB 列（人脸向量等），列表页用它省内存
+    orderBy      : str  —— 必须在 ORDER_FIELDS 白名单里，否则回落 recID
+    descFlag     : bool —— 是否倒序
+    limitNum     : int  —— >0 时生效
+    offsetNum    : int  —— 分页偏移
+
+    返回
+    ----
+    list[dict]（空列表 = 没查到，不是出错）
+    """
+    result = []
+    if tableName not in TABLE_COLUMNS:
+        return result
+    db = dbHandle()
+    valuesList = []
+    whereList = []
+    try:
+        try:
+            recID = int(recID)
+        except (TypeError, ValueError):
+            recID = 0
+        if recID > 0:
+            whereList.append("recID = %s")
+            valuesList.append(recID)
+
+        for fieldName, fieldValue in (('batchCode', batchCode), ('personCode', personCode)):
+            if fieldValue is not None and fieldValue != "":
+                whereList.append(fieldName + " = %s")
+                valuesList.append(fieldValue)
+
+        for fieldName in (nullFields or ()):
+            if fieldName in NULLABLE_FIELDS.get(tableName, ()):
+                whereList.append(fieldName + " IS NULL")
+
+        if delFlag not in (None, "", "*"):
+            whereList.append("delFlag = %s")
+            valuesList.append(delFlag)
+
+        columnList = ["*"]
+        if mode == "light":
+            columnList = [c["name"] for c in TABLE_COLUMNS[tableName]
+                if c["sqliteType"] != "BLOB"]
+            if not columnList:
+                columnList = ["*"]
+        sqlStr = "SELECT " + ", ".join(columnList) + " FROM " + tableName
+        if whereList:
+            sqlStr += " WHERE " + " AND ".join(whereList)
+        orderField = orderBy if orderBy in ORDER_FIELDS.get(tableName, ()) else "recID"
+        sqlStr += " ORDER BY " + orderField
+        if descFlag:
+            sqlStr += " DESC"
+        if int(limitNum or 0) > 0:
+            sqlStr += " LIMIT %s OFFSET %s"
+            valuesList.append(int(limitNum))
+            valuesList.append(int(offsetNum or 0))
+
+        if db.executeRead(sqlStr, tuple(valuesList)) == sqliteHandle.RET_ERROR:
+            return result
+        result = db.fetchAll()
+    except Exception as e:
+        _LOG.error("query_pb_era_sample: %s" % e)
+    return result
+
+
+
+# pb_era_sample 增加记录
+def insert_pb_era_sample(tableName, dataSet):
+    """新增一条 pb_era_sample，返回新行 recID（<=0 表示失败）。
+
+    - 只取 dataSet 中**属于本表**的字段；recID 由库自增，传了也忽略
+    - 值按 .txt 类型归一（INTEGER / NUMERIC / TEXT / BLOB），空数值走库默认值
+    - 未给 delFlag / regYMDHMS 时自动补 comGD.DEL_FLAG_NO / 当前时间
+    """
+    result = 0
+    if tableName not in TABLE_COLUMNS:
+        return result
+    saveSet, skipList = normalizeDataSet(tableName, dataSet)
+    saveSet.pop("recID", None)
+    if skipList:
+        _LOG.warning("insert_pb_era_sample: 跳过无法归一的字段 %s" % skipList)
+    if "delFlag" not in saveSet:
+        saveSet["delFlag"] = comGD.DEL_FLAG_NO
+    if "regYMDHMS" not in saveSet:
+        saveSet["regYMDHMS"] = misc.getTime()
+    result = insertTableGeneral(tableName, saveSet)
+    return result
+
+
+
+# pb_era_sample 批量增加记录（executemany + 显式事务）
+def insertMany_pb_era_sample(tableName, dataSetList):
+    """批量新增 pb_era_sample（整批一次提交，失败整批回滚），返回写入行数。
+
+    步骤 3 扫描入库走这里：一次几百行，别一行一提交。
+    """
+    result = 0
+    if tableName not in TABLE_COLUMNS or not dataSetList:
+        return result
+    rtn, _columnNames = insertManyTableGeneral(tableName, dataSetList,
+        fillStandard=True)
+    return rtn
+
+
+
+# pb_era_sample 批量 upsert（幂等重扫走这里）
+def upsertMany_pb_era_sample(tableName, dataSetList, conflictColumns = None, updateColumns = None):
+    """按业务幂等键批量写 pb_era_sample：
+
+    INSERT ... ON CONFLICT(<冲突键>) DO UPDATE SET ... / DO NOTHING
+
+    - conflictColumns 缺省用 CONFLICT_COLUMNS 里的本表默认值
+    - updateColumns 为 None 时更新「除冲突键以外」的所有列；传 () 则 DO NOTHING
+    - 冲突时**不覆盖** regYMDHMS（注册时间）与 delFlag（不会悄悄复活软删行）
+    """
+    result = 0
+    if tableName not in TABLE_COLUMNS or not dataSetList:
+        return result
+    conflict = list(conflictColumns) if conflictColumns else list(CONFLICT_COLUMNS.get(tableName, ()))
+    update = list(updateColumns) if updateColumns else ()
+    rtn, _columnNames = insertManyTableGeneral(tableName, dataSetList,
+        conflictColumns=conflict, updateColumns=update,
+        fillStandard=True)
+    return rtn
+
+
+
+# pb_era_sample 修改记录
+def update_pb_era_sample(tableName, recID, dataSet):
+    """按 recID 改一条 pb_era_sample，返回影响行数（0 = 无字段可改或没命中）。
+
+    - recID 与 modifyYMDHMS 由本函数控制，dataSet 里传了也忽略
+    - TEXT 字段传空串是真的「清空」（不会被当成未提供）
+    """
+    if tableName not in TABLE_COLUMNS:
+        return 0
+    saveSet, skipList = normalizeDataSet(tableName, dataSet)
+    saveSet.pop("recID", None)
+    if skipList:
+        _LOG.warning("update_pb_era_sample: 跳过无法归一的字段 %s" % skipList)
+    if not saveSet:
+        return 0
+    saveSet["modifyYMDHMS"] = misc.getTime()
+    return updateTableGeneral(tableName, "recID = %s", [recID], saveSet)
+
+
+
+# pb_era_sample 删除记录
+def delete_pb_era_sample(tableName, recID, hardDelete = False):
+    """删一条 pb_era_sample，返回影响行数。
+
+    hardDelete=False（默认）-> 软删除：delFlag='1' + 刷 modifyYMDHMS
+    hardDelete=True           -> 物理 DELETE
+
+    ⚠️ 软删除后记录仍在表里，业务幂等键（batchCode）依然被唯一索引占着；
+       想复用同一条记录请走 update，别指望再 insert 一遍。
+    """
+    if tableName not in TABLE_COLUMNS:
+        return 0
+    if hardDelete:
+        return deleteTableGeneral(tableName, "recID = %s", [recID])
+    saveSet = {"delFlag": comGD.DEL_FLAG_YES, "modifyYMDHMS": misc.getTime()}
+    return updateTableGeneral(tableName, "recID = %s", [recID], saveSet)
+
+
+
+# pb_era_sample 删表
+def drop_pb_era_sample(tableName):
+    """删除 pb_era_sample 表及其索引（不可逆；只给「改表要重建」用）。"""
+    return dropTableGeneral(tableName)
+
+
+# ==========================================================================
+# pb_era_sample_item 年代抽样明细
+# ==========================================================================
+
+# pb_era_sample_item 建表（幂等：已存在直接返回 True，不重复建）
+def create_pb_era_sample_item(tableName):
+    """建 pb_era_sample_item 表 + 索引。返回 True = 表已就绪。"""
+    if tableName not in TABLE_COLUMNS:
+        _LOG.error("create_pb_era_sample_item: 非法表名 %r" % tableName)
+        return False
+    if chkTableExist(tableName):
+        return True
+    db = dbHandle()
+    if db.executeWrite(createTableSQL_pb_era_sample_item(tableName)) == sqliteHandle.RET_ERROR:
+        return False
+    for indexSql in indexSqlList_pb_era_sample_item():
+        if db.executeWrite(indexSql) == sqliteHandle.RET_ERROR:
+            db.rollbackWrite()
+            return False
+    return chkTableExist(tableName)
+
+
+
+def createTableSQL_pb_era_sample_item(tableName):
+    """pb_era_sample_item 的建表 DDL（表名来自调用方，必须是 pb_era_sample_item）。"""
+    sqlStr = (
+        "CREATE TABLE IF NOT EXISTS " + tableName + " ("
+        "recID INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "itemKey TEXT NOT NULL,"
+        "batchCode TEXT NOT NULL,"
+        "personCode TEXT,"
+        "shotYear INTEGER,"
+        "yearLabel TEXT NOT NULL,"
+        "photoCode TEXT NOT NULL,"
+        "faceCode TEXT,"
+        "candidateCount INTEGER NOT NULL DEFAULT 0,"
+        "weight NUMERIC,"
+        "weightSum NUMERIC,"
+        "quality NUMERIC,"
+        "detScore NUMERIC,"
+        "isConfirmed INTEGER NOT NULL DEFAULT 0,"
+        "pickOrder INTEGER NOT NULL DEFAULT 0,"
+        "label TEXT,"
+        "memo TEXT,"
+        "regID TEXT,"
+        "regYMDHMS TEXT,"
+        "modifyID TEXT,"
+        "modifyYMDHMS TEXT,"
+        "delFlag TEXT"
+        ");"
+    )
+    return sqlStr
+
+
+
+def indexSqlList_pb_era_sample_item():
+    """pb_era_sample_item 的索引 DDL（清单见 数据库设计.md §五，全部 IF NOT EXISTS 故幂等）。"""
+    sqlList = [
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_pb_era_sample_item_itemKey ON pb_era_sample_item(itemKey);',   # txt-UNIQUE
+        'CREATE INDEX IF NOT EXISTS idx_pb_era_sample_item_batchCode_pickOrder ON pb_era_sample_item(batchCode, pickOrder);',   # INDEX_SPEC
+        'CREATE INDEX IF NOT EXISTS idx_pb_era_sample_item_photoCode ON pb_era_sample_item(photoCode);',   # INDEX_SPEC
+    ]
+    return sqlList
+
+
+
+# pb_era_sample_item 查询记录
+def query_pb_era_sample_item(tableName, recID = 0, itemKey = "", batchCode = "",
+        personCode = "", photoCode = "", nullFields = (),
+        delFlag = "0", mode = "full", orderBy = "recID",
+        descFlag = False, limitNum = 0, offsetNum = 0):
+    """查 pb_era_sample_item。
+
+    参数
+    ----
+    recID        : int  —— 主键精确查，>0 时生效
+    itemKey      : str  —— 非空时等值过滤
+    batchCode    : str  —— 非空时等值过滤
+    personCode   : str  —— 非空时等值过滤
+    photoCode    : str  —— 非空时等值过滤
+    nullFields   : tuple  —— 追加 'field IS NULL' 条件，字段必须在 NULLABLE_FIELDS 白名单内
+    delFlag      : str  —— "0" 只看未删（默认）；"1" 只看已删；"" / "*" 不限
+    mode         : str  —— "full" 全部列；"light" 剔除 BLOB 列（人脸向量等），列表页用它省内存
+    orderBy      : str  —— 必须在 ORDER_FIELDS 白名单里，否则回落 recID
+    descFlag     : bool —— 是否倒序
+    limitNum     : int  —— >0 时生效
+    offsetNum    : int  —— 分页偏移
+
+    返回
+    ----
+    list[dict]（空列表 = 没查到，不是出错）
+    """
+    result = []
+    if tableName not in TABLE_COLUMNS:
+        return result
+    db = dbHandle()
+    valuesList = []
+    whereList = []
+    try:
+        try:
+            recID = int(recID)
+        except (TypeError, ValueError):
+            recID = 0
+        if recID > 0:
+            whereList.append("recID = %s")
+            valuesList.append(recID)
+
+        for fieldName, fieldValue in (('itemKey', itemKey), ('batchCode', batchCode), ('personCode', personCode), ('photoCode', photoCode)):
+            if fieldValue is not None and fieldValue != "":
+                whereList.append(fieldName + " = %s")
+                valuesList.append(fieldValue)
+
+        for fieldName in (nullFields or ()):
+            if fieldName in NULLABLE_FIELDS.get(tableName, ()):
+                whereList.append(fieldName + " IS NULL")
+
+        if delFlag not in (None, "", "*"):
+            whereList.append("delFlag = %s")
+            valuesList.append(delFlag)
+
+        columnList = ["*"]
+        if mode == "light":
+            columnList = [c["name"] for c in TABLE_COLUMNS[tableName]
+                if c["sqliteType"] != "BLOB"]
+            if not columnList:
+                columnList = ["*"]
+        sqlStr = "SELECT " + ", ".join(columnList) + " FROM " + tableName
+        if whereList:
+            sqlStr += " WHERE " + " AND ".join(whereList)
+        orderField = orderBy if orderBy in ORDER_FIELDS.get(tableName, ()) else "recID"
+        sqlStr += " ORDER BY " + orderField
+        if descFlag:
+            sqlStr += " DESC"
+        if int(limitNum or 0) > 0:
+            sqlStr += " LIMIT %s OFFSET %s"
+            valuesList.append(int(limitNum))
+            valuesList.append(int(offsetNum or 0))
+
+        if db.executeRead(sqlStr, tuple(valuesList)) == sqliteHandle.RET_ERROR:
+            return result
+        result = db.fetchAll()
+    except Exception as e:
+        _LOG.error("query_pb_era_sample_item: %s" % e)
+    return result
+
+
+
+# pb_era_sample_item 增加记录
+def insert_pb_era_sample_item(tableName, dataSet):
+    """新增一条 pb_era_sample_item，返回新行 recID（<=0 表示失败）。
+
+    - 只取 dataSet 中**属于本表**的字段；recID 由库自增，传了也忽略
+    - 值按 .txt 类型归一（INTEGER / NUMERIC / TEXT / BLOB），空数值走库默认值
+    - 未给 delFlag / regYMDHMS 时自动补 comGD.DEL_FLAG_NO / 当前时间
+    """
+    result = 0
+    if tableName not in TABLE_COLUMNS:
+        return result
+    saveSet, skipList = normalizeDataSet(tableName, dataSet)
+    saveSet.pop("recID", None)
+    if skipList:
+        _LOG.warning("insert_pb_era_sample_item: 跳过无法归一的字段 %s" % skipList)
+    if "delFlag" not in saveSet:
+        saveSet["delFlag"] = comGD.DEL_FLAG_NO
+    if "regYMDHMS" not in saveSet:
+        saveSet["regYMDHMS"] = misc.getTime()
+    result = insertTableGeneral(tableName, saveSet)
+    return result
+
+
+
+# pb_era_sample_item 批量增加记录（executemany + 显式事务）
+def insertMany_pb_era_sample_item(tableName, dataSetList):
+    """批量新增 pb_era_sample_item（整批一次提交，失败整批回滚），返回写入行数。
+
+    步骤 3 扫描入库走这里：一次几百行，别一行一提交。
+    """
+    result = 0
+    if tableName not in TABLE_COLUMNS or not dataSetList:
+        return result
+    rtn, _columnNames = insertManyTableGeneral(tableName, dataSetList,
+        fillStandard=True)
+    return rtn
+
+
+
+# pb_era_sample_item 批量 upsert（幂等重扫走这里）
+def upsertMany_pb_era_sample_item(tableName, dataSetList, conflictColumns = None, updateColumns = None):
+    """按业务幂等键批量写 pb_era_sample_item：
+
+    INSERT ... ON CONFLICT(<冲突键>) DO UPDATE SET ... / DO NOTHING
+
+    - conflictColumns 缺省用 CONFLICT_COLUMNS 里的本表默认值
+    - updateColumns 为 None 时更新「除冲突键以外」的所有列；传 () 则 DO NOTHING
+    - 冲突时**不覆盖** regYMDHMS（注册时间）与 delFlag（不会悄悄复活软删行）
+    """
+    result = 0
+    if tableName not in TABLE_COLUMNS or not dataSetList:
+        return result
+    conflict = list(conflictColumns) if conflictColumns else list(CONFLICT_COLUMNS.get(tableName, ()))
+    update = list(updateColumns) if updateColumns else ()
+    rtn, _columnNames = insertManyTableGeneral(tableName, dataSetList,
+        conflictColumns=conflict, updateColumns=update,
+        fillStandard=True)
+    return rtn
+
+
+
+# pb_era_sample_item 修改记录
+def update_pb_era_sample_item(tableName, recID, dataSet):
+    """按 recID 改一条 pb_era_sample_item，返回影响行数（0 = 无字段可改或没命中）。
+
+    - recID 与 modifyYMDHMS 由本函数控制，dataSet 里传了也忽略
+    - TEXT 字段传空串是真的「清空」（不会被当成未提供）
+    """
+    if tableName not in TABLE_COLUMNS:
+        return 0
+    saveSet, skipList = normalizeDataSet(tableName, dataSet)
+    saveSet.pop("recID", None)
+    if skipList:
+        _LOG.warning("update_pb_era_sample_item: 跳过无法归一的字段 %s" % skipList)
+    if not saveSet:
+        return 0
+    saveSet["modifyYMDHMS"] = misc.getTime()
+    return updateTableGeneral(tableName, "recID = %s", [recID], saveSet)
+
+
+
+# pb_era_sample_item 删除记录
+def delete_pb_era_sample_item(tableName, recID, hardDelete = False):
+    """删一条 pb_era_sample_item，返回影响行数。
+
+    hardDelete=False（默认）-> 软删除：delFlag='1' + 刷 modifyYMDHMS
+    hardDelete=True           -> 物理 DELETE
+
+    ⚠️ 软删除后记录仍在表里，业务幂等键（itemKey）依然被唯一索引占着；
+       想复用同一条记录请走 update，别指望再 insert 一遍。
+    """
+    if tableName not in TABLE_COLUMNS:
+        return 0
+    if hardDelete:
+        return deleteTableGeneral(tableName, "recID = %s", [recID])
+    saveSet = {"delFlag": comGD.DEL_FLAG_YES, "modifyYMDHMS": misc.getTime()}
+    return updateTableGeneral(tableName, "recID = %s", [recID], saveSet)
+
+
+
+# pb_era_sample_item 删表
+def drop_pb_era_sample_item(tableName):
+    """删除 pb_era_sample_item 表及其索引（不可逆；只给「改表要重建」用）。"""
     return dropTableGeneral(tableName)
 
 

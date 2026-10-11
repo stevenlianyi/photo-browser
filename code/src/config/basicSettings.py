@@ -259,6 +259,57 @@ CENTROID_PAGE_ROWS: int = 2000
 
 
 # ============================================================
+# 三之三、年代抽样（R11 · DR-45 ~ DR-50）
+# ============================================================
+# 需求：人物详情页按「年」抽一张照片（每年 1 张），结果落库 + 可打包 zip。
+# 三条口径（每一条写错都会给出一个「看起来完全合理」的错答案）：
+#   ① 年份一律用**有效拍摄年** COALESCE(shotYearOverride, shotYear)（DR-42 同源）
+#      —— 用裸 shotYear，1960 年代翻拍的老照片会被归到翻拍那年，
+#         而同一个人的时间轴（Tab1）上它在 1956-1965，同页自相矛盾且不报错；
+#   ② 一张照片里同一个人可能有**多张脸**，只算一次（DISTINCT photoCode）；
+#   ③ 抽样**只读**：不改 pb_face / pb_photo / 质心，**不写 pb_review_log**（DR-49）。
+
+#: pb_era_sample.batchCode 前缀（格式 ES_<yyyymmddHHMMSS>_<6位随机>）。
+#: 与 pb_review_log.logCode 的 RL_ 同一种生成法 —— 别让同一个项目里出现两套编码风格。
+ERA_SAMPLE_CODE_PREFIX: str = "ES"
+
+#: 取样粒度。year = 每年一张（**本期唯一实现**）；
+#: bucket = 每个年代桶一张（DR-45 明确不做，字段 grain 能装但**不写实现**）。
+ERA_SAMPLE_GRAIN_CHOICES: tuple = ("year",)
+
+#: 抽法。weighted = 按人脸质量加权（默认）；uniform = 等概率。
+ERA_SAMPLE_MODE_CHOICES: tuple = ("weighted", "uniform")
+ERA_SAMPLE_MODE_DEFAULT: str = "weighted"
+
+#: 「无拍摄年份」那一档的标签（落 pb_era_sample_item.yearLabel）。
+#: 用固定英文串而不是中文：它是**键**（itemKey = batchCode:yearLabel）。
+#: 界面显示时才翻译成「(无拍摄年份)」—— 与 bucket.py 的 ALL 兜底桶同一个道理。
+ERA_SAMPLE_NOYEAR_LABEL: str = "NOYEAR"
+
+# ---- 加权随机的三个常量（weighted 模式）----
+# 权重 = (0.5+quality) * (0.5+detScore) * (1 + AREA_K*人脸画面占比) * (人工确认 ? BOOST : 1)
+#: 人脸画面占比的放大系数。**没有它，权重高的永远是「清晰但很小」的合影小脸**。
+ERA_SAMPLE_AREA_K: float = 2.0
+#: 人工确认样本的权重加成（用户逐张核对过的最可信）
+ERA_SAMPLE_CONFIRM_BOOST: float = 2.0
+#: 权重下限：防 0 权重（否则那一年的那张**永远抽不到**，且看不出是为什么）
+ERA_SAMPLE_MIN_WEIGHT: float = 0.05
+
+#: 一次抽样最多覆盖多少年。**这是事故保险丝，不是业务上限**：
+#: 年份先过 bucket.validShotYear（可信区间 1900~2100，最多 201 个不同年份），
+#: 所以取 220 > 201 —— 正常数据**永远触发不到**它；
+#: 它拦的是「年份列被污染」或「validShotYear 被改坏」这类事故
+#: （eraSampler._selfCheck 会核对这个不等式，配小了直接抛）。
+ERA_SAMPLE_MAX_YEARS: int = 220
+
+#: zip 产物相对 exports 目录的子目录名（paths.exports_dir() / era-sample）
+ERA_SAMPLE_ZIP_SUBDIR: str = "era-sample"
+#: zip 打包的 deflate 等级。JPEG 已经压过，deflate 收益极小 ——
+#: 低等级 = 省 CPU、体积几乎不变（DR-48）。
+ERA_SAMPLE_ZIP_COMPRESS_LEVEL: int = 1
+
+
+# ============================================================
 # 四、人脸质量过滤（任一不满足即丢弃，不入 pb_face）
 # ============================================================
 

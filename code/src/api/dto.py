@@ -434,6 +434,48 @@ class FamilyBody(BaseModel):
     notes: Optional[str] = None
 
 
+class EraSampleBody(BaseModel):
+    """POST /api/persons/{personCode}/era-sample（R11 · DR-45 ~ DR-50）
+
+    **每次调用都生成一个新批次**（不覆盖旧批次）：加权随机本来就允许
+    「这次不满意，再抽一次」，覆盖掉就丢掉了用户刚看过的那一版
+    （而 zip 可能已经发出去了）。历史批次可回看、可下载。
+
+    ⚠️ 参数一律**不在 pydantic 里做区间约束**：越界会回 422，而本项目
+       「所有错误都是 {code, message} + 400/404/409」（见本文件顶部）。
+       取值合法性由 engine.sample.eraSampler 校验后映射成 400。
+    """
+
+    grain: Optional[str] = Field(
+        default=None, description="取样粒度；目前只支持 year（每年一张）。bucket 未实现")
+    mode: Optional[str] = Field(
+        default=None, description="抽法：weighted（按人脸质量加权，默认）/ uniform（等概率）")
+    seed: Optional[str] = Field(
+        default=None,
+        description="随机种子；空 = 服务端随机生成（会写库并返回）。"
+                    "同一个人 + 同样参数 + 同一个种子 = 抽出完全一样的一批")
+    yearFrom: Optional[Any] = Field(default=None, description="年份下限（含）；空 = 不限")
+    yearTo: Optional[Any] = Field(default=None, description="年份上限（含）；空 = 不限")
+    includeNoYear: bool = Field(
+        default=False, description="把「无拍摄年份」也算一档（最多 1 张，排在队列最后）")
+    onlyConfirmed: bool = Field(
+        default=False,
+        description="只取人工确认（isConfirmed=1）的样本。"
+                    "⚠️ 默认 **False**：正式库有归属的脸只有 67/3647，"
+                    "默认只取确认样本会让绝大多数人一片空白")
+    excludeDuplicate: bool = Field(default=True, description="排除 isDuplicate=1 的重复照片")
+    note: Optional[str] = Field(default=None, description="备注（落批次表，最长 200）")
+
+
+class EraSampleZipBody(BaseModel):
+    """POST /api/era-samples/{batchCode}/zip
+
+    `force=True` = 已有 zip 也重打（原图被补齐之后想重打时用）。
+    """
+
+    force: bool = Field(default=False, description="已有产物也重新打包")
+
+
 # ============================================================
 # 五、异常处理器注册（由 main/app.py 调用）
 # ============================================================
