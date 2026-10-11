@@ -95,3 +95,41 @@ export function rotatePhoto(photoCode, rotateDeg) {
 export function resetRotate(photoCode) {
   return request.post(`/photos/${encodeURIComponent(photoCode)}/rotate-reset`)
 }
+
+/* ------------------------------------------------------------
+ * 地点修正（DR-52）
+ * ------------------------------------------------------------
+ * 解决的是：某张照片的地点其实是错的（GPS 漂了、目录名只是"大概那一片"），
+ * 用户一眼能说出"这是外婆家"，而库里没有一处能记下这句话。
+ * 修正写的是 `pb_photo.placeNameOverride`（人工修正地点名），原值都不改写。
+ *
+ * 三条纪律：
+ *   ① **两段式**：`getPlaceFixImpact` 是纯读预览；`fixPlace(code, name, true)`
+ *      才落库。预览必须显示两边地点的张数变化（「纽约 98 → 97 / 华盛顿 114 → 115」）
+ *      以及 `fromBecomesEmpty`（那个地点会变成 0 张）—— 因为提交会**重建整个地点字典**。
+ *   ② **"恢复自动" = 传 null（或空串）**：显式 `{ placeName: null }`。省略字段会得到 400
+ *      （后端刻意用 exclude_unset 区分"漏传"与"恢复自动"，别把用户改的地点
+ *      因为一个漏传的字段静默清掉）。
+ *   ③ 提交后**同步重建了地点字典**（后端在响应里回 `rebuildSummary` / `rebuildElapsedMs`），
+ *      所以别忘了一句提示 + 刷新地点相关视图的缓存。
+ */
+export function getPlaceFixImpact(photoCode, placeName) {
+  const params = {}
+  // ⚠️ null / 空串 = 「预览恢复自动」，此时**不能**带 placeName 参数
+  //（带了空串会被 paramsSerializer 丢掉，等于没带 —— 两种写法结果一致，
+  //  但这里显式说清楚，免得下一个人以为"传空串"是另一种语义）
+  if (placeName !== null && placeName !== undefined && placeName !== '') {
+    params.placeName = placeName
+  }
+  return request.get(`/photos/${encodeURIComponent(photoCode)}/place-fix`, {
+    params,
+  })
+}
+
+export function fixPlace(photoCode, placeName, confirm) {
+  return request.post(
+    `/photos/${encodeURIComponent(photoCode)}/place-fix`,
+    { placeName: placeName === undefined ? null : placeName },
+    { params: { confirm: confirm ? 1 : 0 } },
+  )
+}

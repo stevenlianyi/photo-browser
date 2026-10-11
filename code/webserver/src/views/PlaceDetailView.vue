@@ -23,10 +23,11 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, MapPin, RotateCw, TriangleAlert } from 'lucide-vue-next'
+import { ArrowLeft, MapPin, Pencil, RotateCw, TriangleAlert } from 'lucide-vue-next'
 import PhotoThumb from '@/components/photo/PhotoThumb.vue'
 import PlaceMemberPicker from '@/components/common/PlaceMemberPicker.vue'
 import PlacePersonList from '@/components/common/PlacePersonList.vue'
+import PlaceRenameDialog from '@/components/common/PlaceRenameDialog.vue'
 import { getPlace, listPlacePersons, listPlacePhotos, placeDisplayName, placeRawName }
   from '@/api/place'
 import { EMPTY, formatCount, formatYear } from '@/utils/format'
@@ -126,6 +127,22 @@ async function loadPhotos({ replace = true } = {}) {
   }
 }
 
+// ---- 重命名（DR-52 · B）：只改 nameZh（显示名），placeCode / placeName 不动 ----
+/**
+ * 为什么要重取**详情 + 两个子资源**
+ * -------------------------------
+ *   `nameZh` 是**归并键**（列表里按它归并、详情里按它自动并同名的行）——
+ *   改一次名，本页的「归并 N 处」与分段下钻都可能变化；照片/在场的人也要跟着重算。
+ *   ⚠️ 它**不是**派生缓存，改完就是最终值，所以**不用** rebuild 字典，
+ *      也不需要刷新任何 store（R5 起地点视图直连 api/place.js，没有 store）。
+ */
+const renameVisible = ref(false)
+
+async function onPlaceRenamed() {
+  await loadDetail()
+  await Promise.all([loadPhotos(), loadPersons()])
+}
+
 async function loadPersons() {
   if (!placeCode.value) return
   personsLoading.value = true
@@ -193,6 +210,27 @@ const photoGroups = computed(() => {
 
 const hasMorePhotos = computed(() => photos.value.length < photoTotal.value)
 
+/**
+ * 显示名从哪来（DR-53 的 `pb_place.nameSource`）—— 一行字，只在有意义时出现。
+ *
+ * ⚠️ 为什么值得占一个位置：`manual` 与 `geo` 的**可见差别**只有一个 ——
+ *    「重建地址字典时会不会被区县名覆盖」。用户看不到这件事就只能猜，
+ *    于是「我刚改完的名字会不会被冲掉」会变成一次反复试错。
+ *    没有名字（`nameSource` 为空串且 `nameZh` 空）时不显示 —— 那时它就是
+ *    「还没算出来 / 目录名地点」，说一句废话只会稀释真正的信息。
+ */
+const nameSourceLabel = computed(() => {
+  const src = String(detail.value?.nameSource || '')
+  if (src === 'manual') return '人工命名'
+  if (src === 'geo') return '地理名'
+  return ''
+})
+const nameSourceTitle = computed(() =>
+  detail.value?.nameSource === 'manual'
+    ? '这个名字是人工定的：重建地址字典时不会被区县名覆盖（清除显示名也是人工决定）'
+    : '这个名字来自离线地理数据集（按坐标算出的区县）：清空后会被重新算出来',
+)
+
 function yearSpanOf(place) {
   const low = place?.firstShotYear
   const high = place?.lastShotYear
@@ -229,6 +267,14 @@ function yearSpanOf(place) {
 
         <h2 class="mt-1 truncate text-title text-ink" :title="placeRawName(detail) || undefined">
           {{ detail ? placeDisplayName(detail) : (detailLoading ? '正在读取…' : '地点详情') }}
+          <!-- DR-53：显示名的来源 —— 人工命名的名字**不会被重建字典覆盖**，
+               用户需要看得见这件事（否则「我改的名字会不会被冲掉」只能猜） -->
+          <span
+            v-if="nameSourceLabel"
+            class="ml-2 align-middle text-caption text-ink-weak"
+            :title="nameSourceTitle"
+            >{{ nameSourceLabel }}</span
+          >
         </h2>
 
         <p v-if="detail" class="pb-hint mt-1 flex flex-wrap items-center gap-x-2">
@@ -256,9 +302,14 @@ function yearSpanOf(place) {
         </p>
       </div>
 
-      <el-button :loading="photosLoading" aria-label="重新加载" @click="loadPhotos()">
-        <RotateCw class="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />刷新
-      </el-button>
+      <div class="flex items-center gap-2">
+        <el-button :disabled="!detail" @click="renameVisible = true">
+          <Pencil class="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />重命名
+        </el-button>
+        <el-button :loading="photosLoading" aria-label="重新加载" @click="loadPhotos()">
+          <RotateCw class="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />刷新
+        </el-button>
+      </div>
     </div>
 
     <p v-if="detailError" class="pb-card px-4 py-6 text-body text-danger-ink">
@@ -357,5 +408,12 @@ function yearSpanOf(place) {
         现在全库 3647 张脸里只有很小一部分有归属，所以这是数据现状，不是本页没做。
       </span>
     </p>
+
+    <!-- ============ 重命名（DR-52 · B）============ -->
+    <PlaceRenameDialog
+      v-model="renameVisible"
+      :place="detail"
+      @done="onPlaceRenamed"
+    />
   </div>
 </template>

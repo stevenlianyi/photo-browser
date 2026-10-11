@@ -59,6 +59,7 @@ if _SRC_DIR not in sys.path:
 
 from common import globalDefinition as comGD                      # noqa: E402
 from common import miscCommon as misc                             # noqa: E402
+from common import resourcePath as resourcePath                   # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
 from database import queryCommon as query                         # noqa: E402
 from database.auto_generated import sqliteCommon                  # noqa: E402
@@ -93,10 +94,15 @@ class EraSampleError(Exception):
 #: **老库不会因为 .txt 加了表就自动多出它**（DR-13）。手工跑过一次 E2E
 #: 就撞上了它：错误原文是 `executeWrite:no such table: pb_era_sample`，
 #: 又长又没有任何指向性。
+#:
+#: ⚠️ R10：具体命令走 `resourcePath.dbInitHint()` 的 frozen 分支 ——
+#:    打包用户**没有 Python**，原先那句 `python code\src\tools\build_db.py --migrate`
+#:    对他是废纸（照做只会得到「'python' 不是内部或外部命令」）。
 MIGRATE_HINT: str = ("pb_era_sample / pb_era_sample_item 表不存在 —— "
-                     "这是**老库还没跑建表迁移**（DR-13）。先执行一次：\n"
-                     "    python code\\src\\tools\\build_db.py --migrate\n"
-                     "（纯元数据操作，只 ADD TABLE / ADD INDEX，不动任何一行数据）")
+                     "这是**老库还没跑建表迁移**（DR-13）。\n"
+                     "    %s\n"
+                     "（纯元数据操作，只 ADD TABLE / ADD INDEX，不动任何一行数据）"
+                     % resourcePath.dbInitHint("请先执行一次建库 / 补表"))
 
 
 class EraDbError(EraSampleError):

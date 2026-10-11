@@ -43,7 +43,7 @@ from typing import Any, Generic, List, Optional, TypeVar            # noqa: E402
 
 from pydantic import BaseModel, ConfigDict, Field                   # noqa: E402
 
-_VERSION = "20261006"
+_VERSION = "20261011"
 
 ItemT = TypeVar("ItemT")
 
@@ -372,6 +372,50 @@ class RotateBody(BaseModel):
 
     rotateDeg: Any = Field(default=None,
                            description="目标角度：0 / 90 / 180 / 270（顺时针为正）")
+
+
+class PlaceFixBody(BaseModel):
+    """POST /api/photos/{photoCode}/place-fix（DR-52）
+
+    `placeName` 给值 = 人工修正这张照片的地点；**给 null = 恢复自动**
+    （回到目录名线索 / 逆地理的自动值）。
+
+    ⚠️ 为什么「恢复自动」与「修正」共用一个字段而不是两个端点：
+       它们改的是**同一列**（pb_photo.placeNameOverride），只是取值不同；
+       拆成两个端点会让前端需要自己判断"现在该调哪个"，而判断依据
+       （当前有没有 override）本来就在照片详情的响应里（placeIsOverride）。
+
+    ⚠️ 路由里用 `model_dump(exclude_unset=True)` 判"到底传没传 placeName"：
+       不传 = 参数漏了（400），传 null = 恢复自动 —— 两者都是 None，
+       只能靠字段是否在 `model_fields_set` 里区分。混在一起的话，
+       前端漏传一个字段就会**静默把用户改的地点清掉**。
+       与 ShotYearFixBody 同一条口径。
+
+    ⚠️ 不做长度/非空约束（会让 pydantic 回 422，与本项目「所有错误都是
+       {code, message} + 400」的约定冲突）：取值合法性由
+       `processor.place.placeFix.validateName` 校验后映射成 400。
+    """
+
+    placeName: Optional[str] = Field(
+        default=None,
+        description="修正后的地点名；传 null / 空串 = 恢复自动")
+
+
+class PlaceRenameBody(BaseModel):
+    """PATCH /api/places/{placeCode}（DR-52 · B 改显示名）
+
+    `nameZh` 给值 = 该地点的中文/显示名；**给 null / 空串 / 全空白 = 清除**
+    （写 NULL，界面回落到 `placeName`）。
+
+    ⚠️ 这个**只改 `pb_place.nameZh`**，绝不碰 `placeName`：
+       `placeName` 在 `REBUILD_COLUMNS` 里 -> 下轮 rebuild 会打回去；
+       而且它是 `placeCode` 的派生源（`makePlaceCode`），改了键就漂移（DR-32）。
+    ⚠️ 与 PlaceFixBody 一样不加长度约束（超长由路由校验映射成 400）。
+    """
+
+    nameZh: Optional[str] = Field(
+        default=None,
+        description="地点显示名（中文/自定义）；传 null / 空串 = 清除，回落 placeName")
 
 
 class ContactCreateBody(BaseModel):

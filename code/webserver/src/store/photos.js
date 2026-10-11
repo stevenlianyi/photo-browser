@@ -225,6 +225,48 @@ export const usePhotosStore = defineStore('photos', () => {
     if (touched) monthPhotos.value = next
   }
 
+  /**
+   * 把一张照片的**地点修正**写回本地缓存（DR-52）。
+   *
+   * 与 `setRotateDeg` 同一理由：详情页主图区 / 网格 `items` / 时间轴 `monthPhotos`
+   * 各自读一份数据；地点改完要**三处同时跟手**，且必须**按 photoCode 命中才改**
+   * ——写成"无条件改当前值"的话，改完一张按 → 翻到下一张，下一张也会显示成
+   * 刚改的那个地点（刷新一下就好，所以极易漏测）。
+   *
+   * ⚠️ 这里写进去的 `placeZh` 由调用方从接口响应里带过来（服务端按 nameZh 映射
+   *    算出的中文名）。本地**算不出来**，所以别在这里"猜一个"——
+   *    猜错的表现是「网格里显示中文、点进去显示英文」。
+   */
+  function setPlaceOverride(photoCode, fields) {
+    const code = String(photoCode || '')
+    if (!code) return
+    const patch = {
+      placeName: fields?.placeName ?? null,
+      placeZh: fields?.placeZh ?? null,
+      placeIsOverride: Boolean(fields?.placeIsOverride),
+      // 自动值只在"取消了修正"时才需要重算，这里一并带上（没有就不改）
+      ...(fields?.placeAutoName !== undefined
+        ? { placeAutoName: fields.placeAutoName }
+        : {}),
+    }
+    const merge = (one) =>
+      String(one?.photoCode) === code ? { ...one, ...patch } : one
+    if (current.value && String(current.value.photoCode) === code) {
+      current.value = { ...current.value, ...patch }
+    }
+    items.value = items.value.map(merge)
+    const next = {}
+    let touched = false
+    for (const [ym, list] of Object.entries(monthPhotos.value || {})) {
+      next[ym] = (list || []).map((one) => {
+        if (String(one?.photoCode) !== code) return one
+        touched = true
+        return { ...one, ...patch }
+      })
+    }
+    if (touched) monthPhotos.value = next
+  }
+
   /** 时间轴首屏：年表（含每月计数） */
   async function fetchTimelineYears() {
     timelineLoading.value = true
@@ -360,6 +402,7 @@ export const usePhotosStore = defineStore('photos', () => {
     appendMore,
     fetchPhoto,
     setRotateDeg,
+    setPlaceOverride,
     fetchTimelineYears,
     toggleYear,
     toggleMonth,

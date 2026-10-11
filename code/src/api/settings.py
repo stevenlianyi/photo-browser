@@ -50,6 +50,7 @@ from api import dto                                                 # noqa: E402
 from common import globalDefinition as comGD                       # noqa: E402
 from common import miscCommon as misc                              # noqa: E402
 from common import paths as paths                                  # noqa: E402
+from common import resourcePath as resourcePath                    # noqa: E402
 from config import basicSettings as basicSettings                  # noqa: E402
 from database import queryCommon as query                          # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon   # noqa: E402
@@ -178,7 +179,7 @@ def getSettings():
             "equalWidth": basicSettings.BUCKET_EQUAL_WIDTH,
             "minCentroidSamples": basicSettings.MIN_CENTROID_SAMPLES,
             "centroidConfirmedOnly": bool(basicSettings.CENTROID_CONFIRMED_ONLY),
-            "batchSize": int(basicSettings.BATCH_SIZE),
+            "batchSize": int(basicSettings.batchSize()),
             "serverPort": int(basicSettings.SERVER_PORT),
         },
         "centroids": _centroidOverview(),
@@ -440,6 +441,25 @@ def listBackups(limit: int = 20) -> list:
     return items
 
 
+def backupCommands() -> dict:
+    """备份 / 恢复 / 列清单的**可执行**命令（R10：分冻结与源码两套）。
+
+    ⚠️ 冻结产物里 `python code/src/tools/backup.py` 是**无效指引**：
+       打包用户没有 Python，也没有那份源码。必须给 exe 自己的子命令。
+    """
+    if resourcePath.isFrozen():
+        return {
+            "backup": resourcePath.programCommand("--backup"),
+            "restore": resourcePath.programCommand("--restore", "<备份编号>"),
+            "list": resourcePath.programCommand("--list-backups"),
+        }
+    return {
+        "backup": "python code/src/tools/backup.py backup",
+        "restore": "python code/src/tools/backup.py restore --code <备份编号>",
+        "list": "python code/src/tools/backup.py list",
+    }
+
+
 @router.get("/settings/backups", summary="已有备份清单（备份/恢复本身走命令行）")
 def getBackups(limit: int = Query(default=20, ge=1, le=200)):
     """只读。返回备份根目录与各备份的清单。
@@ -450,15 +470,15 @@ def getBackups(limit: int = Query(default=20, ge=1, le=200)):
     root = paths.backup_root()
     items = listBackups(limit)
     return {"ok": True, "root": root, "total": len(items), "items": items,
-            "commands": {
-                "backup": "python code/src/tools/backup.py backup",
-                "restore": "python code/src/tools/backup.py restore --code <备份编号>",
-                "list": "python code/src/tools/backup.py list",
-            },
+            "commands": backupCommands(),
             "notes": [
                 "备份 = 停服务 → 拷贝 db\\ 与 thumb\\，**不拷贝 photo\\**（原图不动）。",
                 "恢复会覆盖现有 db\\ 与 thumb\\；恢复前脚本会自动把现状另存一份。",
-                "thumb\\ 是生成物，恢复后如与库不一致，可用 gen_thumbs.py 重建。",
+                # ⚠️ R10：冻结产物里没有 gen_thumbs.py 可跑，给 exe 子命令
+                #    （`--gen-thumbs` 是本步为打包用户新开的转发入口）
+                ("thumb 是生成物，恢复后如与库不一致，用 `%s` 重建。"
+                 % (resourcePath.programCommand("--gen-thumbs") if resourcePath.isFrozen()
+                    else "python code/src/tools/gen_thumbs.py gen")),
             ]}
 
 

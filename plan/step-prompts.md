@@ -8,15 +8,17 @@
 
 ---
 
-## 当前状态（2026-10-09）
+## 当前状态（2026-10-11）
 
 | 部分 | 范围 | 状态 |
 |---|---|---|
-| 第一部分 | 修正步骤 R 系列（R / R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 / R9 / R10） | 10 项已完成，**R9、R10 待做** |
+| 第一部分 | 修正步骤 R 系列（R / R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 / R9 / R10 / R11 / R12） | 13 项已完成；**待做 1 项：R10（打包分发）** |
 | 第二部分 | 主线 12 步 | ✅ 全部完成（2026-10-07） |
 | 第三部分 | 附录 A/B/C | 状态表 / 输出格式 / **待办** |
 
-**下一步**：R9（照片旋转）→ **R10（打包分发）** → M4 一周自测 → 补 R2 的验收证据。详见 **附录 C**。
+**下一步**：**只剩 R10（打包分发）** → M4 一周自测 → 补 R2 的验收证据。详见 **附录 C**。
+（R9 照片旋转、R11 年代抽样、**R12 地点修正**均已完成；R11 的规划见 `plan/年代抽样规划.md`；R12 的决策见 DR-52/53，
+**其中 `nameSource` 已按严格版落地** —— 见 R12 一节末尾的「✅ 落地补记（R12-D）」）
 
 ---
 
@@ -34,8 +36,10 @@
 - R6 · 照片详情左右翻页（A 档 · DR-31）
 - R7 · 人物头像（卡片显示照片 + 样本设默认 · DR-40/41）
 - R8 · 照片年代修正（人工修正拍摄年 · DR-42）
-- R9 · 照片旋转
-- R10 · 打包分发（Windows exe / 安装包）（左右转 90°）
+- R9 · 照片旋转（左右转 90°）
+- R10 · 打包分发（Windows exe / 安装包）
+- R11 · 年代抽样（每年一张 · DR-45~DR-51，拆 R11a/b/c）
+- R12 · 地点修正（单张照片 + 地点显示名 + `nameSource` 严格版 · DR-52/53）
 
 **二、主线 12 步（已完成留档）**
 
@@ -2424,19 +2428,23 @@ export function resetRotate(photoCode) { ... }
 ④ 双击快捷方式 → 起服务 → 自动开浏览器
 
 ## 前置
-- R9 已完成（打包不依赖它，但别在它未验收时同时改）
-- 本机 Python **3.13.14 AMD64**；`code/.venv` 依赖已装齐
+- **R9（照片旋转）、R11（年代抽样，DR-45~DR-51）均已完成** —— 打包不依赖它们，但基线数字按它们之后的状态
+- 本机 Python **3.13.12 AMD64**；`code/.venv` 依赖已装齐（**实测 15 个关键依赖全部可导入**）
+- **数据库 12 张表**（R11 新增 `pb_era_sample` / `pb_era_sample_item`），
+  DDL 定义在 `code/src/database/pb_*.txt`（**12 个文件**）
+- 测试基线：`pytest code/src/test -q` = **1409 passed / 2 skipped / 1 xfailed**（实测 2026-10-11）
 - **实测体积（开工前自己复核一遍，这几个数字决定了后面所有取舍）**：
   - `code/.venv` = **498.7 MB / 13598 文件**
   - 体积大户：cv2 **112** / scipy **108.5**(+`scipy.libs` 19.3) / onnxruntime **43.9** /
     numpy **30.8**(+`numpy.libs` 20.2) / skimage **23.1** / onnx **21.6** / PIL 15.3 /
     networkx 15.2 / pip 10 / pygments 8.1 / reverse_geocoder 7.5 / insightface 5.8
   - InsightFace 模型 `~/.insightface/models/buffalo_l/` = **325.5 MB**（5 个 onnx）
-  - 前端 `code/webserver/dist` = **0.99 MB / 57 文件**
+  - 前端 `code/webserver/dist` = **1.01 MB / 57 文件**（R11 后已重新构建，含 `eraSample` 代码）
   - `code/src/data/china_district.json.gz` = **5.74 MB**
   - ⇒ **安装后磁盘占用预估 780–850 MB；安装包（LZMA2）预估 550–700 MB**
+    （R11 **没有引入新依赖、没有新增数据文件**，所以这个预估不变）
 
-## ⚠️ 必读：五个「不做就必炸」的点（每一条都有实测证据）
+## ⚠️ 必读：六个「不做就必炸」的点（每一条都有实测证据）
 
 ### ① 必须 `--onedir`，**禁止 `--onefile`**
 代码里有**多进程 spawn**：
@@ -2489,6 +2497,34 @@ def defaultModelRoot():
 **完全不读环境变量、不读 INI**。
 冻结后用户在界面上**没有任何办法**改掉默认的 `d:\PhotoLib` —— 本步必须解决。
 
+### ⑥ ⭐ 打包后必须能「建库 / 补表」（**R11 暴露出的真缺口，本步最容易被漏掉的一条**）
+
+**现状是：打包后用户根本建不了库。**
+- `tools/serve.py:211` 体检发现 `pb_photo` 缺表时，提示的是
+  「首次使用请先跑一次建库+扫描：`python code\src\tools\build_db.py`」
+  —— **打包用户没有 Python，这条指引完全无效**
+- `main/app.py:151-154` 同样给的是「先跑 `tools\build_db.py` 与 `tools\scan_cli.py`」
+- 而 **R11 新增了 `pb_era_sample` / `pb_era_sample_item` 两张表** ⇒
+  **老库从旧版升级上来必须补建这两张表**，否则「年代抽样」直接不可用。
+  R11 自己把这种情况做成了可读提示（`EraDbError` / `MIGRATE_HINT`），
+  但那个提示让用户去跑 CLI —— **打包环境下同样跑不了**
+
+**好消息：能力已经有了，只是没暴露到 exe 上**
+- `main/cli.py:53-72` 已有「库/表不存在就建（幂等，走 `tools.build_db`，本文件不写一条 DDL）」
+- `tools/build_db.py` 本身**幂等**，且有 `--migrate`（「比对本表在 `.txt` 里的列与库里的实际列，**只补缺的**」）
+
+**本步要求**：
+1. `appLauncher.py`（新入口）在启动前**自动建库 / 补表**：复用 `main/cli.py` 那段逻辑
+   （`chkTableExist("pb_photo")` → `build_db.build()`）。**幂等，所以每次启动都跑是安全的**
+2. 提供 `photo-browser.exe --init-db`（或界面「初始化 / 修复数据库」入口）作为显式兜底，
+   供「自动建表失败 / 需要人工确认」的场景
+3. ⚠️ 把 `serve.py` / `app.py` 里那两句「跑 `python code\src\tools\build_db.py`」改成 **frozen 分支**：
+   冻结时提示「跑 `photo-browser.exe --init-db`」或指向界面按钮，
+   **绝不要给一条用户执行不了的命令**
+4. ⚠️ **`code/src/database/pb_*.txt`（12 个）必须进 `datas`** ——
+   `database/sqliteCodeGenerator.py:467` 是 `open(fileName, "r", encoding="utf-8")`，
+   **运行期读文件**；不打包就**没有 DDL**，建库与 `--migrate` 全部失效（详见 §4.3）
+
 ## 一、方案选型（已定，别换）
 
 | 环节 | 选型 | 理由 |
@@ -2515,7 +2551,8 @@ def defaultModelRoot():
 ├── photo\                        ← 用户照片（只读；**卸载绝不删**）
 │                                   ⚠️ 照片必须放在 <photo_root>\photo\ —— photo_dir 是派生的，不可单独配
 ├── thumb\                        ← 缩略图 / 人脸裁剪图（**卸载绝不删**）
-├── db\                           ← SQLite 库 + imports/exports（**卸载绝不删**）
+├── db\                           ← SQLite 库（**12 张 pb_* 表**）+ imports/exports（**卸载绝不删**）
+│                                   ⚠️ R11 的 zip 导出落 `db\exports\era-sample\`（DR-48），一并保留
 ├── backup\                       ← 备份根（tools/backup.py 用）
 ├── app\                          ← ★ 程序本体
 │   ├── photo-browser.exe
@@ -2589,7 +2626,7 @@ batch_size = 100
 |---|---|
 | `code/src/common/resourcePath.py` | 冻结感知的资源路径**唯一出口**（`_MEIPASS` / exe 目录 / 源码目录三态） |
 | `code/src/config/appIni.py` | 外置 INI 读取 + 首次自动生成 |
-| `code/src/tools/appLauncher.py` | **新的唯一 exe 入口**：`freeze_support()` → 读 INI → 起 serve → 按需开浏览器 |
+| `code/src/tools/appLauncher.py` | **新的唯一 exe 入口**：`freeze_support()` → 读 INI → **自动建库/补表（见 §⑥）** → 起 serve → 按需开浏览器；并支持 `--init-db` 子命令 |
 | `build/photo-browser.spec` | PyInstaller spec（datas / hiddenimports / excludes） |
 | `build/installer.iss` | Inno Setup 脚本 |
 | `build/package.ps1` | 一键打包 |
@@ -2599,7 +2636,10 @@ batch_size = 100
 | 文件:行 | 改什么 |
 |---|---|
 | `main/app.py:85` | `_WEB_DIST` 改走 `resourcePath`；顺序 `<app>\web` → `_MEIPASS\web` → 源码 `webserver/dist` |
+| `main/app.py:151-154` | 缺表时的提示改成 **frozen 分支**（`--init-db`），**不要给「跑 python build_db.py」** |
 | `src/tools/serve.py:60-72` | 相对目录推导改走 `resourcePath`；`open_browser=1` 时 `webbrowser.open` |
+| `src/tools/serve.py:195-196` | 同上：那句「`python code\src\tools\build_db.py`」在冻结后是**无效指引** |
+| `main/cli.py:53-72` | 把「缺表就建」这段抽成可复用函数，供 `appLauncher.py` 调用（**别复制粘贴**） |
 | `engine/face/engine.py:1060-1063` | `defaultModelRoot()` 改三段回退（随包 → 用户主目录 → 下载） |
 | `common/paths.py:93-105` | `readSetting()` 加 `app.ini` 层（优先级最高） |
 | 主入口 | 加 `multiprocessing.freeze_support()`（**第一行**） |
@@ -2608,10 +2648,11 @@ batch_size = 100
 ### 4.3 PyInstaller spec 要点
 ```python
 datas = [
-    ('code/webserver/dist', 'web'),                      # 前端
-    ('code/src/data/china_district.json.gz', 'data'),     # 区县边界（5.74MB）
-    ('code/data/meanshape_68.npz', 'data'),               # 人脸形状（1.4KB）
-    ('models/buffalo_l', 'models/buffalo_l'),             # 模型（325.5MB）
+    ('code/webserver/dist', 'web'),                       # 前端
+    ('code/src/database', 'database'),                     # ★ 12 个 pb_*.txt：建库/--migrate 运行期要读
+    ('code/src/data/china_district.json.gz', 'data'),      # 区县边界（5.74MB）
+    ('code/data/meanshape_68.npz', 'data'),                # 人脸形状（1.4KB）
+    ('models/buffalo_l', 'models/buffalo_l'),              # 模型（325.5MB）
 ]
 hiddenimports = [
     'uvicorn.logging', 'uvicorn.loops.auto',
@@ -2619,16 +2660,26 @@ hiddenimports = [
     'uvicorn.lifespan.on',
     'engine.face.pool',            # ⚠️ spawn 子进程按名字 import，必须显式列
     'processor.scanner.runner',
+    # R11 新增（api.eraSample 在 app.py:56 是显式 import，静态可发现；
+    # 下面两个是保险，靠懒 import 时 PyInstaller 会漏）
+    'engine.sample.eraSampler', 'processor.media.eraPack',
     'onnxruntime', 'cv2', 'shapely', 'insightface',
 ]
 excludes = ['pip', '_pytest', 'pytest', 'pygments', 'tkinter',
             'matplotlib', 'IPython', 'notebook']
 ```
+- ⚠️ **`code/src/database/pb_*.txt`（12 个）必须收进来** ——
+  `database/sqliteCodeGenerator.py:467` 用 `open(fileName, "r", encoding="utf-8")` **运行期读**，
+  少了它**建库与 `--migrate` 全部失效**（§⑥ 的自动建库会直接崩）
 - ⚠️ **被 spawn 的子进程模块必须进 `hiddenimports`** ——
   `schedule/faceScheduler.py:117-119` 的注释已经踩过这个坑
   （「子进程是在 multiprocessing 里 spawn 出来的，缺依赖时它们在 `_queueWorkerLoop` 第一行就 ModuleNotFoundError」）
+- ⚠️ **通则：所有在函数内部懒 import 的模块都要显式列进 `hiddenimports`** ——
+  PyInstaller 静态分析只看顶层 import；本仓库大量用「函数内 import 做可选依赖降级」
+  （`common/pinyin.py:79`、`processor/scanner/meta.py:411`、`processor/place/placeNameZh.py:330/373`、
+  `engine/face/engine.py:543/749`、`engine/cluster/dbscan.py:308`），逐个核实
 - ⚠️ `reverse_geocoder` 的 `rg_cities1000.csv`（7.49MB）要用 `collect_data_files` 收进来
-- ⚠️ `onnxruntime\capi\*.dll`、`cv2.pyd`(81.87MB)、`shapely` 的 GEOS 必须被 hooks 正确收集
+- ⚠️ `onnxruntime\capi\*.dll`、`cv2.pyd`（81.87MB）、`shapely` 的 GEOS 必须被 hooks 正确收集
 - ⚠️ **先全量打包跑通，再逐项 `excludes` 瘦身**。
   `scipy(127.8MB)` / `skimage(23.1MB)` / `networkx(15.2MB)` 是 insightface 的传递依赖，
   **裁剪有风险**（`insightface.app` 可能 import scipy）—— 每剪一项都要重跑 §五 第 6 条
@@ -2718,53 +2769,68 @@ end;
 ### B. 冻结后功能
 4. 把 `dist\photo-browser\` 拷到**不含空格与中文**的路径，双击 exe →
    浏览器自动打开，`/api/health` 200
-5. **前端能出来**（不是 404、不是白屏）：首页 / 照片流 / 人物库 / 地点 / 待确认队列 各点一遍
+5. **前端能出来**（不是 404、不是白屏）：首页 / 照片流 / 人物库 / 地点 / 待确认队列 /
+   **人物详情第三个 Tab「年代抽样」（R11）** 各点一遍
    —— 专治 §③ 的「`/api/health` 200 但前端 404」静默失败
-6. ⭐ **人脸提取能跑**（本步最关键的验收，一次同时验证 spawn + hiddenimports + 模型路径）：
-   对 **10 张照片**跑一次提取 → 生成 `pb_face` 行 → **无子进程 ModuleNotFoundError**。贴行数
-7. **缩略图批量生成能跑**（专治 `ProcessPoolExecutor`）：`gen_thumbs` 对 50 张跑通
-8. ⭐ **模型确实走随包**：**断网** + 把 `%USERPROFILE%\.insightface` **改名**
-   → 人脸提取仍跑通 ⇒ 证明没在联网下载
-9. 外置配置生效：改 `app.ini` 的 `photo_root` 到另一个目录 → 重启后界面数据跟着变
-10. `app.ini` 不存在时**自动生成**且带注释；其中 `photo_root` = **实际安装目录**（不是写死的 `d:\PhotoLib`）
-11. **可写性检查**（§3.2）：把 `photo_root` 指到一个**只读目录** → 启动时给**可读提示 + 指出 `app.ini` 完整路径**，
+6. ⭐ **空白目录自动建库（§⑥ 的核心验收）**：
+   把 `photo_root` 指向一个**全新的空目录** → 启动 exe →
+   `db\photolib.db` 被自动创建，且 `pb_*` 表**恰好 12 张**（含 R11 的 `pb_era_sample` /
+   `pb_era_sample_item`）。贴 `sqlite_master` 的表清单
+   —— 少了 `database\pb_*.txt` 打不进包，这一条会直接失败
+7. ⭐ **`--init-db` 兜底可用**：删掉 `db\photolib.db` → 跑 `photo-browser.exe --init-db` → 表全部重建
+8. ⭐ **升级补表（R11 场景）**：拿一个**只有 10 张表**的旧库（R11 之前） →
+   启动新版 exe → 自动补建 `pb_era_sample` / `pb_era_sample_item`，
+   且**旧数据一行不少**（贴补表前后的表数与人脸行数）
+9. ⭐ **缺表时的提示是可执行的**：故意用一个空库 + 关掉自动建库 →
+   界面/日志给出的指引必须是 `photo-browser.exe --init-db` 之类，
+   **不许出现「跑 python code\src\tools\build_db.py」**（用户没有 Python）
+10. ⭐ **人脸提取能跑**（一次同时验证 spawn + hiddenimports + 模型路径）：
+    对 **10 张照片**跑一次提取 → 生成 `pb_face` 行 → **无子进程 ModuleNotFoundError**。贴行数
+11. **缩略图批量生成能跑**（专治 `ProcessPoolExecutor`）：`gen_thumbs` 对 50 张跑通
+12. ⭐ **模型确实走随包**：**断网** + 把 `%USERPROFILE%\.insightface` **改名**
+    → 人脸提取仍跑通 ⇒ 证明没在联网下载
+13. **年代抽样（R11）端到端**：在人物详情 Tab3 生成一批 → 拿到 zip →
+    确认落在 `<photo_root>\db\exports\era-sample\`（DR-48），且 `pb_era_sample` 有行
+14. 外置配置生效：改 `app.ini` 的 `photo_root` 到另一个目录 → 重启后界面数据跟着变
+15. `app.ini` 不存在时**自动生成**且带注释；其中 `photo_root` = **实际安装目录**（不是写死的 `d:\PhotoLib`）
+16. **可写性检查**（§3.2）：把 `photo_root` 指到一个**只读目录** → 启动时给**可读提示 + 指出 `app.ini` 完整路径**，
     不是抛堆栈、不是静默失败
-12. `<photo_root>\photo` 不存在或为空时 → 给**首次使用引导**（明确写出「照片要放在 `<photo_root>\photo\`」），
+17. `<photo_root>\photo` 不存在或为空时 → 给**首次使用引导**（明确写出「照片要放在 `<photo_root>\photo\`」），
     **不报错**
-13. 端口被占：先起一个占 8765 的进程 → 启动 exe 给出**可读的错误**（不是堆栈）
-14. `--onedir` 而非 onefile 的证明：`<app>\app\_internal` 存在且**启动 < 5 秒**
+18. 端口被占：先起一个占 8765 的进程 → 启动 exe 给出**可读的错误**（不是堆栈）
+19. `--onedir` 而非 onefile 的证明：`<app>\app\_internal` 存在且**启动 < 5 秒**
 
 ### C. 安装器（**本组直接对应「用户自选目录」这个需求**）
-15. 干净环境跑安装包：**「选择目标位置」页出现**，默认目录**自动填 `D:\PhotoLib`**，
+20. 干净环境跑安装包：**「选择目标位置」页出现**，默认目录**自动填 `D:\PhotoLib`**，
     用户**可以改**（改到 `E:\apps\photobrowser` 试试）
-16. ⭐ **换目录后数据跟随**：在第 15 步把安装目录改成 `E:\apps\photobrowser` →
+21. ⭐ **换目录后数据跟随**：在第 20 步把安装目录改成 `E:\apps\photobrowser` →
     装完检查 `E:\apps\photobrowser\app.ini` 里 `photo_root = E:\apps\photobrowser`，
     且 `photo/thumb/db` 都建在 `E:\apps\photobrowser\` 下
     —— **专治「程序在 E:、数据跑去 D:」这个原设计缺陷**
-17. 用 `/SILENT /DIR="E:\apps\photobrowser"` 静默安装一次，结果与第 16 步一致
-18. 安装后布局与 §二 一致（`app\` 子目录、`app.ini`、模型在 `app\models\`）
-19. **升级**：装 v0.1 → 造几张照片 + 确认一个人脸 + **手改 `app.ini`（如改端口）** → 装 v0.2 →
+22. 用 `/SILENT /DIR="E:\apps\photobrowser"` 静默安装一次，结果与第 21 步一致
+23. 安装后布局与 §二 一致（`app\` 子目录、`app.ini`、模型在 `app\models\`）
+24. **升级**：装 v0.1 → 造几张照片 + 确认一个人脸 + **手改 `app.ini`（如改端口）** → 装 v0.2 →
     ⭐ 数据**原样**（照片数、`pb_person`/`pb_face` 行数）**且手改的配置没被覆盖**
     —— 这一条专测 `[Code]` 里的 `FileExists` 判断，用 `[INI]` 段必然失败
-20. ⭐ **卸载**：卸载后 `<photo_root>\photo`、`thumb`、`db`、`backup` **全在**，
+25. ⭐ **卸载**：卸载后 `<photo_root>\photo`、`thumb`、`db`、`backup` **全在**，
     且卸载界面提示里的路径是**动态拼的**（跟着实际安装目录走），不是写死 `d:\PhotoLib`。
     —— **这是本步红线，照片库绝不能因卸载而丢**
-21. 快捷方式（开始菜单 + 桌面）指向正确，启动即开浏览器
+26. 快捷方式（开始菜单 + 桌面）指向正确，启动即开浏览器
 
 ### D. 兼容与分发
-22. **不含 Python 的机器**上验证（把 `code\.venv` 改名后测，或换一台干净机）
-23. ⭐ **把程序装到受保护目录**（如 `C:\Program Files\PhotoBrowser`）→
+27. **不含 Python 的机器**上验证（把 `code\.venv` 改名后测，或换一台干净机）
+28. ⭐ **把程序装到受保护目录**（如 `C:\Program Files\PhotoBrowser`）→
     首次运行必须给出**可读提示**并指路 `app.ini`（§3.2 第 3 条）
-24. **非管理员账户**安装与运行；权限不足时的行为要明确
-25. **路径含中文/空格**：把程序装到 `D:\我的 照片\` 测一次
-26. Windows 11 与 Windows 10（若可）各一次；确认**无 VC++ 运行库缺失弹窗**
-27. **交付说明要写清**：未签名 exe 会触发 SmartScreen「更多信息 → 仍要运行」；
+29. **非管理员账户**安装与运行；权限不足时的行为要明确
+30. **路径含中文/空格**：把程序装到 `D:\我的 照片\` 测一次
+31. Windows 11 与 Windows 10（若可）各一次；确认**无 VC++ 运行库缺失弹窗**
+32. **交付说明要写清**：未签名 exe 会触发 SmartScreen「更多信息 → 仍要运行」；
     PyInstaller 产物可能被杀软误报；静默安装用 `/DIR=` 指定路径。能签名就单列一节写成本与流程
 
 ### E. 回归
-28. `pytest code/src/test -q` 全绿（冻结改造不应破坏测试）
-29. **源码开发路径没被破坏**：`start.cmd` 仍能起服务，`local_settings.py` 仍生效
-30. `<photo_root>\photo` 的照片**文件数与总字节数全程不变**（原图零风险铁律）
+33. `pytest code/src/test -q` 全绿（基线 **1409 passed / 2 skipped / 1 xfailed**，冻结改造不应破坏测试）
+34. **源码开发路径没被破坏**：`start.cmd` 仍能起服务，`local_settings.py` 仍生效
+35. `<photo_root>\photo` 的照片**文件数与总字节数全程不变**（原图零风险铁律）
 
 ## 六、硬约束
 - **`--onedir`，禁止 `--onefile`**（spawn 多进程）
@@ -2778,6 +2844,11 @@ end;
 - ⭐ **`app.ini` 只在不存在时生成**（Inno 用 `[Code]` + `FileExists`，**不许用 `[INI]` 段**），
   否则升级会覆盖用户自定义的 `photo_root`
 - ⭐ **首次运行必须做可写性检查**，不可写时给可读提示 + 指出 `app.ini` 路径
+- ⭐ **打包后必须能建库 / 补表**（§⑥）：`appLauncher.py` 启动前自动 `build_db`（幂等），
+  并提供 `--init-db` 兜底；**缺表提示里不许出现用户执行不了的 `python xxx.py`**
+- ⭐ **`code/src/database/pb_*.txt`（12 个）必须进 `datas`** ——
+  建库与 `--migrate` 运行期要读它们（`sqliteCodeGenerator.py:467`），少了就整条链失效
+- ⭐ **懒 import 的模块必须显式进 `hiddenimports`**（本仓库大量用函数内 import 做可选依赖降级）
 - **模型随包**，路径三段回退（随包 → 用户主目录 → 下载）；**不打包那个 275MB 的 `buffalo_l.zip`**
 - **卸载绝不删 `photo` / `thumb` / `db` / `backup`**（红线），提示里的路径要**动态拼**不许写死
 - **程序放 `app\` 子目录**，与数据物理分离
@@ -2788,18 +2859,416 @@ end;
 
 ## 七、完成后必须输出
 1. 改动文件清单（新增 / 修改）
-2. 验收结果（**30 条逐条**给命令与实际输出）
+2. 验收结果（**35 条逐条**给命令与实际输出）
 3. **产物体积实测表**（onedir 目录 MB、安装包 MB、其中模型占比）
-4. ⭐ **第 6 条人脸提取的实测证据**（10 张 → `pb_face` 行数 + 无子进程报错）
-5. ⭐ **第 8 条「断网 + 改走模型目录」的证明**
-6. ⭐ **第 16 条「换安装目录后数据跟随」的证明**（`E:\apps\...` 下 `app.ini` 与 `photo/thumb/db` 的目录树）
-7. ⭐ **第 19 条升级不覆盖 `app.ini` 的证明**（手改的配置升级后还在）
-8. ⭐ **第 20 条卸载前后 `<photo_root>` 的目录树对照**（证明照片库没被删）
-9. `build\package.ps1` 一次完整运行日志
-10. 遗留问题与需要我决策的点
+4. ⭐ **第 6 条「空白目录自动建库」的证明**（贴 `sqlite_master` 的 12 张表清单）
+5. ⭐ **第 8 条「旧 10 张表库升级补建 R11 两表」的证明**（补表前后表数 + 人脸行数不变）
+6. ⭐ **第 9 条「缺表提示可执行」的证明**（贴提示原文，确认不含 `python xxx.py`）
+7. ⭐ **第 10 条人脸提取的实测证据**（10 张 → `pb_face` 行数 + 无子进程报错）
+8. ⭐ **第 12 条「断网 + 改走模型目录」的证明**
+9. ⭐ **第 21 条「换安装目录后数据跟随」的证明**（`E:\apps\...` 下 `app.ini` 与 `photo/thumb/db` 目录树）
+10. ⭐ **第 24 条升级不覆盖 `app.ini` 的证明**（手改的配置升级后还在）
+11. ⭐ **第 25 条卸载前后 `<photo_root>` 的目录树对照**（证明照片库没被删）
+12. `build\package.ps1` 一次完整运行日志
+13. 遗留问题与需要我决策的点
     （特别是：**要不要代码签名**、**要不要把模型拆成可选下载包以减小安装包**、
     **要不要在安装向导里增加一页「照片库位置」**）
 ````
+
+---
+
+## 修正步骤 R12 · 地点修正（单张照片 + 地点显示名）—— ✅ 已完成，`nameSource` 见末尾落地补记
+
+> **什么时候做**：随时。**与 R10（打包）互不相干** —— 本步只碰地点派生口径与两个写接口。
+> **形态已定**（用户三问三答）：**A+B 都做**、**改完自动触发 `rebuildPlaces()`**、**不做批量**。
+> **核心判断**：地点的"派生口径"只有一个出口（`placeStore` 的聚合键），
+> 所以 A 的关键**不是加字段，而是保证三条"不许碰它"的纪律**。
+
+````text
+【photo-browser · 修正步骤 R12 · 地点修正】
+
+## 目标
+① **A · 单张照片地点修正**：照片详情页「地点」栏加「修正」按钮 —— 把某张照片的地点改成
+   另一个地点 / 自由输入新名字 / 清空回自动（照「拍摄年代修正」的形态）
+② **B · 地点显示名**：地点详情页支持重命名（改 `pb_place.nameZh`）
+③ 改完**自动触发 `rebuildPlaces()`**，让地点列表计数立刻准（用户明确要求）
+④ **不做批量**（用户明确）
+
+## 前置（已核实，请自己再确认一遍）
+- R5 已完成（`api/place.py` 937 行 / `PlacesView` / `PlaceDetailView` / `PersonPlaces`）
+- R9 已完成（`pb_photo.rotateDeg` 已在 `pb_photo.txt` 第 11 行）
+- 库现状：`pb_photo` **35694** 行 / `pb_place` **181** 个有效地点 / `pb_photo_person` 14646 行
+- 测试基线：`pytest code/src/test -q` = **1409 passed / 2 skipped / 1 xfailed**
+
+## ⚠️ 必读：这是**两件事**，改造面差一个量级，别合并成一次改动
+
+| | **A · 改这张照片的地点** | **B · 改一个地点的显示名** |
+|---|---|---|
+| 粒度 | 单张照片 | 该地点下**所有**照片 |
+| 需要新字段吗 | **需要**（`pb_photo` 加一列） | **不需要**（`pb_place.nameZh` 已预留） |
+| 存哪儿 | `pb_photo.placeNameOverride` | `pb_place.nameZh`（**rebuild 绝不覆盖**，DR-28） |
+| 主要风险 | 被**重扫 / rebuild / 目录名填空**冲掉 | 它是**归并键 + 筛选键**，改名有连带 |
+| 要不要 rebuild | **要**（`photoCount` 是派生缓存） | **不要**（`nameZh` 不在复算列里） |
+
+---
+
+## 一、A · 单张照片地点修正
+
+### 1.1 数据层（一处新增）
+在 `code/src/database/pb_photo.txt` 的 **`placeNameDir`（第 18 行）之后**加一行：
+```
+placeNameOverride VARCHAR(128) NULL COMMENT '人工修正地点名 聚合键最优先 空=未修正 (DR-52)'
+```
+**迁移不用手写脚本** —— `tools/build_db.py` 已有「缺列 → `ALTER TABLE ADD COLUMN`」：
+```powershell
+code\.venv\Scripts\python.exe src\tools\build_db.py
+```
+
+### 1.2 ⭐ 唯一出口：聚合键改成**三段优先级**（本步的核心，只改一处、影响一片）
+
+现状（`code/src/processor/place/placeStore.py`）：
+```python
+PLACE_KEY_SQL = "COALESCE(NULLIF(%s.placeNameDir, ''), %s.placeName)"   # L148
+def placeKeySql(alias="p"): ...                                          # L151  SQL 口径
+def placeKeyOf(placeName, placeNameDir): ...                             # L157  Python 口径
+```
+改为 **`placeNameOverride > placeNameDir > placeName`**，三处**必须同步改**（它们本来就是
+"同一把键的两个口径"，L138-146 的注释写明了原因）：
+
+| 要改的地方 | 说明 |
+|---|---|
+| `PLACE_KEY_SQL`（L148） | SQL 口径 |
+| `placeKeySql(alias)`（L151） | 若你选择在函数体内拼 SQL，改这里就够 |
+| `placeKeyOf(...)`（L157） | ⚠️ **签名要加第三个参数** `placeNameOverride`，调用点必须逐个补 |
+
+⚠️ **`placeKeyOf` 的 Python 口径调用点只有一处**：`api/browse.py:244`（照片摘要）。
+另外 `placeStore.py:745` 的自检打印也要补。**别漏**，否则「接口返回的地点」与
+「聚合/筛选用的地点」会不一致（接口 200、字段在、值不对 —— 最难查的那类）。
+
+**SQL 口径改了之后，下面这些地方自动跟着变**（这既是"只改一处"的好处，
+也意味着**每一处都要回归**）：
+
+| 消费点 | 作用 |
+|---|---|
+| `placeStore.py:251` | `rebuildPlaces()` 的 `GROUP BY` |
+| `placeStore.py:496` | `resolvePlaceFilter()`（筛选） |
+| `placeStore.py:605` | 库为空时的**降级实时聚合**路径 |
+| `api/place.py:306` | `_keyFilter()`（地点筛选） |
+| `api/place.py:431/436`、`458/461`、`485` | 地点列表 / 年份聚合 |
+| `api/browse.py:1437` | `placeKeySql("pp")` |
+| `api/browse.py:244` | 照片摘要（**唯一 Python 口径调用点**） |
+
+### 1.3 ⚠️ 三条「不许碰它」的纪律（**本步最关键，每条都要有测试钉住**）
+
+用户改完地点，如果下一次重扫 / 重建 / 扫描收尾把它冲掉，**而且不报错**，
+那就是最难发现的一类退化。**参照物**：`placeNameDir`（R4b）与 `rotateDeg`（R9）
+之所以安全，就是**同时**避开了这三处：
+
+| 禁区 | 锚点 | 加了会怎样 |
+|---|---|---|
+| ❌ **重扫白名单** | `processor/scanner/runner.py:86` 的 `_META_FULL_COLUMNS`（**已含 `placeName`**）、`runner.py:470` 的 `_metaColumns()` | 重扫一次把用户改的地点**全部清零** |
+| ❌ **rebuild 复算列** | `placeStore.py:100` 的 `REBUILD_COLUMNS`（**已含 `placeName`**） | 每轮 `POST /api/places/rebuild` 覆盖 |
+| ❌ **目录名填空** | `processor/place/dirNamePlace.py` 的 `scanDirNames()`（只填空不覆盖） | 扫描 DONE 的自动收尾（`placeFinalize`）覆盖 |
+
+✅ **本步 `runner.py` 应当零改动** —— 正因为不加进去，才安全。
+请在报告里给出 `runner.py` 的 `git diff` 为**空**。
+
+### 1.4 后端：新建 `code/src/processor/place/placeFix.py`
+放 `processor/place/` 包内（与 `placeStore.py` 同包 —— 它要用 `placeKeyOf` / `makePlaceCode`）；
+**结构照 `processor/photoTimeFix.py`**，但**比它简单**：
+
+```python
+class PlaceFixError(Exception): ...
+
+def previewFix(photoCode, placeName=None) -> dict:   # 纯读，一行不写；None = 预览「恢复自动」
+def applyFix(photoCode, placeName=None) -> dict:     # 落库 + 自动 rebuildPlaces()
+```
+
+**预览（影响面）要返回这些字段**（比年代的"逐人换桶"简单）：
+```json
+{
+  "photoCode": "PH_...",
+  "changed": true,
+  "current":  { "placeKey": "纽约",   "nameZh": null, "source": "override|dir|gps" },
+  "target":   { "placeKey": "华盛顿", "nameZh": null, "exists": true, "photoCount": 114 },
+  "autoPlaceKey": "纽约",
+  "counts": {
+    "from": { "placeKey": "纽约",   "photoCount": 98,  "after": 97 },
+    "to":   { "placeKey": "华盛顿", "photoCount": 114, "after": 115 }
+  },
+  "fromBecomesEmpty": false
+}
+```
+- `current.source` 三态：`override`（人工改过）/ `dir`（目录名）/ `gps`（逆地理）
+- `autoPlaceKey` = 清空 override 后会回到哪里（前端要显示「自动：纽约」）
+- `to.exists=false` + `photoCount=0` 表示这会**新建一个地点行**
+
+### 1.5 ⭐ 自动触发 rebuild（**用户明确要求**）
+`applyFix()` 落库后**立即调 `placeStore.rebuildPlaces()`**。
+
+- **为什么必须**：`pb_place.photoCount` 是**派生缓存**（`placeStore.py:22-26` 注释明说
+  "派生缓存，不是真值"），只由 `rebuildPlaces()` 复算；单张改动不会自动更新。
+  不 rebuild 就会出现「照片详情说华盛顿、地点列表说纽约 98 张」的不一致。
+- ⚠️ `rebuildPlaces()` 是**全量复算**（一条 `GROUP BY` 扫 `pb_photo` 全表）。
+  本库 **35694 张**，**请在报告里给出实测耗时（毫秒）**。
+  若 > 2 秒，前端提交时要显示「正在重建地点字典…」的 loading 文案。
+- ⚠️ **幂等**：重复调安全（`POST /api/places/rebuild` 已有幂等用例）。
+- 返回体里带 `rebuildSummary`（`created` / `updated` / `zeroed`），让调用方看得见影响。
+- ⚠️ **不要"异步后台 rebuild"** —— 本步保持同步，让「提交后立刻正确」成为可验收的性质。
+
+### 1.6 端点 → 加进 `code/src/api/photoAction.py`（**不要碰 browse.py**）
+照 `shot-year-fix`（**L188 / L209**）的两段式：
+```python
+GET  /api/photos/{photoCode}/place-fix?placeName=华盛顿   # placeName 省略 = 预览「恢复自动」
+POST /api/photos/{photoCode}/place-fix?confirm=1  body: {"placeName": "华盛顿"}
+```
+- ⚠️ 用 `body.model_dump(exclude_unset=True)` **区分「没传」与「传 null」**
+  （照 L228-232 的既有写法 —— 这是「恢复自动」与「不改」的分界）
+- **空字符串 / `null` = 恢复自动**（把 `placeNameOverride` 写回 NULL）
+- 非法值（长度 > 128、只有空白字符）→ `dto.ApiError(dto.CODE_PARAM_INVALID, ...)`
+- 返回 `dto.okBody(executed=True, **result)`；更新文件头 `_VERSION`（当前 **`"20261009"`**，L66）
+- ⚠️ **不落 `pb_review_log`**（DR-49 纪律：日志是「归属纠错排障链」专用；
+  地点修改**不改变任何识别事实** —— 不动 bbox / 质心 / shotBucket / 归属 / faceCount）
+- ⚠️ **不做额外确认层级**：地点修改**完全可逆**（改回去 / 清空即可），
+  不像软删那样需要两段式以外的东西
+
+### 1.7 DTO 透出（**别多改，但也别漏**）
+- ✅ **`placeName` 不用动** —— 它是 `browse.py:244` 调 `placeKeyOf()` **算出来的**，
+  §1.2 的唯一出口改完，它**自然就是修正后的值**。
+- 但要**额外透出两个字段**（前端要用）：
+  | 字段 | 含义 | 用在哪 |
+  |---|---|---|
+  | `placeAutoName` | 未修正时的自动值（`placeKeyOf(..., override=None)`） | 弹窗显示「自动：纽约」 |
+  | `placeIsOverride` | `bool(placeNameOverride)` | 决定「恢复自动」按钮是否出现 |
+- 出现位置：`api/browse.py` 的 `photoSummary()`（**L197 附近**）与**照片详情装配**；
+  以及 `api/place.py` 的地点照片流 SELECT（**L832-837 附近**）。
+  ⚠️ 逐个核对，漏一处就是「照片流里对了、地点详情里不对」的静默不一致。
+
+### 1.8 前端（A）
+- **入口**：`views/PhotoDetailView.vue` 的「地点」行（**L1263-1264**）旁加「修正」按钮，
+  **与「拍摄年代」行（L1242）同一个版式**（`<el-button size="small" text>`）。
+- **新组件** `components/photo/PlaceFixDialog.vue`，**结构照 `ShotYearFixDialog.vue`（9206 字节）**：
+  1. 顶部：当前地点 + （`placeIsOverride` 时）一行「自动：纽约」
+  2. **候选下拉**：`GET /api/places?groupByNameZh=1` 取列表，**显示中文名 + 张数，按张数倒序**
+  3. **自由输入**：允许输入不在列表里的新地点名（这是「外婆家」类场景，必须有）
+  4. **「恢复自动」**：仅 `placeIsOverride` 时出现，点了写 null
+  5. 影响面：`纽约 98 → 97` / `华盛顿 114 → 115`；`fromBecomesEmpty` 时提示「该地点将变为 0 张」
+  6. 提交按钮 `disabled = !preview.changed`
+- `api/photoAction.js` 加两个导出（照 **L57 / L66** 的写法）：
+  `getPlaceFixImpact(photoCode, placeName)` / `fixPlace(photoCode, placeName, confirm)`
+- 提交成功后：**乐观更新** store 里这张照片的地点字段 + 一句提示「地点字典已重建」。
+- ⚠️ **不要改 `placeDisplayName()` / `placeRawName()`**（`api/place.js:43 / 51`）——
+  它们已经同时认 `nameZh`（地点接口）与 `placeZh`（照片接口），修正后**天然正确**。
+
+---
+
+## 二、B · 改地点显示名（`nameZh`）
+
+### 2.1 好消息：字段已预留，而且 rebuild 绝不覆盖
+`pb_place.txt` 第 10 行的注释 + `placeStore.py:89-99` 那段警告原文已经把话说透了：
+```
+⚠️⚠️⚠️ nameZh 绝不能进这个元组（DR-28）
+  它来自两处 pb_photo 里根本没有的东西：
+    ① 外部离线地理数据集（placeNameZh.zhNameOf() 的 point-in-polygon）
+    ② 用户手填（「外婆家」这种不是行政区名的地点）
+```
+⇒ **「用户手填地点名」在 R4a 时就已经被设计进 `nameZh` 了**。
+所以 B **只需接口 + UI**，**不需要新字段、不需要动 rebuild 逻辑**。
+
+### 2.2 端点 → 加进 `code/src/api/place.py`（**不要新建模块**）
+```python
+PATCH /api/places/{placeCode}    body: {"nameZh": "外婆家"}      # 空串 / null = 清除，回落 placeName
+```
+- 放 **`api/place.py`**（与 **L739** 的 `GET /places/{placeCode}` 同一文件同一路由组）
+- ⚠️ **路由顺序**：L639 有个 `GET /places/rebuild` 占位（防止被 `/{placeCode}` 吃掉）。
+  PATCH 与 GET 不冲突，但请把它**紧挨着 `/{placeCode}` 写**，保持可读
+- 校验：去首尾空白后长度 ≤ **128**（`pb_place.nameZh` 是 `VARCHAR(128)`）；
+  **全空白 = 清除**（写 NULL）；超长 → `dto.ApiError(dto.CODE_PARAM_INVALID, ...)`
+- 返回更新后的地点行（DTO 形状照 L739）
+- **不落 `pb_review_log`**（同 DR-49 口径）
+- ⚠️⚠️ **只改 `nameZh`，绝不改 `placeName`**：
+  `placeName` 在 `REBUILD_COLUMNS`（L100）里 → 下轮 rebuild 就打回去；
+  而且它是 `placeCode` 的派生源（`makePlaceCode` L170），**改了键就漂移**（DR-32 明确列为风险）
+
+### 2.3 ⚠️ B 的三个连带（**必须在报告里实测说清，不要只写代码**）
+1. **`nameZh` 是归并键**：`GET /api/places?groupByNameZh=1`（**L313**）按它归并 →
+   改名会**改变归并分组**（原本同名的两个地点可能因此不再归并，或反之）
+2. **`resolvePlaceFilter()`（`placeStore.py:469`）优先按 `nameZh` 匹配** →
+   改名后**按新名字筛选命中、按旧名字不命中**。这是**要的行为**，但界面上要给可读提示
+3. **B 不需要 rebuild** —— `nameZh` 不在复算列里，改它就是最终值。
+   前端只需刷新地点列表（归并结果会变）。
+
+### 2.4 前端（B）
+- **`views/PlaceDetailView.vue`**（361 行）：头部（**L230-231**）附近加「重命名」按钮，
+  与 **L259-261** 的「刷新」**并排同版式**
+- 新组件 `components/common/PlaceRenameDialog.vue`（或就地内联，文件小时内联即可）：
+  - 输入框初值 = 当前 `nameZh`
+  - **placeholder 显示 `placeRawName()`（英文原值）** —— 让人知道「清除」会回落到什么
+  - 「清除」按钮（回落到 `placeName`）
+  - 提交后刷新详情 + 地点列表
+- `api/place.js` 加 `renamePlace(placeCode, nameZh)`（照 **L63** `getPlace` 的写法）
+- ⚠️ **没有 `store/places.js`**，R5 起地点视图就是**直连 `api/place.js`** →
+  **本步也不要新起 store**，保持一致
+
+---
+
+## 三、验收清单（逐条实际运行，不许只写代码就宣称通过）
+
+### A. 字段与迁移
+1. `pb_photo` 出现 `placeNameOverride`；`PRAGMA table_info(pb_photo)` 显示类型
+   `VARCHAR`/`TEXT`、可空。**把那一行原文贴出来**
+2. 再跑一次 `build_db.py` **幂等**（不再加列、不报错）
+3. 加列**不丢数据**：`pb_photo` 仍 **35694 行**，`placeNameOverride` 全为 NULL
+
+### B. ⭐ 派生口径与三条纪律（**本步最关键的一组**）
+4. ⭐ **重扫不覆盖**：把某张的 `placeNameOverride` 改成 `外婆家` → 对这张跑一次扫描
+   → 值**仍是 `外婆家`**。并给出 `runner.py` 的 `git diff` 为**空**
+5. ⭐ **rebuild 不覆盖**：上一步那张 → 跑 `POST /api/places/rebuild` → 值**仍是 `外婆家`**
+6. ⭐ **目录名填空不覆盖**：触发一次扫描 DONE 的自动收尾（`placeFinalize`）
+   （或直接调 `dirNamePlace.scanDirNames()`）→ 值**仍是 `外婆家`**
+7. ⭐ **两个口径同源**：对**同一张已改过的照片**，`placeKeySql("p")`（SQL）与
+   `placeKeyOf(placeName, placeNameDir, placeNameOverride)`（Python）返回**同一个键**。
+   请贴出两张对照表：① 正常照片（`dir` 优先）② 改过的照片（`override` 优先）
+8. **筛选跟着变**：改完后 `GET /api/photos?placeName=外婆家` 返回那 1 张；
+   `?placeName=纽约` **不再包含它**；`GET /api/places` 里两个地点的 `photoCount` 正确
+9. **边界**：`placeNameOverride` 为**空串**（不是 NULL）时，聚合键**必须回落**
+   到 `placeNameDir`/`placeName` —— 别让空串变成一个新地点名
+
+### C. 接口（A）
+10. `GET /place-fix` 预览：`changed` / `current.source` / `autoPlaceKey` / `counts` 全对
+11. `POST` 且 **不传 `confirm`**（或 `confirm=0`）→ **只回预览、不改库**
+    （贴改前改后的 `placeNameOverride` 对比证明没写）
+12. `POST confirm=1` → 落库 + 返回体里有 **`rebuildSummary`**（`created`/`updated`/`zeroed`）
+13. **恢复自动**：传 `null`（或空串）→ `placeNameOverride` 变 **NULL**，
+    接口返回的 `placeName` 回到自动值
+14. 非法值：`>128` 字符 / 全空白 → **400**（贴错误响应）
+15. 重复提交同值 → `changed=false`，不报错
+16. **不落日志**：`pb_review_log` 的 `COUNT(*)` 操作前后**不变**
+17. **不动识别数据**：`pb_face`（bbox / personCode / isConfirmed）、
+    `pb_person_centroid.centroid` BLOB、`pb_photo.faceCount` 操作前后**逐字节相同**
+18. `photoAction.py` 的其他动作**未被破坏**（软删 / 恢复 / 旋转 / 年代修正各跑一次回归）
+
+### D. ⭐ 自动 rebuild（用户明确要求）
+19. ⭐ **提交后计数立刻正确**：`from` 地点 -1、`to` 地点 +1 —— 贴**改前 / 改后**的
+    `SELECT placeName, photoCount FROM pb_place WHERE placeName IN (...)` 两次结果
+20. ⭐ **耗时**：贴 `rebuildPlaces()` 的**实测毫秒数**（本库 35694 张的全量复算）
+21. **`from` 地点变 0 张时**：`pb_place` 的**行保留、`photoCount` 归零**（不删行、不留幽灵）
+22. **自由输入一个全新名字** → `pb_place` **新增一行**（`source=0`），且 `photoCount=1`
+
+### E. 渲染（A）
+23. ⭐ 照片详情「地点」栏旁有「修正」按钮，**与「拍摄年代」同一版式** —— 截图
+24. 弹窗候选下拉：显示**中文名 + 张数**，按张数**倒序** —— 截图
+25. 自由输入一个不存在的地点名 → 能提交成功
+26. ⭐ 改完**详情页立刻显示新地点**（走 `placeZh` 中文名），tooltip 里能看到英文/自动值
+27. **「恢复自动」按钮仅在 `placeIsOverride` 时出现**；点了回到原地点且按钮消失
+28. 地点详情页的照片流里那张照片**跟着换地点**（截图 + 两个地点的张数变化）
+
+### F. B（改显示名）
+29. ⭐ `PATCH /api/places/{placeCode}` 改 `nameZh` → 返回新值
+30. ⭐ **跑一次 `POST /api/places/rebuild` → `nameZh` 不被覆盖**（DR-28 纪律的实测证据）
+31. **清除** `nameZh` → 界面回落显示 `placeName`
+32. 改名后：**地点列表 / 照片详情 / 人物详情的「去过的地方」区块**都显示新名字
+33. ⭐ **归并受影响的实测**：把某个重名组里的一员改名 → `GET /api/places?groupByNameZh=1`
+    的**分组前后对照**（贴两次结果）
+34. 改名后：按**新名字**筛选命中、按**旧名字**不命中（`resolvePlaceFilter` 行为）
+35. 长度 >128 → **400**；`placeCode` **一个字都没变**（贴前后对比）
+
+### G. 回归
+36. **重扫全库一次** → 所有 `placeNameOverride` 与 `nameZh` **全都还在**（端到端）
+37. `photoDir` 的**文件数与总字节数不变**（原图零风险铁律）
+38. `npm run build` + 样式门禁通过；`pytest code/src/test -q` 全绿（基线 **1409 passed** 起）
+39. **数据层改动面自查**：`git diff --stat` 证明 `dirNamePlace.py` / `placeNameZh.py`
+    只改了当改的（若有），`runner.py` **零改动**
+
+## 四、硬约束
+- **只加一列（`pb_photo.placeNameOverride`）、只改一列（`pb_place.nameZh`）**；
+  **`pb_photo.placeName` / `placeNameDir` / `pb_place.placeName` 一律不动**
+- ⭐ **聚合键只有一个出口**：`PLACE_KEY_SQL` / `placeKeySql()` / `placeKeyOf()` 三处同步改，
+  **不许在任何别处再写一遍 `COALESCE(...)`**
+- ⭐ **三条禁令**：`placeNameOverride` **不进** `runner._META_FULL_COLUMNS`（L86）、
+  **不进** `placeStore.REBUILD_COLUMNS`（L100）、**不被** `dirNamePlace` 的填空逻辑碰到
+- ⭐ **改完地点必须立刻 `rebuildPlaces()`**（同步、幂等），让读到的 `photoCount` 立刻正确
+- ⭐ **B 只改 `nameZh`**：它是显示层，且 `REBUILD_COLUMNS` 明确不含它（DR-28）；
+  **绝不改 `placeName`**（会污染 `placeCode`，DR-32）
+- **不落 `pb_review_log`**；**不做批量**（用户明确）；**不新起 store**
+- **原图绝对只读**；业务层**禁止裸 SQL**（走 `database/queryCommon.py`）
+- **不改 `api/browse.py` 既有端点**（只加 DTO 字段；A 的写端点进 `photoAction.py`）
+- 复用既有 router / store / api / 组件分层与双主题 token；
+  单文件 ≤ 300 行（`PlaceDetailView.vue` 已 361 行，**只做插入不要顺手重构**）
+  〔**落地时放宽为 ≤ 600 行**（用户 R12-D 决定）：新增 `placeFix.py` 358 行不再拆；
+  该上限的括号里点名的就是 Vue 文件，既有 Python 模块本就 400–1100 行，
+  `photoTimeFix.py` 513 行是本题的结构范本〕
+- 现有代码风格保持一致（本仓库注释密度很高，新代码请同样写清"为什么"）
+
+## 五、完成后必须输出
+1. 改动文件清单（新增 / 修改，后端 / 前端分开列）
+2. 验收结果（**39 条逐条**给命令与实际输出）
+3. ⭐ **第 4 / 5 / 6 条的实测证据**（三条纪律各一次：重扫、rebuild、目录名填空都不覆盖）
+4. ⭐ **第 7 条的对照表**（`placeKeySql` 与 `placeKeyOf` 两个口径同源）
+5. ⭐ **第 20 条的 rebuild 耗时**（毫秒）
+6. ⭐ **第 30 条的 `nameZh` 不被 rebuild 覆盖**的实测
+7. ⭐ **第 33 条归并分组的前后对照**
+8. 第 23 / 26 / 28 条的**截图**（按钮版式、改完详情页、地点照片流跟着换）
+9. `runner.py` 的 `git diff` 为空 + `TOTAL order` 的数据层改动面说明
+10. 遗留问题与需要我决策的点
+    （特别是：**要不要批量改地点**（用户本轮明确不做，但目录名线索意味着"改一张往往想改一片"）、
+    **要不要把 `pb_place` 的"手工命名"升级成计划书里的 `nameSource` 严格版**
+    —— 见下方"已知未落地"）
+````
+
+### ⚠️ 已知未落地：计划书里的 `nameSource` **在代码里不存在**
+
+`plan/step-prompts.md` 的三处原文（R4 的表设计、R4a 的优先级、R4 的硬约束）要求：
+```
+nameSource TINYINT NOT NULL DEFAULT 0  '0未知/1逆地理/2目录名/3手工（手工最高，自动流程不得覆盖）'
+nameSource 优先级：手工(3) > 目录名(2) > 逆地理(1)；已有手工命名的一律不覆盖
+手工命名最高权威：nameSource=3 的行，任何自动流程不得覆盖其 name
+```
+**但全仓搜 `nameSource` 在代码里零命中** —— `pb_place.txt` 没有这一列，
+`rebuildPlaces()` 里也没有 `WHERE nameSource <> 3` 这类守卫。
+真正落地的只是「`nameZh` / `placeNameDir` 不进复算列」+「`source=1` 的行不归零」。
+
+⇒ **R12 采用"轻量版"**（A 用 `placeNameOverride`、B 用 `nameZh`），**不补 `nameSource`**。
+请在第 10 条遗留问题里说明这一点，并**建议顺手把计划书那三处改成"已用 `nameZh`/`placeNameOverride` 替代"**，
+否则以后接手的人会照着文档去找一个不存在的列。
+
+---
+
+### ✅ 落地补记（R12-D · 2026-10-11）：`nameSource` **已按严格版补上**
+
+上面那段（及第五节第 10 条）的结论「不补 `nameSource`」**已被用户当场推翻** —— 请以本节为准。
+
+**为什么必须改**：轻量版有一个**会静默丢掉用户输入**的漏洞。R12 的「自由输入一个新地名」
+（`外婆家` / `我家` / `公司`）会**新建**一行 `pb_place`，那一行 `nameZh` 是空的；而 `rebuildNameZh()`
+只看 `nameZh` 空不空 —— 于是下一次 `POST /api/places/rebuild`（或一次扫描收尾）就会按该地点的
+质心坐标把它填成**区县名**，用户输入的「外婆家」在**显示层消失**。数据层一切正常：
+`placeNameOverride` 还在、张数对、接口 200、`placeZh` 字段在 —— 典型的最难查的一类退化。
+
+**落地形态**（与本节原文的 `nameSource TINYINT 0/1/2/3` **不同**，故意取字符串）：
+
+| 项 | 实际 |
+|---|---|
+| 列 | `pb_place.nameSource VARCHAR(16) NULL`（**不是** `TINYINT`） |
+| 取值 | `geo` = 离线地理数据集算出的 ／ `manual` = 人工决定（**含"人工决定不要名字"**）／ NULL = 未定 |
+| 为什么不照原文的 0/1/2/3 | 原文那 1/2/3 说的是「`nameZh` 从哪一路来」（逆地理 / 目录名 / 手工），而在 `pb_photo` 侧「目录名」已由 `placeNameDir` 表达、「逆地理」由 `placeName` 表达 —— `pb_place.nameZh` 实际只有两个来源（地理数据集 / 人工）。字符串直接可读、日志里不用查表 |
+| 守卫 | `rebuildNameZh()` 的**候选集判据从 `nameZh` 改成 `nameSource`**，`manual` 行**不进候选集** ⇒ 覆盖在 SQL 层面做不到（同 `REBUILD_COLUMNS` 那条纪律：不靠调用方自觉） |
+| 写入点 | ① `PATCH /api/places/{placeCode}`（B 重命名）**同一次 UPDATE** 写 `nameZh` + `nameSource='manual'`，**清除也写 manual**（否则地理名会被填回来）；② `placeFix.applyFix()` 在 rebuild 之后对**本次新建**的地点行标 `manual`（**只标新建**，已有地点一律不碰） |
+| 迁移 | 老库「有 `nameZh` 但没有 `nameSource`」的行由 `rebuildNameZh()` 一次性**只补来源**（`backfilled`，一个字不动 `nameZh`）。正式库实测 **`backfilled=149 / filled=0`** |
+
+**两个语义要点**（写错任一条都会给出"看起来合理"的错行为）：
+① `geo` 与 `manual` 的**可见差别只有一条** —— 清空后会不会被重新算出来（`geo` **会**、`manual` **不会**）；
+所以 `geo` 行清空后**仍允许**复算填回（旧用例 `test_rebuildNameZhIsIdempotent` 钉的就是这条），`manual` 不准；
+② `manual` 可以配**空的** `nameZh`，语义是「人工决定：就用聚合键本身，别拿区县名来盖」——
+所以判 `manual` 不能顺手假设"一定有名字"。
+
+**验收实测**：新建地点 `nameSource='manual'`；把 `nameSource` 抹成 NULL 再跑 `rebuildNameZh()`
+→ `filled=1`、`nameZh='北京市 · 朝阳区'`（**阴性对照**：没有 `manual` 就会发生的事）；复原后 `nameZh=NULL`；
+真跑一次扫描（1 批 50 张）后 `override` / `nameZh` / `nameSource` 三项全在。新增 **8 条用例**
+（`test_place_name_zh.py` 4 条 + `test_place_fix.py` 4 条），`pytest code/src/test -q` = **1521 passed / 2 skipped / 1 xfailed**。
+
+**另外两条本轮确定的事**：
+① 用户明确 **"清除显示名保持永久"**（不做「恢复地理名」按钮）、**`PATCH` 不加 `nameSource` 参数**；
+② 用户明确 **"单文件 ≤ 300 行放宽到 600 行"**（`placeFix.py` 358 行不再拆）。
 
 ---
 
@@ -3980,8 +4449,10 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 | 步 | 主题 | 里程碑 | 状态 |
 | --- | --- | --- | --- |
 | **R5** | **地点界面**（**地点 → 照片流** + 人物「去过的地方」区块 · DR-37/38） | — | ✅ 已完成（`api/place.py` 48KB / `PlacesView` / `PlaceDetailView` / `PersonPlaces` / `test_api_person_places.py`；路由 `/places` + `/places/:placeCode`、侧栏 `MapPin`、`PersonDetailView` L684「↓↓↓ R5：去过的地方 ↓↓↓」均已接线） |
-| **R9** | **照片旋转**（左右转 90° · 显示层 CSS + `rotateDeg` 字段 · DR-43） | — | ⬜ **待做（提示语已写）** |
+| **R9** | **照片旋转**（左右转 90° · 显示层 CSS + `rotateDeg` 字段 · DR-43） | — | ✅ 已完成（`processor/photoRotate.py` + `test_photo_rotate.py` + `pb_photo.rotateDeg` + `photoAction.rotate`） |
 | **R10** | **打包分发**（`--onedir` + Inno Setup；模型随包 / 配置外置 / 卸载不碰照片库 · DR-44） | — | ⬜ **待做（提示语已写）** |
+| **R11** | **年代抽样**（每年抽一张 · DR-45~DR-51，拆 R11a/b/c） | — | ✅ 已完成（`engine/sample/eraSampler.py` / `api/eraSample.py` / `processor/media/eraPack.py` / `EraSamplePanel.vue`；库内 **9 个批次**，为第 11/12 张表） |
+| **R12** | **地点修正**（单张照片 `placeNameOverride` + 地点显示名 `nameZh`/`nameSource` · 改完自动 rebuild · DR-52/53） | — | ✅ **已完成**（2026-10-11：`pb_photo.placeNameOverride` + `pb_place.nameSource` + 聚合键三段优先 + `processor/place/placeFix.py` + `PlaceFixDialog.vue` / `PlaceRenameDialog.vue` + `test_place_fix.py`；`pytest code/src/test -q` = **1521 passed / 2 skipped / 1 xfailed**，`npm run build` + 双门禁通过）。⚠️ 未做：批量改地点（用户明确不做）；`nameSource` 严格版见 R12 一节末尾的「✅ 落地补记（R12-D）」 |
 | **R6** | **照片详情左右翻页**（DR-31，A 档，后端零改动） | — | ✅ 已完成（`components/photo/PhotoPager.vue`） |
 | **R7** | **人物头像**（卡片显示照片 + 人脸样本设默认 · DR-40/41） | — | ✅ 已完成（2026-10-08：`personCoversOf` + `AvatarPicker` + 16 条用例；**正式库副本实测 24/24 卡片有封面脸**，改前 0/2030 有 `avatarFaceCode`） |
 | **R8** | **照片年代修正**（人工修正拍摄年 + 编辑入口 · DR-42） | — | ✅ 已完成（2026-10-08：`pb_photo.shotYearOverride` + `comGD.sqlEffectiveShotYear` + `processor/photoTimeFix.py` + `ShotYearFixDialog.vue` + `test_photo_time_fix.py` 12 条用例全绿）；⚠️ 拖拽（P1）与 `takenAt` 修正到日（P2）未做 |
@@ -4022,30 +4493,49 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 
 > 提醒：新对话里请**只粘贴当前步骤的提示语**，不要把多步一起粘过去，否则上下文会过长导致遗漏约束。
 >
-> **待做两项：R9（照片旋转）、R10（打包分发）**。两节都在本文「第一部分」，各自独立、无依赖，
-> 可任选顺序。R10 **只碰「进程模型 / 路径解析 / 配置读取」，不动业务逻辑**，所以与 R9 不冲突。
-> 12 步主线于 2026-10-07 全部完成；R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 均已完成。
+> **待做 1 项：R10（打包分发）**。
+> R9（照片旋转）、R11（年代抽样）、R12（地点修正）均已完成。
+> 12 步主线于 2026-10-07 全部完成；R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 / R9 / R11 / R12 均已完成。
 >
 > ⚠️ **编号提醒**：`R7` = 人物头像（DR-40/41）、`R8` = 照片年代修正（DR-42）、
-> `R9` = 照片旋转（DR-43）、`R10` = 打包分发（DR-44）。都是**已完成或待做**，别互相叫错。
+> `R9` = 照片旋转（DR-43）、`R10` = 打包分发（DR-44）、
+> `R11` = **年代抽样**（DR-45~DR-51，拆 R11a/b/c，规划见 `plan/年代抽样规划.md`）、
+> `R12` = **地点修正**（DR-52/53，单张照片地点 + 地点显示名 + `nameSource` 严格版）。别互相叫错。
 >
-> **R9 完成后（按优先级）**
+> **R10 完成后（按优先级）**
 > 1. **M4 一周自测**（最重要，不是写代码）：按 `开发计划.md` §八 的建议用法真用一周，
 >    第 7 天自问「还会想去资源管理器看照片吗」。
-> 2. **R2 的验收证据**（唯一还欠的技术报告）：`auditBuckets()` 改前/改后完整对照、
+> 2. **清待确认队列**（当前最大的功能缺口，见 C-2）：**20015 张脸**没归属。
+>    R5 的「在场的人」、R11 的年代抽样质量，都取决于这个队列被清掉多少。
+> 3. **R2 的验收证据**（唯一还欠的技术报告）：`auditBuckets()` 改前/改后完整对照、
 >    `verify_bucket_gain.py` 的生产库 FR 实测、全库重算质心前后行数变化。
 >    它是 **M2「识别复现 S0」** 的前提 —— 桶口径说了算，不能只凭"代码写完了"就认为结论能复现。
->    要补就单独贴 **「修正步骤 R2」**。⚠️ 该节在本文里有**两份重复**（文件被多次追加过），
->    粘贴前先确认你拿到的是完整的那一份。
-> 3. **确认人脸**：`pb_face` 3647 张里只有 **67 张有归属**，`pb_person` 2029 个里只有 **20 个有照片**。
->    「人物 × 地点」交叉目前几乎是空的（有地点的 663 张照片里仅 **1 张**关联到人）——
->    R5 做出来的「在场的人」区块会长期空着，直到你在待确认队列里把归属做起来。
+>    要补就单独贴 **「修正步骤 R2」**。
 > 4. 可选：**批量旋转**（R9 只做单张，见该步「完成后必须输出」第 8 条）。
-> 5. 可选：地图视图（R5 明确未做，前提是解决「11/28 个地点无坐标」——
->    目录名地点占 663 张里的 598 张，没有 `lat/lon`）。
->
-> ⚠️ **本文档已有重复章节**（多轮追加导致）：`R5` 出现 **3 次**、`R4b` **2 次**、`R2` **2 次**，
-> 其中 `R5` 的两份旧版内容仍是**废弃的「人物 → 地点列表 → 时间线」**形态。
+> 5. 可选：地图视图（R5 明确未做，前提是解决「地点无坐标」问题 —— 181 个有效地点里
+>    目录名地点没有 `lat/lon`）。
+
+---
+
+### C-2 · 库现状快照（2026-10-11 实测，用于判断下一步该做什么）
+
+| 项 | 数值 | 说明 |
+|---|---|---|
+| 照片 | **35694** | 比 R5 时期（2137）大了 16 倍 |
+| 其中有地点 | 6998 | 目录名 + GPS |
+| 地点 | **181** | 有效（`photoCount>0`） |
+| 人脸 | **35087** | |
+| ↳ 有归属 | 14677 | 自动 + 人工 |
+| ↳ **人工确认** | **2065** | 只有这些进质心（DR-16 防污染） |
+| ↳ 陌生人 | 395 | |
+| ↳ **待确认（未归属）** | **20015** | ★ 最大缺口 |
+| 人物 | 2047 | 其中**有照片的只有 146 个** |
+| 年代抽样批次 | 9 | R11 已跑通 |
+
+**判读**：数据规模已经不是问题，**瓶颈在「人工确认的样本量」**——
+35087 张脸里只有 2065 张被人工确认过（**5.9%**），而质心只用确认样本（DR-16）。
+这直接决定了自动归属的准确率上限，也决定了 R5「在场的人」/ R11 年代抽样的可用度。
+**建议把「清待确认队列」当成 M4 之外的第一优先事项。**
 > 使用前请**只认最新那份**；建议在有空时清理一次（本步不做）。
 >
 > **步骤 12 实际落地时的偏差（供以后回看）**

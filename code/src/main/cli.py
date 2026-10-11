@@ -57,25 +57,60 @@ _VERSION = "20261005"
 _LOG = misc.setLogNew("cliMain", "climain.log")
 
 
-def _ensureDb(dbFile: str = None, quiet: bool = False) -> str:
-    """库/表不存在就建（幂等，走 tools.build_db；本文件不写一条 DDL）"""
+def ensureDb(dbFile: str = None, quiet: bool = False, migrate: bool = True) -> str:
+    """库/表不存在就建（幂等，走 tools.build_db；本文件不写一条 DDL）。
+
+    参数
+    ----
+    dbFile  : str | None —— 缺省取 paths.db_file()
+    quiet   : bool —— 少打印
+    migrate : bool —— 建表之后是否再跑一次 `build_db.migrate()`。
+        **R10 起默认 True**，因为打包分发后这就是「老库升级补表」的唯一通道：
+          · `build()` 是 `CREATE TABLE IF NOT EXISTS` —— 它能把
+            **整张缺失的表**建出来（R11 的 `pb_era_sample` / `pb_era_sample_item`）；
+          · 而**老表新增的列**它管不了，那正是 `migrate()` 的活（只加列/加索引，
+            绝不删数据）。
+        ⚠️ 两个都是幂等的，所以"每次启动都跑一遍"是安全的；
+           不跑的话，用户在界面上只会看到「年代抽样 500」而不知道要跑什么命令
+           —— 打包用户**没有 Python**，任何 CLI 指引对他都是废纸。
+
+    为什么要抽成公开函数（R10）
+    --------------------------
+      `tools/appLauncher.py`（exe 入口）要在启动前调它。**绝不允许复制粘贴**：
+      两份"缺表就建"的逻辑一旦分叉，就会出现「CLI 能建、exe 建不出来」
+      这种只在打包后才暴露的故障。
+    """
     target = os.path.abspath(dbFile or paths.db_file())
-    sqliteOk = True
+    needBuild = True
     try:
         sqliteCommon.dbHandle(target)
-        sqliteOk = sqliteCommon.chkTableExist("pb_person")
+        # ⚠️ 用 pb_photo 而不是 pb_person 判「库建好了没」：pb_person 可能因为
+        #    只导过通讯录而单独存在，那时 pb_photo 还没有（照片接口全 404）。
+        needBuild = not sqliteCommon.chkTableExist("pb_photo")
     except Exception:
-        sqliteOk = False
-    if not sqliteOk:
+        needBuild = True
+    if needBuild:
         if not quiet:
             print("[建库] 表不存在，先建库: %s" % target)
         build_db.build(dbFile=target, verbose=not quiet)
+    if migrate:
+        missing = [name for name in sqliteCommon.TABLE_ORDER
+                   if not sqliteCommon.chkTableExist(name)]
+        if missing or not needBuild:
+            if not quiet and missing:
+                print("[补表] 缺 %s，走 --migrate 补建（不动数据）" % ", ".join(missing))
+            build_db.migrate(dbFile=target, verbose=not quiet)
     return target
+
+
+def _ensureDb(dbFile: str = None, quiet: bool = False) -> str:
+    """上一版的私有名字。**保留为薄壳**：单测/外部脚本里可能出现过的调用点。"""
+    return ensureDb(dbFile, quiet=quiet, migrate=False)
 
 
 def _prepare(args) -> str:
     """统一的启动准备：落路径覆盖 -> 校验布局 -> 建可写目录 -> 显式指定库句柄"""
-    dbFile = _ensureDb(args.db, quiet=getattr(args, "quiet", False))
+    dbFile = ensureDb(args.db, quiet=getattr(args, "quiet", False), migrate=False)
     paths.setRootOverride(db=dbFile)
     paths.validate_layout()
     paths.ensure_dirs()

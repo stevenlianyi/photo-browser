@@ -57,6 +57,7 @@ from api import dto                                               # noqa: E402
 from common import globalDefinition as comGD                      # noqa: E402
 from common import miscCommon as misc                             # noqa: E402
 from common import paths as paths                                 # noqa: E402
+from common import resourcePath as resourcePath                   # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
 from schedule import faceScheduler as faceSched                   # noqa: E402
 
@@ -84,7 +85,8 @@ def _scheduler() -> faceSched.FaceScheduler:
                 dbFile=paths.db_file(), verbose=False)
         except Exception as e:
             raise dto.ApiError(dto.CODE_DB_ERROR,
-                               "人脸识别表未就绪：%s（先跑 tools\\build_db.py --migrate）" % e)
+                               "人脸识别表未就绪：%s\n%s"
+                               % (e, resourcePath.dbInitHint("请先建库 / 补表")))
         return _SCHEDULER["instance"]
 
 

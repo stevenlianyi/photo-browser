@@ -4,14 +4,15 @@
 #Filename: place.py
 #Description: 地点浏览接口（步骤 R5）—— /api/places* 整个命名空间
 #
-# 六个端点（**纯读 5 个 + 一个显式 405 占位**）
+# 七个端点（**纯读 5 个 + 一个写 + 一个显式 405 占位**）
 # --------------------------------------------
-#   GET  /api/places                       地点列表（字典；groupByNameZh=1 按中文名归并）
-#   POST /api/places/rebuild               重建地点字典（幂等，从 browse.py 原样搬来）
-#   GET  /api/places/rebuild               **只为保住 405**，见下面「为什么单列这一条」
-#   GET  /api/places/{placeCode}           地点详情（含同组下钻 placeCodes / members）
-#   GET  /api/places/{placeCode}/photos    该地点的照片（分页 + 全年份计数）
-#   GET  /api/places/{placeCode}/persons   出现在该地点的人（**实时 join**，DR-26/28）
+#   GET   /api/places                       地点列表（字典；groupByNameZh=1 按中文名归并）
+#   POST  /api/places/rebuild               重建地点字典（幂等，从 browse.py 原样搬来）
+#   GET   /api/places/rebuild               **只为保住 405**，见下面「为什么单列这一条」
+#   GET   /api/places/{placeCode}           地点详情（含同组下钻 placeCodes / members）
+#   PATCH /api/places/{placeCode}           地点重命名（DR-52；**只改 nameZh**，见该函数）
+#   GET   /api/places/{placeCode}/photos    该地点的照片（分页 + 全年份计数）
+#   GET   /api/places/{placeCode}/persons   出现在该地点的人（**实时 join**，DR-26/28）
 #
 # 为什么 `/api/places*` 整个命名空间要收在一个模块里
 # ------------------------------------------------
@@ -62,13 +63,16 @@ from api import browse                                            # noqa: E402
 from api import dto                                               # noqa: E402
 from common import globalDefinition as comGD                      # noqa: E402
 from common import miscCommon as misc                             # noqa: E402
+from common import resourcePath as resourcePath                   # noqa: E402
 from database import queryCommon as query                         # noqa: E402
+from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
 from processor.place import placeFinalize as placeFinalize        # noqa: E402
+from processor.place import placeNameZh as placeNameZh            # noqa: E402
 from processor.place import placeStore as placeStore              # noqa: E402
 
 from fastapi import APIRouter, HTTPException, Query               # noqa: E402
 
-_VERSION = "20261008"
+_VERSION = "20261011"
 
 _LOG = misc.setLogNew("apiPlace", "apiplace.log")
 
@@ -133,7 +137,8 @@ def _placeRows(codes: list = None, placeCode: str = None) -> list:
 #:    列表里没有，而两条路径都**跑得通**。
 _PLACE_COLUMNS: str = (
     "g.placeCode AS placeCode, g.placeName AS placeName,"
-    " g.nameZh AS nameZh, g.source AS source, g.photoCount AS photoCount,"
+    " g.nameZh AS nameZh, g.nameSource AS nameSource,"
+    " g.source AS source, g.photoCount AS photoCount,"
     " g.firstShotYear AS firstShotYear, g.lastShotYear AS lastShotYear,"
     " g.centerLat AS centerLat, g.centerLon AS centerLon,"
     " g.modifyYMDHMS AS modifyYMDHMS")
@@ -155,6 +160,19 @@ def sqlitePlaceRows(placeCode: list = None) -> list:
     return query.selectList(sql, tuple([comGD.DEL_FLAG_NO] + codes))
 
 
+def _nameSourceOf(row: dict):
+    """`pb_place.nameSource` -> DTO 值（`geo` / `manual` / None）。
+
+    ⚠️ 白名单式归一，不是原样透出：库里出现的任何**别的**取值（手工改库、
+       以后新增的来源）一律折成 None = 「未定」，而不是把它当成一个新种类
+       漏到前端去 —— 前端拿它做分支判断，多一个未知取值就是一次静默错分支。
+    """
+    got = str(row.get("nameSource") or "").strip()
+    if got in (placeNameZh.NAME_SOURCE_GEO, placeNameZh.NAME_SOURCE_MANUAL):
+        return got
+    return None
+
+
 def placeItem(row: dict, source: str) -> dict:
     """`pb_place` 行 -> 单点条目（与步骤 9 的 `_placeSummary` 逐字同构）。
 
@@ -166,6 +184,10 @@ def placeItem(row: dict, source: str) -> dict:
                         or placeStore.makePlaceCode(name),
             "placeName": name,
             "nameZh": (str(row.get("nameZh")) or None) if row.get("nameZh") else None,
+            #: DR-53：`geo`（地理数据集）/ `manual`（人工定，含"人工决定不要名字"）/
+            #: None（未定）。界面据此显示「地理名 / 人工命名」，并告诉用户
+            #: 「重命名之后自动流程不再覆盖」。
+            "nameSource": _nameSourceOf(row),
             "photoCount": int(row.get("photoCount") or 0),
             "yearLow": _intOrNone(row.get("firstShotYear") or row.get("yearLow")),
             "yearHigh": _intOrNone(row.get("lastShotYear") or row.get("yearHigh")),
@@ -180,6 +202,7 @@ def _memberOf(row: dict) -> dict:
     return {"placeCode": str(row.get("placeCode") or ""),
             "placeName": str(row.get("placeName") or ""),
             "nameZh": (str(row.get("nameZh")) or None) if row.get("nameZh") else None,
+            "nameSource": _nameSourceOf(row),
             "photoCount": int(row.get("photoCount") or 0),
             "firstShotYear": _intOrNone(row.get("firstShotYear")),
             "lastShotYear": _intOrNone(row.get("lastShotYear")),
@@ -213,6 +236,7 @@ def groupByNameZh(rows: list) -> dict:
             buckets[key] = {"placeCode": str(one.get("placeCode") or ""),
                             "placeName": name,
                             "nameZh": nameZh or None,
+                            "nameSource": _nameSourceOf(one),
                             "photoCount": 0,
                             "firstShotYear": None,
                             "lastShotYear": None,
@@ -223,6 +247,12 @@ def groupByNameZh(rows: list) -> dict:
                             "members": []}
             order.append(key)
         group = buckets[key]
+        # ⚠️ 组内**只要有一个来源点是人工命名的**，整组就报 `manual`：
+        #   归并组的显示名 = 共享的那个 nameZh，而"这个名字是人工定的"这件事
+        #   只要对组内任一点成立，就对整组成立。反过来（取第一个）会让
+        #   「人工命名的那一行不是组内第一条」时，界面把人工名说成地理名。
+        if _nameSourceOf(one) == placeNameZh.NAME_SOURCE_MANUAL:
+            group["nameSource"] = placeNameZh.NAME_SOURCE_MANUAL
         group["photoCount"] += int(one.get("photoCount") or 0)
         low, high = _intOrNone(one.get("firstShotYear")), _intOrNone(one.get("lastShotYear"))
         if low is not None:
@@ -404,7 +434,8 @@ def listPlaces(page: int = Query(default=1, ge=1),
     body["note"] = ("pb_place 地点字典%s —— 本次是实时全表聚合（慢）。"
                     "调一次 POST /api/places/rebuild 建好字典后，"
                     "这个接口就只扫字典表了"
-                    % ("表不存在（升级后请先跑一次 tools\\build_db.py）"
+                    % ("表不存在（升级后请先建库 / 补表：%s）"
+                       % resourcePath.initDbCommand()
                        if not query.tableExists("pb_place") else "还是空的"))
     return body
 
@@ -700,9 +731,17 @@ def _placeBase(rows: list) -> dict:
         if lat is None and one.get("centerLat") is not None:
             lat, lon = _floatOrNone(one.get("centerLat")), _floatOrNone(one.get("centerLon"))
     main = rows[0]
+    # ⚠️ 与 `groupByNameZh` 同一条口径：同组只要有一个来源点是人工命名的，
+    #    详情头就报 `manual`（详情头显示的是**整组**的一个名字，不是第一行）。
+    src = _nameSourceOf(main)
+    for one in rows:
+        if _nameSourceOf(one) == placeNameZh.NAME_SOURCE_MANUAL:
+            src = placeNameZh.NAME_SOURCE_MANUAL
+            break
     return {"placeCode": str(main.get("placeCode") or ""),
             "placeName": str(main.get("placeName") or ""),
             "nameZh": (str(main.get("nameZh")) or None) if main.get("nameZh") else None,
+            "nameSource": src,
             "photoCount": total,
             "firstShotYear": low,
             "lastShotYear": high,
@@ -752,6 +791,105 @@ def getPlace(placeCode: str,
     out = _placeBase(rows)
     out["dataSource"] = "dictionary"
     out["personCount"] = personCountOf(placeKeysOf(rows))
+    return out
+
+
+#: `pb_place.nameZh` 的长度上限 —— 与表定义 `VARCHAR(128)` 逐字对齐。
+#: ⚠️ 超长**不截断**而是 400：截断是"用户以为存了完整名字、实际被砍了"，且不报错。
+_NAME_ZH_MAX_LEN: int = 128
+
+
+@router.patch("/places/{placeCode}",
+              summary="地点重命名（只改 pb_place.nameZh，绝不改 placeName）")
+def renamePlace(placeCode: str, body: dto.PlaceRenameBody = None) -> dict:
+    """把某个地点的**显示名**改成 `nameZh`（**空串 / null / 全空白 = 清除**，回落 `placeName`）。
+
+    为什么只改 `nameZh`（DR-28 / DR-32）
+    ----------------------------------
+      · `nameZh` 是**显示层**，`REBUILD_COLUMNS` 明确不含它 -> rebuild 绝不覆盖，
+        改它就是最终值（所以本端点是**唯一一个不需要 rebuild 的地点写操作**）。
+      · `placeName` 在 `REBUILD_COLUMNS` 里 -> 下轮 rebuild 会打回去；
+        而且它是 `placeCode` 的派生源（`makePlaceCode`）—— 改了它键就漂移，
+        字典里会分裂出"同名不同码"的两行，且**不报错**（DR-32 明确列为风险）。
+      ⇒ 本端点**只写 nameZh 一列**（+ modifyYMDHMS）。
+
+    ⚠️ 三个连带（都**不报错**，所以要显式知道）
+    ------------------------------------------
+      ① `nameZh` 是**归并键**：`GET /api/places?groupByNameZh=1` 按它归并，
+         改名会改变分组（原本同名的两个地点可能不再归并，或反之）。
+      ② `resolvePlaceFilter()` 优先按 `nameZh` 匹配 -> 改名后按**新名字**筛选命中、
+         按**旧名字**不命中（这是要的行为）。
+      ③ **不需要 rebuild**：`nameZh` 不在复算列里（DR-28），改它就是最终值；
+         前端只需刷新地点列表（归并结果会变）。
+
+    ⚠️ 同时写 `nameSource='manual'`（R12/DR-53）
+    -----------------------------------------
+      不写的话，`placeNameZh.rebuildNameZh()`（下一次 `POST /api/places/rebuild`
+      或一次扫描收尾会跑）只看 `nameSource` 是不是空 —— 空就会被按坐标填成区县名，
+      用户刚改的名字**在显示层消失**而接口一路 200。
+      · 改名         -> `nameZh=值`   + `nameSource='manual'`
+      · 清除（null） -> `nameZh=NULL` + `nameSource='manual'`
+        ⚠️ **清除也写 manual 而不是 NULL**：意思是「人工决定不要名字」。
+          若写成 NULL，下一次 rebuildNameZh 会把地理名**填回来**，
+          用户会觉得"清除没生效"（而且不报错）。
+      · 幂等判据因此是「**值没变 且 已经是 manual**」：把地理名"重填一遍同名"
+        仍会写一次（那是在表达"这个人工确认了"），之后再提交才是 changed=False。
+
+    ⚠️ **不落 `pb_review_log`**（同 DR-49 口径：那条链只装归属纠错）。
+    """
+    rows = _placeRows(placeCode=str(placeCode))
+    if not rows:
+        raise dto.ApiError(dto.CODE_NOT_FOUND,
+                           "placeCode=%s 在 pb_place 里不存在" % placeCode)
+    code = str(rows[0].get("placeCode") or "")
+    oldZh = str(rows[0].get("nameZh") or "")
+
+    # ⚠️ 必须**显式给 nameZh**：不给是参数漏了（400），给 null/空串才是"清除"。
+    #    混在一起会让"前端漏传一个字段"变成"静默把用户填的中文名清掉"。
+    given = body.model_dump(exclude_unset=True) if body is not None else {}
+    if "nameZh" not in given:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID,
+                           "必须给 nameZh（传 null / 空串表示清除，回落 placeName）")
+    text = "" if given.get("nameZh") is None else str(given.get("nameZh")).strip()
+    if len(text) > _NAME_ZH_MAX_LEN:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID,
+                           "地点显示名最长 %d 个字符，收到 %d 个"
+                           % (_NAME_ZH_MAX_LEN, len(text)))
+    # 全空白 == 清除（写 NULL，而不是写入一串空格 —— 后者会让界面显示成"空白名"）
+    value = text or None
+    srcNow = _nameSourceOf(rows[0])
+
+    # 幂等：**值没变且来源已经是 manual** 才一行都不写（见 docstring 的说明）
+    if value == (oldZh or None) and srcNow == placeNameZh.NAME_SOURCE_MANUAL:
+        out = _placeBase(rows)
+        out["dataSource"] = "dictionary"
+        out["changed"] = False
+        out["nameZh"] = value
+        out["nameSource"] = srcNow
+        return out
+
+    rtn = sqliteCommon.updateTableGeneral(
+        "pb_place", "placeCode = %s", (code,),
+        {"nameZh": value, "nameSource": placeNameZh.NAME_SOURCE_MANUAL,
+         "modifyYMDHMS": misc.getTime()})
+    if rtn == -2 or (rtn is not None and rtn < 0):
+        raise dto.ApiError(dto.CODE_DB_ERROR,
+                           "写 pb_place.nameZh 失败: %s"
+                           % sqliteCommon.dbHandle().lastErrMsg)
+
+    fresh = _placeRows(placeCode=code) or rows
+    out = _placeBase(fresh)
+    out["dataSource"] = "dictionary"
+    out["changed"] = True
+    out["nameZh"] = value
+    out["nameSource"] = placeNameZh.NAME_SOURCE_MANUAL
+    out["nameZhCleared"] = value is None
+    out["note"] = ("只改了显示名（nameZh），placeCode 与 placeName 一个字都没动；"
+                   "已标记 nameSource=manual —— 自动回填（rebuildNameZh）"
+                   "从此不再碰这一行。nameZh 是归并键：地点列表的归并分组可能因此"
+                   "变化，按**新名字**筛选即命中（旧名字不再命中）")
+    _LOG.info("renamePlace: %s nameZh %r -> %r（nameSource=manual）",
+              code, oldZh, value)
     return out
 
 
@@ -823,16 +961,17 @@ def listPlacePhotos(placeCode: str,
                  " WHERE " + sqlCond + " GROUP BY " + effectiveYear +
                  " ORDER BY " + effectiveYear + " DESC", tuple(args))]
     photos = query.selectList(
-        # ⚠️ `placeNameDir` 与 `lat/lon` **必须出现在 SELECT 里**：
-        #    `browse.photoSummary()` 用 placeNameDir 算聚合键（否则那 598 张
-        #    目录名照片在这一页上「没有地点」），用 lat/lon 判 hasGps。
-        #    这两列没带的话接口 200、结构齐全，只是地点与 GPS 角标全空。
+        # ⚠️ `placeNameDir` / `placeNameOverride` 与 `lat/lon` **必须出现在 SELECT 里**：
+        #    `browse.photoSummary()` 用前两列算聚合键（否则那 598 张目录名照片
+        #    在这一页上「没有地点」，手工改过地点的照片也回到旧地点），
+        #    用 lat/lon 判 hasGps。
+        #    这几列没带的话接口 200、结构齐全，只是地点与 GPS 角标全空。
         "SELECT p.photoCode, p.relPath, p.takenAt, p.shotYear, p.shotYearOverride,"
         # ⚠️ R9 / DR-43：rotateDeg **必须**在这里（R5 新增的第 6 处照片 SELECT）。
         #    少这一列的症状是「照片流里转了、地点详情里没转」——
         #    接口 200、结构齐全、只有那一个字段缺失，界面静默错。
         " p.rotateDeg,"
-        " p.placeName, p.placeNameDir, p.lat, p.lon,"
+        " p.placeName, p.placeNameDir, p.placeNameOverride, p.lat, p.lon,"
         " p.cameraModel, p.width, p.height, p.fileSize, p.mimeType,"
         " p.faceCount, p.isDuplicate, p.isMissing, p.scanState"
         " FROM pb_photo p WHERE " + sqlCond +

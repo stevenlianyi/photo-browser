@@ -27,13 +27,17 @@
 #   * **`nameZh` 不在派生集合里**（DR-28）：它是**显示名**，来自外部地理数据集
 #     或用户手填，`rebuildPlaces()` 绝不能碰。详见 REBUILD_COLUMNS 处的警告。
 #
-# ⚠️ R4b（DR-30/DR-32）：聚合键 = 「目录名优先」
-# --------------------------------------------
+# ⚠️ R4b（DR-30/DR-32）+ R12（DR-52）：聚合键 = 「人工修正 > 目录名 > GPS」
+# ----------------------------------------------------------------------
 #   `rebuildPlaces()` 的聚合键从 `pb_photo.placeName` 变成了
-#   `COALESCE(NULLIF(placeNameDir,''), placeName)`（见 `placeKeySql()`）。
-#   原因：`placeName` 只有 GPS 逆地理一条来源（实测全库 **65 张**），
-#   而目录名线索覆盖 **598 张（9 倍）** —— 仍按 placeName 聚合的话，
-#   那 598 张**永远进不了地点字典**（DR-30）。
+#   `COALESCE(NULLIF(placeNameOverride,''), NULLIF(placeNameDir,''), placeName)`
+#   （见 `placeKeySql()`）。
+#   · R4b 加「目录名」一段：`placeName` 只有 GPS 逆地理一条来源（实测全库
+#     **65 张**），而目录名线索覆盖 **598 张（9 倍）** —— 仍按 placeName 聚合的话，
+#     那 598 张**永远进不了地点字典**（DR-30）。
+#   · R12 再加「人工修正」一段（最优先）：用户在照片详情页把某张照片的地点
+#     改掉之后，聚合/筛选/列表必须立刻按新值走 —— 否则「详情页说华盛顿、
+#     地点列表说纽约」这种自相矛盾（接口 200、两处各自自洽、不报错）。
 #   连带变化**缺一不可**：筛选入口 `resolvePlaceFilter()` 与降级路径
 #   `liveAggregatePlaces()` 也必须用**同一条键**。否则会出现
 #   「地点列表说 114 张、点进去 0 张」这种自相矛盾 —— 接口 200、
@@ -97,6 +101,11 @@ SOURCE_MANUAL: int = 1        # 手工建档（步骤 12；本步不产生）
 #:   这是最难发现的一类退化（界面出问题时数据层看起来完全健康），
 #:   所以这条警告写在常量旁边，而不是只写在文档里。
 #:   补中文名走 `placeNameZh.rebuildNameZh()`，它**只填 NULL、绝不覆盖**。
+#:
+#: ⚠️ 同理 **`nameSource` 也不能进这个元组**（R12/DR-53）：它是"这个名字归谁管"
+#:   （`geo`/`manual`/NULL），和 `nameZh` 一样来自 `pb_photo` 里根本没有的东西。
+#:   放进来会让每轮复算把"人工命名"降级成"未定"，于是下一次 `rebuildNameZh()`
+#:   顺手把人工名盖成区县名 —— 两步都不报错，合起来是一次静默丢用户数据。
 REBUILD_COLUMNS: tuple = ("placeName", "photoCount", "firstShotYear",
                           "lastShotYear", "centerLat", "centerLon")
 
@@ -122,13 +131,23 @@ PLACE_SORT_SQL: dict = {
 PLACE_TIE_BREAK_COLUMNS: tuple = ("placeName", "placeCode")
 
 
-#: **地点聚合键**（R4b · DR-32）：目录名优先，没有目录名时退回 GPS 逆地理的 `placeName`。
+#: **地点聚合键**（R4b/R12 · DR-32/DR-52）：**人工修正 > 目录名 > GPS 逆地理 `placeName`**。
 #:
 #: 为什么要有这一条（DR-30/DR-32）
 #: -----------------------------
 #:   `pb_photo.placeName` 只有 GPS 逆地理一条来源，实测正式库 2137 张里只有 65 张
 #:   有值；而目录名（`placeNameDir`）覆盖 598 张。地点字典若仍按 `placeName` 聚合，
 #:   目录名那 598 张**永远进不了地点字典**。
+#:
+#: ⚠️ R12（DR-52）再加**最优先的一段**：`placeNameOverride`（用户手工改的地点）
+#:    ---------------------------------------------------------------------
+#:     用户在照片详情页把「纽约」改成「华盛顿」时，改的是**这一张照片**。
+#:     如果聚合键不认它，现象是「详情页说华盛顿、地点列表说纽约 98 张」——
+#:     接口 200、字段都在、两处各自自洽，只是合不上（最难查的那一类）。
+#:     所以三段优先：`override`（人工，最高）> `dir`（目录名）> `placeName`（GPS）。
+#:     ⚠️ 这也正是「聚合键只能有一个出口」的理由：下面那些消费点
+#:        （rebuild / 筛选 / 降级聚合 / 列表 / 照片摘要）全部**自动跟着变**，
+#:        任何一处自己再写一遍 `COALESCE(...)`，都会在那里静默地少认一段。
 #:
 #: ⚠️ 派生 `placeCode` 的基础从「GPS 的 placeName」变成了「这一条聚合键」
 #:    ⇒ 目录名（`relPath` 的一部分）**会被用户改动**：改一次名就产生一批新
@@ -139,31 +158,42 @@ PLACE_TIE_BREAK_COLUMNS: tuple = ("placeName", "placeCode")
 #:    **必须逐字等价**，否则「字典里显示 598 张、点进去筛出 0 张」——
 #:    接口 200、结构齐全、两条路径各自自洽，就是合不上。
 #:    这与 `makePlaceCode` 只留一套派生规则是同一个理由。
-#: ⚠️ `NULLIF(x, '')` 把**空串**归一成 NULL（空串不是地点），`COALESCE` 再退回
+#: ⚠️ `NULLIF(x, '')` 把**空串**归一成 NULL（空串不是地点），`COALESCE` 逐段退回
 #:    `placeName`。用 `COALESCE` 而不是 `||` 拼接：拼接会把「有目录名但 placeName
 #:    为空」变成 NULL 之外的东西，且 '' 与 NULL 的差别会渗进 GROUP BY。
-#: ⚠️ 这个模板里有**两个** `%s`（同一个表别名写两次）。别自己 `%` —— 用
-#:    `placeKeySql(alias)`，两次填同一个值这件事交给它做，省得写出
+#:    ⚠️ 空串必须一路回落到底：`placeNameOverride=''`（而不是 NULL）时**不能**被
+#:    当成一个新地点名 —— 那会在地点列表里长出一个空名字的地点。
+#: ⚠️ 这个模板里有**三个** `%s`（同一个表别名写三次）。别自己 `%` —— 用
+#:    `placeKeySql(alias)`，三次填同一个值这件事交给它做，省得写出
 #:    `COALESCE(NULLIF(p.x,''), q.y)` 这种不报错但语义错的 SQL。
-PLACE_KEY_SQL: str = "COALESCE(NULLIF(%s.placeNameDir, ''), %s.placeName)"
+PLACE_KEY_SQL: str = ("COALESCE(NULLIF(%s.placeNameOverride, ''),"
+                      " NULLIF(%s.placeNameDir, ''), %s.placeName)")
 
 
 def placeKeySql(alias: str = "p") -> str:
-    """聚合键的 SQL 片段（把两个别名占位一次填好）。"""
+    """聚合键的 SQL 片段（把三个别名占位一次填好）。"""
     name = str(alias or "p")
-    return PLACE_KEY_SQL % (name, name)
+    return PLACE_KEY_SQL % (name, name, name)
 
 
-def placeKeyOf(placeName: str, placeNameDir: str) -> str:
-    """Python 口径的聚合键（`PLACE_KEY_SQL` 的等价物）：目录名优先，空则退回 placeName。
+def placeKeyOf(placeName: str, placeNameDir: str,
+               placeNameOverride: str = None) -> str:
+    """Python 口径的聚合键（`PLACE_KEY_SQL` 的等价物）：
+    人工修正优先 → 目录名 → `placeName`（逐段空则回落）。
 
     用途：**逐行**的场景（照片列表把每张照片的地点在应用层算出来）。
     SQL 口径的用途：聚合（`GROUP BY`）与筛选（`WHERE ... = %s`）。
     两处必须给同一个答案 —— 见 PLACE_KEY_SQL 的警告。
+
+    ⚠️ 第三个参数 `placeNameOverride` 是 R12 新增的**必查项**：调用点漏补它
+       （或漏把该列 SELECT 出来）不会报错，只会让「接口返回的地点」与
+       「聚合/筛选用的地点」不一致 —— 接口 200、字段在、值不对。
+       这是本步最难查的一类退化，所以签名变了就要**逐个调用点**核对。
     """
-    text = str(placeNameDir or "").strip()
-    if text:
-        return text
+    for candidate in (placeNameOverride, placeNameDir):
+        text = str(candidate or "").strip()
+        if text:
+            return text
     return str(placeName or "").strip()
 
 
@@ -438,7 +468,7 @@ def listPlaces(keyword: str = "", minPhotoCount: int = None,
     tieBreak = ", ".join("g.%s ASC" % col for col in PLACE_TIE_BREAK_COLUMNS)
     orderSql = "g.%s %s, %s" % (primary, "DESC" if desc else "ASC", tieBreak)
     sql = ("SELECT g.placeCode AS placeCode, g.placeName AS placeName,"
-           " g.nameZh AS nameZh,"
+           " g.nameZh AS nameZh, g.nameSource AS nameSource,"
            " g.source AS source, g.photoCount AS photoCount,"
            " g.firstShotYear AS firstShotYear, g.lastShotYear AS lastShotYear,"
            " g.centerLat AS centerLat, g.centerLon AS centerLon,"
@@ -669,17 +699,25 @@ def orphanNameZh() -> list:
        地点与否），于是用户手工填的中文名就这么静默地留在库里了。
     ⚠️ `source=1`（手工行）也一并报：手工行**不会被归零**（见 rebuildPlaces），
        所以它一般不会出现在这里；真出现了说明它当初就是 0 张。
+    ⚠️ R12/DR-53 起**人工命名的行（`nameSource='manual'`）也算孤儿**：
+       那种行可能 `nameZh` 为空（名字就是 `placeName` 本身，例如「外婆家」），
+       旧判据漏掉它就等于把"用户起过名字"这件事静默留在库里 —— 与 DR-32③ 同一条理由。
     """
     if not query.tableExists("pb_place"):
         return []
+    # ⚠️ 懒导入 `placeNameZh`（在那里定义常量）：包内两个模块互相引用，
+    #    写在函数里与本包既有做法一致（placeNameZh 也这样引 placeStore）。
+    from processor.place import placeNameZh as placeNameZh
     return query.selectList(
         "SELECT g.placeCode AS placeCode, g.placeName AS placeName,"
-        " g.nameZh AS nameZh, g.source AS source, g.photoCount AS photoCount,"
+        " g.nameZh AS nameZh, g.nameSource AS nameSource,"
+        " g.source AS source, g.photoCount AS photoCount,"
         " g.modifyYMDHMS AS modifyYMDHMS"
         " FROM pb_place g"
         " WHERE COALESCE(g.photoCount, 0) = 0"
-        "   AND g.nameZh IS NOT NULL AND g.nameZh <> ''"
-        " ORDER BY g.recID ASC")
+        "   AND ((g.nameZh IS NOT NULL AND g.nameZh <> '') OR g.nameSource = %s)"
+        " ORDER BY g.recID ASC",
+        (placeNameZh.NAME_SOURCE_MANUAL,))
 
 
 def duplicateNameZhRows() -> list:
@@ -736,13 +774,20 @@ if __name__ == "__main__":
     print("PLACE_CODE_PREFIX     :", PLACE_CODE_PREFIX)
     print("REBUILD_COLUMNS       :", REBUILD_COLUMNS,
           "（**nameZh / placeNameDir 刻意不在内**）")
-    print("聚合键 SQL            :", placeKeySql("p"), "（R4b：目录名优先，DR-32）")
+    print("聚合键 SQL            :", placeKeySql("p"),
+          "（R12：人工修正 > 目录名 > GPS，DR-52）")
     print("库                    :", sqliteCommon.dbFilePath() or "(未连接)")
     for _name in ("北京", "北京市", "", "San Francisco", "上海"):
         print("   makePlaceCode(%-16r) = %r" % (_name, makePlaceCode(_name)))
-    for _pair in (("", "2013.07.26 华盛顿"), ("CN, Beijing, Datun", ""),
-                  ("", ""), ("CN, Beijing, Datun", "华盛顿")):
-        print("   placeKeyOf(%-24r, %-20r) = %r"
-              % (_pair[0], _pair[1], placeKeyOf(_pair[0], _pair[1])))
+    for _item in (("", "2013.07.26 华盛顿", None),        # 目录名优先
+                  ("CN, Beijing, Datun", "", None),       # GPS 兜底
+                  ("", "", None),                         # 三段全空
+                  ("CN, Beijing, Datun", "华盛顿", None), # 目录名优先
+                  ("CN, Beijing, Datun", "华盛顿", "外婆家"),  # 人工修正最优先
+                  ("CN, Beijing, Datun", "华盛顿", ""),   # 空串 = 未修正，回落目录名
+                  ("", "", "外婆家")):                     # 只有人工修正
+        print("   placeKeyOf(%-22r, %-16r, %-10r) = %r"
+              % (_item[0], _item[1], _item[2],
+                 placeKeyOf(_item[0], _item[1], _item[2])))
     for _value in ("阿勒泰市", "新疆维吾尔自治区 · 和静县", "北京", "不存在的地点"):
         print("   resolvePlaceFilter(%-24r) = %r" % (_value, resolvePlaceFilter(_value)))

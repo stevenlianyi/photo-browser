@@ -54,6 +54,7 @@ from api import dto                                               # noqa: E402
 from common import globalDefinition as comGD                      # noqa: E402
 from common import miscCommon as misc                             # noqa: E402
 from common import paths as paths                                 # noqa: E402
+from common import resourcePath as resourcePath                   # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
 from database import queryCommon as query                         # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
@@ -93,7 +94,8 @@ def _scheduler() -> scanSched.ScanScheduler:
         except Exception as e:
             # 最典型：pb_photo / pb_scan_job 还没建（没跑 build_db.py）
             raise dto.ApiError(dto.CODE_DB_ERROR,
-                               "扫描表未就绪：%s（先跑 tools\\build_db.py）" % e)
+                               "扫描表未就绪：%s\n%s"
+                               % (e, resourcePath.dbInitHint("请先建库 / 补表")))
         return _SCHEDULER["instance"]
 
 

@@ -29,6 +29,16 @@
 #   而且**不报错** —— 照片张数对、地点名回英文，是最难发现的一类退化。
 #   本模块的 rebuildNameZh() 也据此设计：**只填 NULL，绝不覆盖**。
 #
+# ⚠️ R12（DR-53）起判据收紧成 `pb_place.nameSource`
+# -------------------------------------------------
+#   「只填 nameZh 为空的行」在**人工入口出现之后**就不够了：R12 的
+#   「自由输入地点名」会造出「`nameZh` 曾经为空、而名字是用户起的」的行 ——
+#   下一次 rebuildNameZh 会按坐标把它填成区县名，于是**用户输入的名字在显示层
+#   消失**，而数据层看起来完全正常（override 还在、张数对、接口 200）。
+#   ⇒ 新增 `pb_place.nameSource`：`geo`（本模块填的）/ `manual`（人工定的，
+#     含"人工决定不要名字"）/ NULL（未定）。候选集 = `nameSource` 为空的行，
+#     人工行**不进候选集**，覆盖在 SQL 层面做不到（同 REBUILD_COLUMNS 那条纪律）。
+#
 # 三条纪律
 # --------
 #   ① **境外不翻译**（用户决策，DR-29②）：Tokyo / Paris 的 nameZh 留 NULL，
@@ -69,12 +79,13 @@ if _SRC_DIR not in sys.path:
 
 from common import globalDefinition as comGD                      # noqa: E402
 from common import miscCommon as misc                             # noqa: E402
+from common import resourcePath as resourcePath                   # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
 from database import queryCommon as query                         # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
 from processor.scanner import meta as meta                        # noqa: E402
 
-_VERSION = "20261007"
+_VERSION = "20261011"
 
 _LOG = misc.setLogNew("placeNameZh", "placenamezh.log")
 
@@ -102,13 +113,31 @@ _BAD_GEOMETRY = 0
 _WARNED_ONCE = False
 
 #: 包内置的数据文件（PLACE_AMAP_GEO_FILE 为空时用它）
-DEFAULT_GEO_FILE: str = os.path.join(_SRC_DIR, "data", "china_district.json.gz")
+#:
+#: ⚠️ R10 起走 `resourcePath`（冻结后 `_SRC_DIR` 指向 `_internal`，
+#:    原先的 `__file__` 相对推导会找不到这份 5.74MB 的区县数据 ——
+#:    症状是 nameZh 全 NULL、界面静默回退英文，**不报错**）。
+#:    源码模式下取值与本步之前逐字相同（`<repo>/code/src/data/...`）。
+DEFAULT_GEO_FILE: str = resourcePath.dataFile("china_district.json.gz")
 
 #: `nameZh` 的来源（⚠️ 与 pb_place.source **不是同一个东西**，
 #:   那个是「这一行怎么进库的」，这个是「这个中文名哪来的」）
 ZH_SOURCE_NONE: int = 0        # 没有中文名（境外 / 无坐标 / 依赖缺失）
 ZH_SOURCE_ADMIN: int = 2       # 行政区划算出来的
 ZH_SOURCE_MANUAL: int = 3      # 人工填的（本模块**不产出**，只认）
+
+#: `pb_place.nameSource` 的取值（DR-53）—— 落库的「显示名是谁定的」
+#: ------------------------------------------------------------------
+#: ⚠️⚠️ 这个名字里带 source，但它与**上面那两个**都不同，别混：
+#:   · `ZH_SOURCE_*`（本模块内存里的 reason 细分，**不落库**）
+#:   · `pb_place.source`（0=系统聚合 / 1=手工，说的是「这一行怎么进库的」）
+#:   · `pb_place.nameSource`（本常量，说的是「这一行的 nameZh 归谁管」）
+#: 它存在的唯一理由：**把"人工定的名字"与"地理数据集算的名字"分开**，
+#: 于是 `rebuildNameZh()` 能只填 NULL 的、永不碰 manual 的 ——
+#: R12 之前没有人工入口，`nameZh` 非空即可认为来自地理数据集；
+#: 有了 R12 的「自由输入地名」之后，光看 `nameZh` 是 NULL 已经区分不出来了。
+NAME_SOURCE_GEO: str = "geo"          # 离线地理数据集算出来的（本模块产出）
+NAME_SOURCE_MANUAL: str = "manual"    # 人工决定（**含"人工决定不要名字"**）
 
 #: `zhNameOf` 的 reason 取值。⚠️ **每个分支都必须给明确 reason**，
 #:   不许「查不到就返回空字符串」——那样统计里会少掉一整类问题，
@@ -685,14 +714,31 @@ def zhNameOf(placeCode: str, placeName: str = "", centerLat=None,
 
 
 # ============================================================
-# 五、回填 pb_place.nameZh（**只填 NULL，绝不覆盖**）
+# 五、回填 pb_place.nameZh / nameSource（**只填 NULL，绝不覆盖**）
 # ============================================================
-def _placesWithoutNameZh() -> list:
-    """pb_place 里**还没有** nameZh 的行（nameZh IS NULL 或空串）。
+def _placesPendingNameSource() -> list:
+    """pb_place 里 **`nameSource` 还没定** 的行（NULL 或空串）。
+
+    ⚠️ R12（DR-53）起判据从「`nameZh` 是不是空」换成「**`nameSource` 是不是空**」：
+       旧判据在人工入口出现后就不够了 —— 人工新建的地点行 `nameZh` 也曾经是空，
+       光看 `nameZh` 会把"用户还没命名"与"用户命名成了一个地理数据集不认识的名字"
+       混成一类，于是人工名会被区县名**静默盖掉**（R12 实测到的那个现象）。
+       `nameSource='manual'` 的行**完全不进候选集**，覆盖在 SQL 层面就做不到。
+
+    候选集里有三种行，分开处理：
+      · `nameSource` 空 + `nameZh` 空   -> 算地理名，填 `nameZh` + `nameSource='geo'`
+      · `nameSource` 空 + `nameZh` 非空 -> **R12 之前的老行**（那时还没有人工入口，
+                                            非空即来自地理数据集）：只补
+                                            `nameSource='geo'`，**一个字都不动 nameZh**
+      · `nameSource='geo'` + `nameZh` 空 -> **地理名被清空过**，重算填回来。
+        为什么允许：`geo` 这个名字本来就是数据集**算出来的派生值**，与
+        `photoCount` 同类 —— 清空了就该能复算（旧用例
+        `test_rebuildNameZhIsIdempotent` 钉的就是这条）。
+        ⚠️ 与 `manual` 的区别正在这里：人工名（含"人工清空"）**一律不进候选集**。
 
     ⚠️ 为什么用 `query.selectList` 而不是生成层的 `query_pb_place`：
        生成层的等值过滤与 nullFields 都是**白名单**（防 SQL 注入），
-       `nameZh` 不在白名单里。而「按 nameZh 是不是空来筛」是本函数的
+       `nameZh`/`nameSource` 不在白名单里。而「按它们是不是空来筛」是本函数的
        **全部业务逻辑**，不能靠给白名单加一项来绕过 ——
        那等于让生成层为某一个业务开一个后门。
        `queryCommon.selectList` 是项目既定的「只读出口」（placeStore.listPlaces
@@ -700,34 +746,50 @@ def _placesWithoutNameZh() -> list:
     """
     return query.selectList(
         "SELECT g.placeCode AS placeCode, g.placeName AS placeName,"
-        " g.source AS source, g.centerLat AS centerLat, g.centerLon AS centerLon"
+        " g.source AS source, g.centerLat AS centerLat, g.centerLon AS centerLon,"
+        " g.nameZh AS nameZh"
         " FROM pb_place g"
-        " WHERE g.delFlag = %s AND (g.nameZh IS NULL OR g.nameZh = '')"
+        " WHERE g.delFlag = %s"
+        "   AND (g.nameSource IS NULL OR g.nameSource = ''"
+        "        OR (g.nameSource = %s AND (g.nameZh IS NULL OR g.nameZh = '')))"
         " ORDER BY g.recID ASC",
-        (comGD.DEL_FLAG_NO,))
+        (comGD.DEL_FLAG_NO, NAME_SOURCE_GEO))
+
+
+def countManualNames() -> int:
+    """`nameSource='manual'` 的行数 —— 它们是**任何自动流程都不得覆盖**的行。"""
+    if not query.tableExists("pb_place"):
+        return 0
+    return int(query.selectValue(
+        "SELECT COUNT(*) AS rowNum FROM pb_place g"
+        " WHERE g.delFlag = %s AND g.nameSource = %s",
+        (comGD.DEL_FLAG_NO, NAME_SOURCE_MANUAL), default=0) or 0)
 
 
 def rebuildNameZh(dryRun: bool = False, dbFile: str = None) -> dict:
     """遍历 pb_place，为**还没有 nameZh** 的行补中文名。
 
-    ⚠️⚠️ **绝不覆盖已有的 nameZh**
-    --------------------------
-      人工填的（`pb_place.source=1` 的行）与上一轮算出来的都**原样保留**。
+    ⚠️⚠️ **绝不覆盖已有的 nameZh**（DR-28 + R12/DR-53 的收紧版）
+    --------------------------------------------------------
+      候选集见 `_placesPendingNameSource()`：**`nameSource='manual'` 的行
+      （R12 的 B 重命名、A 的自由输入地名）根本不在里面** ——
+      覆盖在 SQL 层面就做不到，不靠调用方自觉。
       这条是 `nameZh` 敢做成非派生列的**前提**：一旦允许覆盖，
       「用户辛辛苦苦把「阿勒泰市」改成「我家」」会在下一次 rebuild 时消失，
       而且不报错。
-      实现上就是**只 SELECT `nameZh IS NULL OR nameZh = ''` 的行** ——
-      覆盖在 SQL 层面就做不到，不靠调用方自觉。
 
     统计口径
     --------
-      candidates  参与计算的行数（= 还没有 nameZh 的行）
-      filled      实际写入 nameZh 的行数
+      candidates  参与计算的行数（见 `_placesPendingNameSource()`）
+      filled      新写入 `nameZh` 的行数（这些行同时被标 `nameSource='geo'`）
+      backfilled  **老行**只补来源的行数（`nameZh` 非空但没有 `nameSource`；
+                  只写 `nameSource='geo'`，一个字都不动 `nameZh`）
+      manualRows  库里 `nameSource='manual'` 的行数（**受保护、永不覆盖**的行）
       byReason    每个 reason 的计数（**这是本函数最有价值的输出**：
                   「境外 3 / 无坐标 1 / 覆盖重叠 1」一眼就能看出数据有没有问题）
       manualFilled  上面 filled 里 `source=1`（手工行）的条数。
-                     ⚠️ 单独报出来：手工行被补了中文名是**用户没要求的行为**，
-                     必须让人看见，而不是混在 filled 里
+                    ⚠️ 单独报出来：手工行被补了中文名是**用户没要求的行为**，
+                    必须让人看见，而不是混在 filled 里
 
     dryRun
     ------
@@ -739,13 +801,27 @@ def rebuildNameZh(dryRun: bool = False, dbFile: str = None) -> dict:
         raise RuntimeError("pb_place 表不存在 —— 先跑一次 tools\\build_db.py")
 
     started = time.time()
-    rows = _placesWithoutNameZh()
+    rows = _placesPendingNameSource()
     byReason, samples = {}, []
-    filled = manualFilled = 0
+    filled = manualFilled = backfilled = 0
     now = misc.getTime()
 
     for one in rows:
         code = str(one.get("placeCode") or "")
+        # ---- 老行：R12 之前就有中文名，只是没记来源 -> 只补来源，不动名字 ----
+        if str(one.get("nameZh") or "").strip():
+            if dryRun:
+                backfilled += 1
+                continue
+            rtn = sqliteCommon.updateTableGeneral(
+                "pb_place", "placeCode = %s", (code,),
+                {"nameSource": NAME_SOURCE_GEO, "modifyYMDHMS": now})
+            if rtn and rtn > 0:
+                backfilled += 1
+            else:
+                _LOG.error("rebuildNameZh: 补 nameSource 失败 placeCode=%s", code)
+            continue
+
         got = zhNameOf(code, str(one.get("placeName") or ""),
                        one.get("centerLat"), one.get("centerLon"))
         reason = str(got.get("reason") or "")
@@ -776,9 +852,14 @@ def rebuildNameZh(dryRun: bool = False, dbFile: str = None) -> dict:
         # ⚠️ `updateTableGeneral` 出错返回 **0 而不是负数**（见它的实现），
         #   所以只能按「> 0 才算真写了」计数；把 0 记成"已补"会让统计
         #   看着对、实际没写，而表现是「界面上的中文名还是英文」。
+        # ⚠️ `nameZh` 与 `nameSource` **必须在同一次 UPDATE 里写**：
+        #   分两次写的话，中间那一刻的库是「有名字但没来源」的，
+        #   而此时再来一次 rebuildNameZh 就会把它当老行补成 geo
+        #   —— 人工名会被降级成地理名，且不报错。
         rtn = sqliteCommon.updateTableGeneral(
             "pb_place", "placeCode = %s", (code,),
-            {"nameZh": str(nameZh), "modifyYMDHMS": now})
+            {"nameZh": str(nameZh), "nameSource": NAME_SOURCE_GEO,
+             "modifyYMDHMS": now})
         if rtn and rtn > 0:
             filled += 1
             if int(one.get("source") or 0) == 1:
@@ -787,10 +868,11 @@ def rebuildNameZh(dryRun: bool = False, dbFile: str = None) -> dict:
             _LOG.error("rebuildNameZh: 写 nameZh 失败（影响 0 行）placeCode=%s", code)
 
     out = {"candidates": len(rows), "filled": filled, "manualFilled": manualFilled,
+           "backfilled": backfilled, "manualRows": countManualNames(),
            "byReason": byReason, "samples": samples, "dryRun": bool(dryRun),
            "provider": _PROVIDER, "ready": bool(_ZH_READY),
            "elapsed": round(time.time() - started, 2)}
-    if filled and not dryRun:
+    if (filled or backfilled) and not dryRun:
         # ⚠️ 必须让 placeStore 的 placeName->nameZh 快照失效：
         #   否则「同一个进程里跑完回填、紧接着调 /api/photos」看到的还是旧值，
         #   而库里已经是新的 —— 排障时会得出「回填没生效」的**错误结论**。

@@ -90,12 +90,62 @@ def settingsModule():
         )
 
 
+#: 三个配置名 -> app.ini 里的 `[段] 键`（R10 新增的外置配置层）
+#:
+#: ⚠️ 写成映射而不是在 readSetting 里 if/else 拼字符串：
+#:    改名（比如把 photo_root 改成 photoRoot）时**只有这一处会漏**。
+_INI_KEYS: dict = {
+    "PHOTO_ROOT": ("paths", "photo_root"),
+    "THUMB_ROOT": ("paths", "thumb_root"),
+    "DB_FILE": ("paths", "db_file"),
+}
+
+
+def _readIniSetting(name: str) -> str:
+    """读外置 `app.ini`（R10）：**冻结分发环境下用户唯一能改的配置出口**。
+
+    返回 `""` 表示"这一层没给值，继续往下回落"。
+    显式留空（`thumb_root=`）与键不存在在这里**都返回 ""** ——
+    两者的语义在本项目里一致（都表示"走 DR-8 派生"），
+    因为派生结果**天然跟随 photo_root**，写死反而会与用户改过的 photo_root 分叉。
+
+    ⚠️ 源码模式（未冻结）下没有 `app.ini` 这条隐式通道，函数立刻返回 ""，
+       行为与本步之前**逐字相同**（1400+ 条单测依赖这一点）。
+    """
+    pair = _INI_KEYS.get(name)
+    if not pair:
+        return ""
+    try:
+        # 局部 import：appIni 只在**读配置**时需要，
+        # 而 paths 是全项目最底层、被几乎所有模块 import 的文件 ——
+        # 把它拖到顶层会让 import 顺序变成一处新的隐式依赖。
+        from config import appIni as appIni
+    except ImportError:                                          # pragma: no cover - 兜底
+        return ""
+    try:
+        return appIni.setting(pair[0], pair[1], "")
+    except Exception:                                            # pragma: no cover - 兜底
+        return ""
+
+
 def readSetting(name: str) -> str:
     """读一项本机配置（PHOTO_ROOT / THUMB_ROOT / DB_FILE）。
 
-    取值优先级：local_settings.<name> → basicSettings.DEFAULT_<name> → ""
+    取值优先级（R10 起变成三层）：
+        ① **app.ini**（外置，冻结环境下唯一可改的口；源码模式不参与）
+        ② local_settings.<name>（源码开发用）
+        ③ basicSettings.DEFAULT_<name>
+        ④ ""
     返回值已去首尾空白；None 视作"未配置"。
+
+    ⚠️ 为什么 app.ini 必须**高于** local_settings：
+       `local_settings.py` 是包内 Python 模块，冻结后用户改不了；
+       如果让它压过 app.ini，安装器写进 app.ini 的 photo_root 就永远不生效 ——
+       用户改了配置、重启、**界面没变**，而且不报错。
     """
+    iniVal = _readIniSetting(name)
+    if iniVal:
+        return iniVal
     ls = settingsModule()
     val = getattr(ls, name, None)
     if val is None or (isinstance(val, str) and val.strip() == ""):

@@ -318,7 +318,7 @@ class ScanRunner(object):
             raise FileNotFoundError("scanJob %s: 扫描根不存在或不是目录: %s"
                                     % (self.jobCode, self.root))
         if not self.batchSize:
-            self.batchSize = int(job.get("batchSize") or basicSettings.BATCH_SIZE)
+            self.batchSize = int(job.get("batchSize") or basicSettings.batchSize())
         if self.batchSize <= 0:
             raise ValueError("scanJob %s: batchSize 非法: %s" % (self.jobCode, self.batchSize))
 

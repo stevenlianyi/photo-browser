@@ -73,6 +73,7 @@ if _SRC_DIR not in sys.path:
 import numpy as np                                                # noqa: E402
 
 from common import miscCommon as misc                             # noqa: E402
+from common import resourcePath as resourcePath                   # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
 from processor.media import faceCropper as faceCropper            # noqa: E402
 from processor.media import thumbStore as thumbStore              # noqa: E402
@@ -745,10 +746,14 @@ class _RawOnnxBackend(object):
 
     def __init__(self, modelRoot: str = None, detSize: tuple = DEFAULT_DET_SIZE,
                  meanShapePath: str = None, minDetScore: float = None,
-                 minFaceEdge: int = None, maxYaw: float = None):
+                 minFaceEdge: int = None, maxYaw: float = None,
+                 modelPack: str = None):
         import onnxruntime as ort
 
-        self.root = modelRoot or defaultModelRoot()
+        # ⚠️ 本后端要的是**包目录**（含三个 onnx）；而 FaceEngine 统一传下来的
+        #    是 insightface 口径的**基目录**。resolveModelPackDir() 是那个转换点。
+        self.root = resolveModelPackDir(modelRoot, modelPack)
+        self.modelPack = modelPack or DEFAULT_MODEL_PACK
         detFile = os.path.join(self.root, DET_FILE)
         recFile = os.path.join(self.root, REC_FILE)
         for one in (detFile, recFile):
@@ -1057,10 +1062,100 @@ def p2sRt(P) -> tuple:
     return s, np.concatenate((r1, r2, r3), 0), t
 
 
+#: insightface 的主目录（其下是 `models\<包>`）。
+#: ⚠️ 与 insightface 自己的 `DEFAULT_ROOT = '~/.insightface'` 同值 ——
+#:   显式写出来的目的是"三段回退的第三段"要有一个**说得出名字**的落点。
+USER_MODEL_HOME: str = os.path.join("~", ".insightface")
+
+
+def userModelBaseRoot() -> str:
+    """用户主目录下的模型基目录：`%USERPROFILE%\\.insightface`"""
+    return os.path.abspath(os.path.expanduser(USER_MODEL_HOME))
+
+
+def bundledModelPackDir(pack: str = None) -> str:
+    """**随包**模型包目录（`<app>\\models\\<pack>`）；不存在返回 ""。
+
+    判定要求包里**至少有检测模型** `det_10g.onnx` —— 只判目录存在是不够的：
+    空目录（例如杀软把 onnx 隔离了）会让 insightface 认为"已就绪"，
+    然后在真正推理时才炸，报错点离原因十万八千里。
+    """
+    name = pack or DEFAULT_MODEL_PACK
+    for candidate in resourcePath.modelPackCandidates(name):
+        if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, DET_FILE)):
+            return os.path.abspath(candidate)
+    return ""
+
+
+def userModelPackDir(pack: str = None) -> str:
+    """用户主目录下的模型包目录 `%USERPROFILE%\\.insightface\\models\\<pack>`"""
+    return os.path.join(userModelBaseRoot(), "models", pack or DEFAULT_MODEL_PACK)
+
+
+def modelBaseRoot(pack: str = None, modelRoot: str = None) -> str:
+    """**模型基目录**（其下还有一层 `models\\<pack>`）—— 交给 insightface 的 `root=`。
+
+    R10 的三段回退（**这是打包后"离线可用"的开关**）
+    ------------------------------------------------
+      ① `<app>\\models\\<pack>`（**随包，优先**）
+           有它就不会联网；离线机、断网环境都靠这一段。
+      ② `%USERPROFILE%\\.insightface\\models\\<pack>`（用户以前下过的）
+      ③ 都没有 -> 返回 `%USERPROFILE%\\.insightface`，**由 insightface 自己下载**
+           （约 325MB；下载失败时它的报错是原生的，不做包装，
+            因为这里无法把 URL/代理/证书问题讲得比它更清楚）
+
+    ⚠️ 显式传 `modelRoot`（命令行/设置页）时**直接采用，不做回退**：
+       那是"我知道模型在哪"，再替他猜一次会把明确指定变成模糊建议。
+    ⚠️ 返回值一定是 insightface 口径的**基目录**（不是包目录）——
+       源码模式下它等于 `~/.insightface`，与 insightface 的默认值一致，
+       所以**源码模式的行为与本步之前逐字相同**。
+    """
+    if modelRoot:
+        return os.path.abspath(str(modelRoot))
+    name = pack or DEFAULT_MODEL_PACK
+    bundled = bundledModelPackDir(name)
+    if bundled:
+        # `<app>\\models\\<pack>` -> 基目录是 `<app>`
+        return os.path.dirname(os.path.dirname(bundled))
+    if os.path.isdir(userModelPackDir(name)):
+        return userModelBaseRoot()
+    _LOG.info("随包模型与用户模型都没有 %s，将交由 insightface 联网下载到 %s",
+              name, userModelPackDir(name))
+    return userModelBaseRoot()
+
+
+def resolveModelPackDir(modelRoot: str = None, pack: str = None) -> str:
+    """把一个"模型根"解析成**模型包目录**（内含 det/rec/pose 三个 onnx）。
+
+    兼容两种入参（历史上两种都出现过，**别让调用方去猜**）：
+      · 已经是包目录（含 `det_10g.onnx`）-> 原样返回；
+      · 基目录（其下有 `models\\<pack>`）-> 拼出包目录；
+      · 空 -> 走 `modelBaseRoot()` 的三段回退。
+
+    ⚠️ 裸 ONNX 后端要的是**包目录**，而 insightface 的 `FaceAnalysis(root=)`
+       要的是**基目录** —— 同一个参数名 `modelRoot` 在两个后端里含义不同，
+       这个函数就是那个转换点。写错不会有异常，只会"模型找不到"。
+    """
+    name = pack or DEFAULT_MODEL_PACK
+    if modelRoot:
+        root = os.path.abspath(str(modelRoot))
+        if os.path.isfile(os.path.join(root, DET_FILE)):
+            return root
+        nested = os.path.join(root, "models", name)
+        if os.path.isdir(nested):
+            return nested
+        # 两者都不像，按"包目录"处理：让下游的 FileNotFoundError 报出真实路径
+        return root
+    return os.path.join(modelBaseRoot(name), "models", name)
+
+
 def defaultModelRoot() -> str:
-    """模型包目录（与 insightface 的默认位置一致：~/.insightface/models/<pack>）"""
-    return os.path.join(os.path.expanduser("~"), ".insightface", "models",
-                        DEFAULT_MODEL_PACK)
+    """模型**包**目录（内含 det/rec/pose 三个 onnx）。
+
+    与 insightface 的默认位置一致（`~/.insightface/models/<pack>`），
+    但**随包优先**（R10）：`<app>\\models\\<pack>` 存在时返回它。
+    """
+    return resolveModelPackDir(None, DEFAULT_MODEL_PACK)
 
 
 def detectEmbeddedNormalization(modelFile: str) -> tuple:
@@ -1179,14 +1274,11 @@ def findMeanShape() -> str:
     env = os.environ.get("PHOTO_BROWSER_MEAN_SHAPE", "")
     if env:
         return env
-    here = os.path.abspath(_HERE_DIR)                 # code/src/engine/face
-    for relative in (("..", "..", "..", "data"),      # code/data   <- 仓库自带
-                     ("..", "..", "data")):           # code/src/data（历史布局，兼容）
-        # ⚠️ 必须 normpath：直接 join 会留下 "..\..\..\data\meanshape_68.npz" 这种
-        #    带 .. 的路径 —— 文件能打开，但日志里看着像"从奇怪的地方加载"，
-        #    将来按路径比对/写文档时也对不上。
-        local = os.path.normpath(os.path.join(here, *relative))
-        candidate = os.path.join(local, "meanshape_68.npz")
+    # ⚠️ R10：候选路径改由 resourcePath 给出（冻结后 `_HERE_DIR` 指向 `_internal`，
+    #    原先那句 `..\..\..\data` 相对推导必然落空 —— 而落空的后果**是静默的**：
+    #    pose 不可用 -> yaw 过滤不生效 -> side_face 计数恒为 0，不报任何错。
+    #    源码模式仍然按「code/data 优先于 code/src/data」的老顺序命中同一份文件。
+    for candidate in resourcePath.dataFileCandidates("meanshape_68.npz"):
         if os.path.isfile(candidate):
             return candidate
     try:
@@ -1261,10 +1353,21 @@ class FaceEngine(object):
         self.loadError = ""
         chosen = (backend or "auto").lower()
         limits = (self.minDetScore, self.minFaceEdge, self.maxYaw)
+        # ---- 模型根：**只在这里解析一次**，再分发给两个后端（R10）----
+        #
+        # 为什么必须在这里解析而不是各后端自己解析：
+        #   insightface 后端要**基目录**（其下有 models\<pack>），裸 ONNX 后端要**包目录**。
+        #   各自解析 -> 子进程 / 降级路径 / 显式指定三条路各算一遍，
+        #   迟早出现"主后端用了随包模型、降级后找不到模型"这种半死状态。
+        #   ⇒ 主进程解析成基目录，裸后端用 resolveModelPackDir() 转一次。
+        #
+        # ⚠️ 显式传 modelRoot（命令行/设置页）时原样采用；为空则走三段回退
+        #    （随包 → 用户主目录 → 下载），见 modelBaseRoot()。
+        baseRoot = modelBaseRoot(self.modelPack, modelRoot)
         if chosen in ("auto", "insightface"):
             try:
                 self._backend = _InsightFaceBackend(modelPack, self.detSize,
-                                                    modelRoot=modelRoot,
+                                                    modelRoot=baseRoot,
                                                     minDetScore=limits[0],
                                                     minFaceEdge=limits[1],
                                                     maxYaw=limits[2])
@@ -1282,10 +1385,11 @@ class FaceEngine(object):
                 if chosen == "insightface":
                     raise
         if self._backend is None:
-            self._backend = _RawOnnxBackend(modelRoot=modelRoot, detSize=self.detSize,
+            self._backend = _RawOnnxBackend(modelRoot=baseRoot, detSize=self.detSize,
                                             minDetScore=limits[0],
                                             minFaceEdge=limits[1],
-                                            maxYaw=limits[2])
+                                            maxYaw=limits[2],
+                                            modelPack=self.modelPack)
             self.backendName = self._backend.name
         self.modelRoot = getattr(self._backend, "root", "")
         # reportRejected：把**被丢弃的人脸**也一并回传（只有 detScore/短边/yaw，

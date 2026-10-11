@@ -50,6 +50,7 @@ if _SRC_DIR not in sys.path:
 from common import globalDefinition as comGD                    # noqa: E402
 from common import miscCommon as misc                                  # noqa: E402
 from common import paths as paths                                      # noqa: E402
+from common import resourcePath as resourcePath                        # noqa: E402
 from config import basicSettings as basicSettings                # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
 from engine.face import faceStore as faceStore                    # noqa: E402
@@ -146,11 +147,21 @@ def preflight() -> dict:
             optional.append((name, why))
     out = {"ok": not missing, "missing": missing, "optional": optional}
     if missing:
-        out["hint"] = ("缺少人脸识别依赖：%s。请用**项目的 venv** 执行"
-                       " `code\\.venv\\Scripts\\pip install -i https://pypi.org/simple -r requirements.txt`"
-                       "（直接用系统 python 跑会缺 onnxruntime/cv2，"
-                       "表现为「任务成功但一张脸都没检出」）"
-                       % "、".join("%s（%s）" % (n, w) for n, w in missing))
+        # ⚠️ R10：提示必须**可执行**。冻结产物里依赖是打进去的，用户既没有
+        #    `code\.venv` 也没有 pip —— 给他 `pip install -r requirements.txt`
+        #    等于让他去执行一条不存在的命令。
+        if resourcePath.isFrozen():
+            out["hint"] = ("缺少人脸识别依赖：%s。这是**打包产物不完整** —— "
+                           "请重新安装 photo-browser（或在界面「设置」页点"
+                           "「初始化 / 修复数据库」后重启）；报错时请附上日志目录里的 "
+                           "facescheduler.log"
+                           % "、".join("%s（%s）" % (n, w) for n, w in missing))
+        else:
+            out["hint"] = ("缺少人脸识别依赖：%s。请用**项目的 venv** 执行"
+                           " `code\\.venv\\Scripts\\pip install -i https://pypi.org/simple -r requirements.txt`"
+                           "（直接用系统 python 跑会缺 onnxruntime/cv2，"
+                           "表现为「任务成功但一张脸都没检出」）"
+                           % "、".join("%s（%s）" % (n, w) for n, w in missing))
     return out
 
 
@@ -223,7 +234,7 @@ class FaceScheduler(scanSched.ScanScheduler):
         photoRoot = os.path.abspath(str(root or paths.photo_dir()))
         if not os.path.isdir(photoRoot):
             raise FileNotFoundError("createJob: 照片根不存在或不是目录: %s" % photoRoot)
-        size = int(batchSize or basicSettings.BATCH_SIZE)
+        size = int(batchSize or basicSettings.batchSize())
         if size <= 0:
             raise ValueError("createJob: batchSize 非法: %s" % size)
 
@@ -282,7 +293,7 @@ class FaceScheduler(scanSched.ScanScheduler):
         多取一些再过滤游标与磁盘缺失，保证凑不满时能提前判定"到头了"
         （否则 runBatch 会拿到空批次却以为还有下一批，永远 PAUSED 不 DONE）。
         """
-        size = int(batchSize or job.get("batchSize") or basicSettings.BATCH_SIZE)
+        size = int(batchSize or job.get("batchSize") or basicSettings.batchSize())
         cursor = parseCursor(job.get("lastCursor"))
         # overFetch 由 loadPhotoRows 内部的 2 倍 + 50 保证游标与缺失行有余量
         rows = faceStore.loadPhotoRows(

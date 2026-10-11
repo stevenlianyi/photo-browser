@@ -92,3 +92,22 @@ export function getPersonPlaces(personCode, params = {}) {
 export function rebuildPlaces() {
   return request.post('/places/rebuild')
 }
+
+/**
+ * 地点重命名（DR-52 · B）—— **只改 `pb_place.nameZh`**（显示名），
+ * `placeCode` 与 `placeName` 一个字都不动。
+ *
+ * 契约：
+ *   · `nameZh` 给值 = 设为该显示名（界面显示中文/自定义名）
+ *   · `nameZh` 给 null / '' = **清除**，界面回落显示 `placeName`
+ *
+ * ⚠️ **不需要** rebuild：`nameZh` 不在复算列里（DR-28），改它就是最终值。
+ *    但它是**归并键**（`GET /places?groupByNameZh=1` 按它归并）与**筛选键**
+ *    （`resolvePlaceFilter` 优先按它匹配）—— 改名后地点列表的归并分组会变，
+ *    按**新名字**筛选命中、按旧名字不再命中。所以调用方改完要刷新地点列表。
+ */
+export function renamePlace(placeCode, nameZh) {
+  return request.patch(`/places/${encodeURIComponent(placeCode)}`, {
+    nameZh: nameZh === undefined ? null : nameZh,
+  })
+}

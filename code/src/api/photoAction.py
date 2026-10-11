@@ -2,7 +2,7 @@
 #encoding: utf-8
 
 #Filename: photoAction.py
-#Description: photo-browser 照片级写接口（步骤 11）—— 影响面 / 软删 / 恢复 / 标记重复 / 年代修正
+#Description: photo-browser 照片级写接口（步骤 11）—— 影响面 / 软删 / 恢复 / 标记重复 / 年代修正 / 旋转 / 地点修正
 #
 # 为什么不并进 api/browse.py
 # ------------------------------------------------
@@ -46,6 +46,17 @@
 #   pb_review_log 那条链必须保持只装归属事实，塞一条旋转进去就是污染。
 #   ⚠️ 别把旋转并入上面那条链：它是**纯显示属性**，与"这张脸怎么被认成这个人"
 #      没有任何关系。写库逻辑在 processor/photoRotate.py。
+#
+# 地点修正（DR-52，`/photos/{photoCode}/place-fix`）—— 与上面五条的差别
+# ------------------------------------------------------------------
+#   · **两段式**：不带 confirm=1 只返回影响面（「纽约 98 -> 97 / 华盛顿 114 -> 115」
+#     以及 to.exists=false 的"这会新建一个地点"），因为它改完要**重建整个地点字典**。
+#   · **不落 pb_review_log**：与旋转同一条理由 —— 它不改变任何识别事实
+#     （不动 bbox / 质心 / shotBucket / 归属 / faceCount），而且完全可逆。
+#   · **落库后立刻同步 rebuildPlaces()**（唯一有"连带全量复算"的照片级动作）——
+#     `pb_place.photoCount` 是派生缓存，不 rebuild 就会出现
+#     「照片详情说华盛顿、地点列表说纽约 98 张」的自相矛盾。
+#   ⚠️ 写库逻辑在 processor/place/placeFix.py；本模块只做路由与错误映射。
 
 import os
 import sys
@@ -60,10 +71,11 @@ from common import miscCommon as misc                             # noqa: E402
 from processor import photoAction as photoAct                    # noqa: E402
 from processor import photoRotate                                 # noqa: E402
 from processor import photoTimeFix                                # noqa: E402
+from processor.place import placeFix                              # noqa: E402
 
 from fastapi import APIRouter, Query                              # noqa: E402
 
-_VERSION = "20261009"
+_VERSION = "20261011"
 
 _LOG = misc.setLogNew("apiPhotoAction", "apiphotoaction.log")
 
@@ -283,5 +295,72 @@ def rotateReset(photoCode: str) -> dict:
     try:
         result = photoRotate.resetRotate(code)
     except photoRotate.PhotoRotateError as e:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
+    return dto.okBody(executed=True, **result)
+
+
+# ============================================================
+# 六、地点修正（DR-52）—— 单张照片的「地点」改到别处 / 自由命名 / 清空回自动
+# ============================================================
+# 与上面几条的差别（两句话，别记混）：
+#   · **走两段式**（不带 confirm=1 只返回影响面）：改的是「这张照片属于哪个地点」，
+#     而改完要**重建整个地点字典**（一条全量 GROUP BY），让用户先看清
+#     「纽约 98 -> 97 / 华盛顿 114 -> 115」再决定。
+#   · **不落 pb_review_log**：地点修改不改变任何识别事实（不动 bbox / 质心 /
+#     shotBucket / 归属 / faceCount），而且完全可逆 —— 与旋转同一条口径
+#     （见模块头那段差别表）。写库逻辑在 processor/place/placeFix.py。
+
+@router.get("/photos/{photoCode}/place-fix",
+            summary="地点修正影响面（纯读；不给 placeName = 预览「恢复自动」）")
+def placeFixImpact(photoCode: str,
+                   placeName: str = Query(default=None,
+                                          description="目标地点名；省略 = 预览「恢复自动」")):
+    """这张照片的地点改成 `placeName` 之后会变成什么样。**一行都不写**。
+
+    返回见 `placeFix.previewFix`：current（现在从哪来的）/ target（会去哪，
+    `exists=false` 表示这会新建一个地点）/ counts（两边张数改前改后）/
+    fromBecomesEmpty / autoPlaceKey（「自动：纽约」）。
+    """
+    _require(photoCode)
+    try:
+        preview = placeFix.previewFix(str(photoCode), placeName)
+    except placeFix.PlaceFixError as e:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
+    preview["executed"] = False
+    preview["confirmRequired"] = True
+    return dto.okBody(**preview)
+
+
+@router.post("/photos/{photoCode}/place-fix",
+             summary="修正照片地点（不带 confirm=1 只返回影响面）")
+def fixPlace(photoCode: str, body: dto.PlaceFixBody = None,
+             confirm: int = Query(default=0,
+                                  description="**1 才执行**；不给/0 只返回影响面")):
+    """把这张照片的地点改成 `placeName`（**传 null / 空串 = 恢复自动**）。
+
+    落库后**立刻**同步调一次 `placeStore.rebuildPlaces()`（用户明确要求）——
+    `pb_place.photoCount` 是派生缓存，不 rebuild 就会出现
+    「照片详情说华盛顿、地点列表说纽约 98 张」的自相矛盾。
+    返回体里的 `rebuildSummary`（created/updated/zeroed）与 `rebuildElapsedMs`
+    让调用方看得见这次全量复算的影响与耗时。
+
+    ⚠️ `placeName` **必须显式给**（哪怕给 null）：不传是参数漏了（400），
+       传 null 才是「恢复自动」。两者在 JSON 里都是缺失值/None，
+       靠 `exclude_unset` 区分 —— 混在一起会让"前端漏传"变成
+       "静默把用户改的地点清掉"。
+    """
+    code = _require(photoCode)
+    given = body.model_dump(exclude_unset=True) if body is not None else {}
+    if "placeName" not in given:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID,
+                           "必须给 placeName（传 null 表示恢复自动）")
+    placeName = given.get("placeName")
+    if not int(confirm):
+        preview = placeFixImpact(code, placeName)
+        preview["confirmRequired"] = True
+        return preview
+    try:
+        result = placeFix.applyFix(code, placeName)
+    except placeFix.PlaceFixError as e:
         raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
     return dto.okBody(executed=True, **result)

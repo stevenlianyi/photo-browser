@@ -233,16 +233,22 @@ def photoSummary(row: dict) -> dict:
     #    用映射表而不是 SQL JOIN 的理由（重复 placeName 会让 JOIN
     #    把同一张照片返回两次）写在 placeStore.nameZhMap 的 docstring 里。
     #
-    # ⚠️ R4b：这里的「地点」是**聚合键**（目录名优先），不是 `placeName` 这一列
+    # ⚠️ R4b/R12：这里的「地点」是**聚合键**（人工修正 > 目录名 > GPS），
+    #    不是 `placeName` 这一列
     # ------------------------------------------------------------------
     #    `placeStore.placeKeyOf()` 是与 `pb_place` 聚合、`resolvePlaceFilter`
-    #    筛选**逐字等价**的那把键（DR-32）。
+    #    筛选**逐字等价**的那把键（DR-32/DR-52）。
     #    直接用 `row.get("placeName")` 的后果：那 598 张「目录名带地点」的
     #    照片在本接口里**没有地点**（它们的 placeName 是空的）——
     #    列表上看不出地点、点进去的地点链接也带不上值，而 114 张照片
     #    明明就躺在 `2013.07.26 华盛顿/` 目录里。
+    #    ⚠️ 第三段 `placeNameOverride` **必须**一起传：漏了它，会让
+    #    「用户手工改过地点的照片」在本接口里回到**旧地点**（接口 200、
+    #    字段在、值不对），与地点列表/筛选对不上 —— 本步最难查的一类退化。
+    placeOverride = str(row.get("placeNameOverride") or "").strip() or None
     placeName = placeStore.placeKeyOf(row.get("placeName"),
-                                      row.get("placeNameDir")) or None
+                                      row.get("placeNameDir"),
+                                      placeOverride) or None
     # DR-42：对外一律给**有效拍摄年**（人工修正优先）。三个字段的分工：
     #   shotYear         —— 有效年（筛选口径、展示口径，与划分年代档同源）
     #   shotYearExif     —— 机器读到的原值（EXIF -> 文件名 -> mtime）
@@ -264,6 +270,16 @@ def photoSummary(row: dict) -> dict:
         "shotYearExif": None if exifYear is None else int(exifYear),
         "shotYearOverride": None if override is None else int(override),
         "placeName": placeName,
+        # ⚠️ R12（DR-52）：两个字段给「地点修正」弹窗用，**默认值必须与现状一致**：
+        #    placeAutoName   = 未修正时的自动值（`placeKeyOf(..., 无 override)`）。
+        #                      前端据此显示「自动：纽约」。行里没有该列（某条 SQL 没
+        #                      选它）时它 == placeName，不会因为漏选列而变 None。
+        #    placeIsOverride = 是否人工修正过（决定「恢复自动」按钮出不出现）。
+        #    ⚠️ 用 `bool` 而不是把 override 原文透出：原文是内部存储，前端只需要
+        #       知道"有没有修正"；原文多透一次就多一处会被误用的字段。
+        "placeAutoName": (placeStore.placeKeyOf(row.get("placeName"),
+                                                row.get("placeNameDir")) or None),
+        "placeIsOverride": placeOverride is not None,
         # ⚠️ **显示名 = placeZh ?? placeName**（前端照此实现，别改契约）：
         #    placeZh 是境内地点的中文显示名，placeName 是**英文原值**。
         #    保留英文原值不是为了显示，而是**排障依据**：中文名对不对、
@@ -556,7 +572,12 @@ def getTimeline(year: int = Query(default=None, ge=1, le=9999,
         "SELECT COUNT(*) AS rowNum FROM pb_photo p WHERE " + cond, tuple(values))
     totalIn = int(countRow or 0)
     rows = query.selectList(
-        "SELECT p.photoCode, p.relPath, p.takenAt, p.shotYear, p.shotYearOverride, p.rotateDeg, p.placeName,"
+        # ⚠️ R4b/R12：`placeNameDir` 与 `placeNameOverride` **必须出现在 SELECT 里**。
+        #    `photoSummary()` 用它们算聚合键（三段优先：override > dir > placeName）。
+        #    少了它们，本接口的地点会与 /api/places / 筛选**对不上**
+        #    （接口 200、字段都在、只有值不对 —— 静默错里最难查的一类）。
+        "SELECT p.photoCode, p.relPath, p.takenAt, p.shotYear, p.shotYearOverride, p.rotateDeg,"
+        " p.placeName, p.placeNameDir, p.placeNameOverride,"
         " p.cameraModel, p.width, p.height, p.fileSize, p.mimeType,"
         " p.faceCount, p.isDuplicate, p.isMissing, p.scanState"
         " FROM pb_photo p WHERE " + cond +
@@ -584,11 +605,25 @@ def anchorOffsetOf(cond: str, values=(), sortColumn: str = "p.takenAt",
       没人会看的缩略图。让服务端把「它在这一批里的第几页」算出来，
       前端一次请求就能定位到它。
 
-    ⚠️ 返回 None = **不定位**（锚点不存在 / 不满足筛选 / 排序键为空）：
+    ⚠️ 返回 None = **不定位**（锚点不存在 / 不满足筛选 / 升序排序）：
        调用方保持原 `page` 参数 —— 宁可回第 1 页，也不要猜一个错的位置。
-    ⚠️ 只在 **DESC + 排序键非空** 时定位。调用方只有「scope 翻页」一种，
-       它的排序固定 `takenAt DESC`；NULL 在 ASC / DESC 下的位置得分别处理，
-       猜错会让翻页跳到完全无关的一段 —— 比「不定位」坏得多。
+    ⚠️ 只在 **DESC** 时定位（调用方只有「scope 翻页」一种，排序固定
+       `takenAt DESC`）：ASC 下 NULL 在最前，是另一套规则，得另写。
+
+    ⚠️ 排序键为空（NULL）**不是**「不适用」（DR-31 补②）
+    --------------------------------------------------
+      老相册的翻拍件 / 扫描件没有 EXIF 拍摄时间，`takenAt` 就是 NULL ——
+      实测库里 13%（4674 / 35694）是这样，而且**人工修正年代也补不上它**
+      （DR-42 只写 `shotYearOverride`，见 processor/photoTimeFix.py）。
+      而 SQLite 在 DESC 下把 NULL 当成**最大**，这些照片就排在**这一批的最后**。
+
+      旧实现把它算作「不适用」→ 退回第 1 页 → 前端第 1 页里当然找不到它 ⇒
+      「这一批照片里没有这张（可能已被筛掉）」+ 两个箭头全禁用、键盘不响应。
+      用户看到的是「这张改过时间的老照片翻不了页」，而且提示说的原因是假的
+      （它没被筛掉，是这一批的正式成员）。
+
+      所以 NULL 要**照样定位**：偏移 = 本批里排序键非空的张数
+      + 空值里 recID 更大的张数（NULL 段内仍按 `p.recID DESC` 排）。
     """
     code = str(anchorPhotoCode or "").strip()
     if not code:
@@ -598,10 +633,19 @@ def anchorOffsetOf(cond: str, values=(), sortColumn: str = "p.takenAt",
         "SELECT p.recID AS recID, " + sortColumn + " AS sortValue FROM pb_photo p"
         " WHERE p.photoCode = %s AND " + cond,
         (code,) + tuple(values))
-    if not rows or rows[0].get("sortValue") is None:
+    if not rows:
         return None
     value = rows[0].get("sortValue")
     recID = rows[0].get("recID")
+    # ⚠️ 排序键为空**照样定位**（见函数头 DR-31 补②）：SQLite 在 DESC 下把 NULL
+    #    当成最大 → 排在这一批的**最后**。偏移 = 非空张数 + 空值里 recID 更大的张数。
+    #    这两段合起来正好等于「排在锚点前面的行数」，与 ORDER BY 的语义一致。
+    if value is None:
+        return int(query.selectValue(
+            "SELECT COUNT(*) AS rowNum FROM pb_photo p WHERE " + cond +
+            " AND (" + sortColumn + " IS NOT NULL"
+            " OR (" + sortColumn + " IS NULL AND p.recID > %s))",
+            tuple(values) + (recID,)) or 0)
     # DESC：排在锚点前面的 = 排序键更大的 + 键相同但 recID 更大的
     return int(query.selectValue(
         "SELECT COUNT(*) AS rowNum FROM pb_photo p WHERE " + cond +
@@ -743,7 +787,12 @@ def listPhotos(page: int = Query(default=1, ge=1),
             p = anchorAt // s + 1
             at = dto.offsetOf(p, s)
     rows = query.selectList(
-        "SELECT p.photoCode, p.relPath, p.takenAt, p.shotYear, p.shotYearOverride, p.rotateDeg, p.placeName,"
+        # ⚠️ R4b/R12：`placeNameDir` 与 `placeNameOverride` **必须出现在 SELECT 里**。
+        #    `photoSummary()` 用它们算聚合键（三段优先：override > dir > placeName）。
+        #    少了它们，本接口的地点会与 /api/places / 筛选**对不上**
+        #    （接口 200、字段都在、只有值不对 —— 静默错里最难查的一类）。
+        "SELECT p.photoCode, p.relPath, p.takenAt, p.shotYear, p.shotYearOverride, p.rotateDeg,"
+        " p.placeName, p.placeNameDir, p.placeNameOverride,"
         " p.cameraModel, p.width, p.height, p.fileSize, p.mimeType,"
         " p.faceCount, p.isDuplicate, p.isMissing, p.scanState"
         " FROM pb_photo p WHERE " + cond +
@@ -1366,6 +1415,10 @@ def getPersonTimeline(personCode: str,
             " p.shotYear AS shotYear, p.shotYearOverride AS shotYearOverride,"
             " p.rotateDeg AS rotateDeg,"
             " p.faceCount AS faceCount, p.placeName AS placeName,"
+            # ⚠️ R12（DR-52）：聚合键的两段输入必须一起 SELECT —— 见 photoSummary
+            #    里「少了它们就是静默不一致」的说明。
+            " p.placeNameDir AS placeNameDir,"
+            " p.placeNameOverride AS placeNameOverride,"
             " p.cameraModel AS cameraModel, p.width AS width, p.height AS height,"
             " p.fileSize AS fileSize, p.mimeType AS mimeType,"
             " p.isDuplicate AS isDuplicate, p.isMissing AS isMissing,"

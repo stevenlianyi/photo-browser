@@ -7,10 +7,10 @@
 #   改表 = 改 pb_*.txt + 重跑生成器；直接改这里会在下次生成时被覆盖，
 #   且 .txt 与本文件会静默不一致（字段/索引/长度全部对不上）。
 #
-#   生成时间 : 2026-10-11 11:03:06
+#   生成时间 : 2026-10-11 21:06:41
 #   生成器   : database/sqliteCodeGenerator.py v20261005
 #   数据源   : pb_family.txt, pb_person.txt, pb_person_category.txt, pb_place.txt, pb_photo.txt, pb_face.txt, pb_person_centroid.txt, pb_photo_person.txt, pb_scan_job.txt, pb_review_log.txt, pb_era_sample.txt, pb_era_sample_item.txt
-#   表数量   : 12 张，字段 239 个，索引 32 个
+#   表数量   : 12 张，字段 241 个，索引 32 个
 #
 #   上层：processor / engine / api —— **业务层禁止裸 SQL，一律调本文件**（数据库设计.md §1.2）
 #   下层：common/sqliteHandle.py（读写双连接 + PRAGMA + %s->? 占位符转换）
@@ -316,6 +316,10 @@ TABLE_COLUMNS = {
             "sqliteType": 'TEXT', "length": 128, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
             "autoIncrement": False, "default": None, "comment": '地点中文名 境内区县级 境外为空回退placeName 非派生列rebuild绝不覆盖'},
+        {"name": 'nameSource', "type": 'VARCHAR(16)',
+            "sqliteType": 'TEXT', "length": 16, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '显示名来源 geo=离线地理数据集 manual=人工决定 NULL=未定可由rebuildNameZh填geo (DR-53)'},
         {"name": 'label', "type": 'VARCHAR(32)',
             "sqliteType": 'TEXT', "length": 32, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
@@ -418,6 +422,10 @@ TABLE_COLUMNS = {
             "sqliteType": 'TEXT', "length": 128, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
             "autoIncrement": False, "default": None, "comment": '目录名解析出的地点名 非派生列 扫描与rebuild均只填空不覆盖'},
+        {"name": 'placeNameOverride', "type": 'VARCHAR(128)',
+            "sqliteType": 'TEXT', "length": 128, "scale": None,
+            "notNull": False, "unique": False, "primaryKey": False,
+            "autoIncrement": False, "default": None, "comment": '人工修正地点名 聚合键最优先 空=未修正 (DR-52)'},
         {"name": 'cameraModel', "type": 'VARCHAR(128)',
             "sqliteType": 'TEXT', "length": 128, "scale": None,
             "notNull": False, "unique": False, "primaryKey": False,
@@ -917,7 +925,7 @@ TABLE_COLUMNS = {
         {"name": 'candidateYearCount', "type": 'INT',
             "sqliteType": 'INTEGER', "length": None, "scale": None,
             "notNull": True, "unique": False, "primaryKey": False,
-            "autoIncrement": False, "default": '0', "comment": '候选覆盖的年份数'},
+            "autoIncrement": False, "default": '0', "comment": '候选覆盖的年份数 不受年份区间筛选影响 用于显示他有N个年份本次抽M个'},
         {"name": 'photoCount', "type": 'INT',
             "sqliteType": 'INTEGER', "length": None, "scale": None,
             "notNull": True, "unique": False, "primaryKey": False,
@@ -1023,11 +1031,11 @@ TABLE_COLUMNS = {
         {"name": 'weight', "type": 'DECIMAL(12,6)',
             "sqliteType": 'NUMERIC', "length": 12, "scale": 6,
             "notNull": False, "unique": False, "primaryKey": False,
-            "autoIncrement": False, "default": None, "comment": '抽中那张的权重 weighted模式'},
+            "autoIncrement": False, "default": None, "comment": '抽中那张的权重 uniform模式恒为1.0 抽中概率=weight/weightSum'},
         {"name": 'weightSum', "type": 'DECIMAL(12,6)',
             "sqliteType": 'NUMERIC', "length": 12, "scale": 6,
             "notNull": False, "unique": False, "primaryKey": False,
-            "autoIncrement": False, "default": None, "comment": '本年权重总和 概率=weight/weightSum'},
+            "autoIncrement": False, "default": None, "comment": '本年权重总和 uniform模式等于候选数'},
         {"name": 'quality', "type": 'DECIMAL(6,4)',
             "sqliteType": 'NUMERIC', "length": 6, "scale": 4,
             "notNull": False, "unique": False, "primaryKey": False,
@@ -1173,8 +1181,8 @@ NULLABLE_FIELDS = {
     'pb_family': ('notes', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_person': ('familyName', 'familyGroupCode', 'relation', 'email', 'phone', 'birthday', 'vcardUid', 'avatarFaceCode', 'avatarFile', 'displayNamePinyin', 'ownerID', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_person_category': ('label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
-    'pb_place': ('source', 'photoCount', 'firstShotYear', 'lastShotYear', 'centerLat', 'centerLon', 'nameZh', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
-    'pb_photo': ('mimeType', 'width', 'height', 'orientation', 'takenAt', 'shotYear', 'shotYearOverride', 'lat', 'lon', 'placeName', 'placeNameDir', 'cameraModel', 'dupOfPhotoCode', 'movedToPhotoCode', 'scannedYMDHMS', 'ownerID', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
+    'pb_place': ('source', 'photoCount', 'firstShotYear', 'lastShotYear', 'centerLat', 'centerLon', 'nameZh', 'nameSource', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
+    'pb_photo': ('mimeType', 'width', 'height', 'orientation', 'takenAt', 'shotYear', 'shotYearOverride', 'lat', 'lon', 'placeName', 'placeNameDir', 'placeNameOverride', 'cameraModel', 'dupOfPhotoCode', 'movedToPhotoCode', 'scannedYMDHMS', 'ownerID', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_face': ('personCode', 'clusterCode', 'bbox', 'detScore', 'poseYaw', 'posePitch', 'quality', 'embedding', 'shotBucket', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_person_centroid': ('centroid', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
     'pb_photo_person': ('faceCode', 'confidence', 'label', 'memo', 'regID', 'regYMDHMS', 'modifyID', 'modifyYMDHMS', 'delFlag'),
@@ -2436,6 +2444,7 @@ def createTableSQL_pb_place(tableName):
         "centerLat NUMERIC,"
         "centerLon NUMERIC,"
         "nameZh TEXT,"
+        "nameSource TEXT,"
         "label TEXT,"
         "memo TEXT,"
         "regID TEXT,"
@@ -2689,6 +2698,7 @@ def createTableSQL_pb_photo(tableName):
         "lon NUMERIC,"
         "placeName TEXT,"
         "placeNameDir TEXT,"
+        "placeNameOverride TEXT,"
         "cameraModel TEXT,"
         "faceCount INTEGER NOT NULL DEFAULT 0,"
         "isDuplicate INTEGER NOT NULL DEFAULT 0,"

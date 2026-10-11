@@ -907,9 +907,105 @@ DIR_PLACE_RANGE_TRIM: str = r"^[～~〜\-–—至到]\s*\d{1,2}\s*"
 SERVER_HOST: str = "127.0.0.1"
 SERVER_PORT: int = 8765
 
+#: `[server] host` 的**允许值**：只允许回环（main/app.py 会再硬拦一道）。
+#: 放在 basicSettings 是因为「什么算回环」是**配置口径**，不是某个模块的实现细节。
+LOOPBACK_HOSTS: frozenset = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _iniSetting(section: str, key: str, default: str = "") -> str:
+    """读外置 `app.ini` 的一项；没有 app.ini（源码模式）时返回 `default`。
+
+    ⚠️ 局部 import：`appIni` 只依赖标准库与 `common.resourcePath`，
+       不会与 basicSettings 形成环；放局部是为了让"配置层"的 import 关系
+       在文件头一眼看得清（basicSettings 不 import 任何本项目模块是它的既有属性）。
+    """
+    try:
+        from config import appIni as appIni
+    except ImportError:                                          # pragma: no cover - 兜底
+        return default
+    try:
+        return appIni.setting(section, key, default)
+    except Exception:                                            # pragma: no cover - 兜底
+        return default
+
+
+def serverHost() -> str:
+    """监听地址。**INI 可覆盖**（`[server] host`），缺省 `SERVER_HOST`。
+
+    ⚠️ 常量 `SERVER_HOST` **保持不变**：它是"默认值"这一事实的唯一落点，
+       而取"当前生效值"请一律调本函数 —— 否则改了 app.ini 之后
+       「哪几处认、哪几处不认」会分叉（正是 R10 要消灭的那类静默不一致）。
+    """
+    return (str(_iniSetting("server", "host", SERVER_HOST)).strip() or SERVER_HOST)
+
+
+def serverPort() -> int:
+    """监听端口。**INI 可覆盖**（`[server] port`），缺省 `SERVER_PORT`。"""
+    text = str(_iniSetting("server", "port", "")).strip()
+    if not text:
+        return int(SERVER_PORT)
+    try:
+        return int(text)
+    except ValueError:
+        return int(SERVER_PORT)
+
+
+def openBrowser() -> bool:
+    """启动后是否自动打开浏览器。**INI 可覆盖**（`[server] open_browser`）。
+
+    ⚠️ 缺省 **False**（源码模式 / 无 app.ini）：serve.py 的历史行为就是
+       "只打印地址，不抢你的浏览器"。冻结产物的 app.ini 模板写的是
+       `open_browser = 1`，安装后自然为真 —— 桌面用户要的就是这一条。
+    """
+    return _iniBool("server", "open_browser", False)
+
+
+def _iniBool(section: str, key: str, default: bool) -> bool:
+    try:
+        from config import appIni as appIni
+    except ImportError:                                          # pragma: no cover - 兜底
+        return bool(default)
+    try:
+        return appIni.getBool(section, key, default)
+    except Exception:                                            # pragma: no cover - 兜底
+        return bool(default)
+
+
+def batchSize() -> int:
+    """一次扫描任务处理到该张数即暂停。**INI 可覆盖**（`[scan] batch_size`）。
+
+    ⚠️ 常量 `BATCH_SIZE` 保持不变（它是默认值）；业务代码取"当前生效值"请调本函数。
+    """
+    text = str(_iniSetting("scan", "batch_size", "")).strip()
+    if not text:
+        return int(BATCH_SIZE)
+    try:
+        value = int(text)
+    except ValueError:
+        return int(BATCH_SIZE)
+    return value if value > 0 else int(BATCH_SIZE)
+
+
+def effectiveSettings() -> dict:
+    """**当前生效值**快照（app.ini 覆盖之后）。启动横幅 / `/api/health` 用。
+
+    ⚠️ 与常量分开列：常量是"默认值"，本函数是"这次进程实际用的"。
+       两者不一致时**必须看得见** —— 否则「我改了 app.ini 怎么没变」
+       会变成一场猜谜（R10 排障第一现场）。
+    """
+    return {
+        "serverHost": serverHost(),
+        "serverPort": serverPort(),
+        "openBrowser": openBrowser(),
+        "batchSize": batchSize(),
+    }
+
 
 if __name__ == "__main__":
     print("BATCH_SIZE      :", BATCH_SIZE)
+    print("---- app.ini 覆盖后的生效值 ----")
+    for _key, _val in sorted(effectiveSettings().items()):
+        print("  %-14s: %s" % (_key, _val))
     for _name in sorted(MATCH_THRESHOLD_PRESETS):
         _lo, _hi = matchThresholds(_name)
         _mark = " <- 当前" if _name == MATCH_THRESHOLD_PRESET else ""

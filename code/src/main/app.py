@@ -48,6 +48,7 @@ if _SRC_DIR not in sys.path:
 
 from common import miscCommon as misc                             # noqa: E402
 from common import paths as paths                                 # noqa: E402
+from common import resourcePath as resourcePath                   # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
 from api import browse as browseApi                               # noqa: E402
@@ -83,7 +84,13 @@ LOOPBACK_HOSTS: frozenset = frozenset({"127.0.0.1", "localhost", "::1"})
 #:   退回「只返回 JSON 的根路由」，前端访问任何页面都是 404，
 #:   而单测把 _WEB_DIST monkeypatch 成临时目录，恰好绕开了这个真实路径。
 #:   （test_web_spa_fallback.py 里那条 realDist 部署冒烟用例就是为它补的。）
-_WEB_DIST = os.path.abspath(os.path.join(_CODE_DIR, "webserver", "dist"))
+#:
+#: ⚠️ R10 起**改走 `common.resourcePath`**（冻结后 `__file__` 指向临时/内部目录，
+#:   原先那句相对推导在打包产物里会整个指错 —— 而症状正是上面描述的"静默 404"）。
+#:   解析顺序（见 resourcePath.webDistCandidates）：
+#:     冻结：`<exe目录>\web` → `<_MEIPASS>\web`
+#:     源码：`<repo>/code/webserver/dist`（**逐字不变**，有单测断言它）
+_WEB_DIST = resourcePath.webDistDir()
 
 
 class StartupConfigError(Exception):
@@ -120,7 +127,9 @@ def assertLoopbackHost(host: str) -> str:
     """
     text = "" if host is None else str(host).strip()
     if not text:
-        return basicSettings.SERVER_HOST
+        # R10：缺省走 basicSettings.serverHost()（app.ini 可覆盖），
+        # 而不是裸常量 —— 否则「改了 app.ini 的 host」在这条分支上不生效
+        return basicSettings.serverHost()
     if text.lower() in LOOPBACK_HOSTS:
         return text
     raise StartupConfigError(
@@ -150,8 +159,13 @@ def _startup(dbFile: str = None, photoRoot: str = None, thumbRoot: str = None) -
 
     hasTable = sqliteCommon.chkTableExist("pb_photo")
     if not hasTable:
-        _LOG.warning("启动自检: pb_photo 不存在，图片接口会一律 404。"
-                     "先跑 tools\\build_db.py 与 tools\\scan_cli.py")
+        # ⚠️ 提示必须**可执行**（R10 硬约束）：冻结产物里没有 Python，
+        #    原先那句「先跑 tools\build_db.py 与 tools\scan_cli.py」
+        #    对打包用户是一句无效指引 —— 他照做只会得到
+        #    「'python' 不是内部或外部命令」。走 resourcePath.dbInitHint() 统一出口。
+        _LOG.warning("启动自检: pb_photo 不存在，图片接口会一律 404。%s",
+                     resourcePath.dbInitHint("库还没建好"))
+        print("[warn] %s" % resourcePath.dbInitHint("pb_photo 表不存在，图片接口会一律 404"))
     config = dict(paths.all_paths())
     config["overrides"] = {k: v for k, v in paths.rootOverrides().items() if v}
     config["photoTable"] = hasTable
@@ -202,11 +216,13 @@ def createApp(dbFile: str = None, photoRoot: str = None, thumbRoot: str = None,
         print("  photo    : %s（**只读**）" % cfg["photo"])
         print("  thumb    : %s（生成物，可随时重建）" % cfg["thumb"])
         print("  database : %s" % cfg["database"])
-        print("  pb_photo : %s" % ("就绪" if cfg["photoTable"] else "缺失，先跑 build_db/scan"))
+        print("  pb_photo : %s"
+              % ("就绪" if cfg["photoTable"]
+                 else resourcePath.dbInitHint("缺失，库还没建好")))
         print("  地点中文名: %s" % zhState.get("text", "?"))
         print("  CORS     : %s（仅回环来源）" % ("开" if cors else "关"))
         print("  监听     : http://%s:%d（仅回环）"
-              % (basicSettings.SERVER_HOST, basicSettings.SERVER_PORT))
+              % (basicSettings.serverHost(), basicSettings.serverPort()))
         print("")
         yield
         # ---- 收尾：顺序**不可颠倒**，每一步都在为下一步「清场」----
@@ -395,10 +411,10 @@ def main(argv=None) -> int:
         prog="photo-browser",
         description="启动 photo-browser 服务（**只绑 127.0.0.1**）",
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    parser.add_argument("--host", default=basicSettings.SERVER_HOST,
-                        help="监听地址（只允许回环，缺省 %s）" % basicSettings.SERVER_HOST)
-    parser.add_argument("--port", type=int, default=basicSettings.SERVER_PORT,
-                        help="监听端口（缺省 %d）" % basicSettings.SERVER_PORT)
+    parser.add_argument("--host", default=basicSettings.serverHost(),
+                        help="监听地址（只允许回环，缺省 %s）" % basicSettings.serverHost())
+    parser.add_argument("--port", type=int, default=basicSettings.serverPort(),
+                        help="监听端口（缺省 %d）" % basicSettings.serverPort())
     parser.add_argument("--db", default=None, help="库文件（缺省 paths.db_file()）")
     parser.add_argument("--root", default=None,
                         help="原图根（缺省 paths.photo_dir()，**只读**）")

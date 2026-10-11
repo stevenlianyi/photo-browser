@@ -211,7 +211,7 @@ class ScanScheduler(object):
         scanRoot = os.path.abspath(str(root or paths.photo_dir()))
         if not os.path.isdir(scanRoot):
             raise FileNotFoundError("createJob: 扫描根不存在或不是目录: %s" % scanRoot)
-        size = int(batchSize or basicSettings.BATCH_SIZE)
+        size = int(batchSize or basicSettings.batchSize())
         if size <= 0:
             raise ValueError("createJob: batchSize 非法: %s" % size)
 

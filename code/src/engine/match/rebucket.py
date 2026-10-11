@@ -76,6 +76,7 @@ if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
 from common import miscCommon as misc                             # noqa: E402
+from common import resourcePath as resourcePath                   # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
 from database.auto_generated import sqliteCommon                  # noqa: E402
 from engine.match import bucket as bucket                         # noqa: E402
@@ -712,12 +713,18 @@ def assertFacesFresh(personCode: str, confirmedOnly: bool = False,
         if len(rows) < PAGE_ROWS:
             break
     if stale:
+        # ⚠️ R10：指引必须**可执行**。冻结产物里没有 Python，
+        #    正确的下一步是界面「设置」页的那个动作（顺序同样是先刷桶再重算质心）。
+        if resourcePath.isFrozen():
+            howTo = ("请在界面「设置 → 年代分档」里点「重刷年代桶并重算质心」"
+                     "（顺序不可颠倒：先刷桶，再重算）")
+        else:
+            howTo = "python code\\src\\tools\\rebucket_cli.py --person %s" % code
         raise BucketStaleError(
             "%s 的 %d/%d 张脸 shotBucket 与当前口径不一致（生日=%s）："
-            "库里 %s，应为 %s。**先刷桶再重算质心**："
-            "python code\\src\\tools\\rebucket_cli.py --person %s"
+            "库里 %s，应为 %s。**先刷桶再重算质心**：%s"
             % (code, len(stale), checked, birthday or "(无)",
-               stale[0]["have"], stale[0]["want"], code))
+               stale[0]["have"], stale[0]["want"], howTo))
     return {"personCode": code, "checked": checked, "stale": []}
 
 

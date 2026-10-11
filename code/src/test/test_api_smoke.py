@@ -402,6 +402,11 @@ def test_photosAnchorLocatesPage(api_env):
       前端只拉第 1 页时「当前照片不在已加载列表里」，于是一个箭头都用不了
       （看起来就是「从人物库进来之后翻页坏了」，且不报错）。
       锚点定位是那个症状的唯一出路，所以**页号**必须算对。
+
+      ② 是「排序键为空」那种：翻拍 / 扫描的老照片没有 EXIF 拍摄时间，
+      `takenAt` 就是 NULL，SQLite 在 DESC 下把 NULL 当**最大** → 排在这一批
+      的最后。这里同样要算出页，否则这批里凡是 takenAt 为空的照片都会退化成
+      「这一批照片里没有这张（可能已被筛掉）」（DR-31 补②）。
     """
     client = api_env["client"]
     # size=2 + takenAt DESC：PH_2024_06b / PH_2024_06 / PH_2020_11 / PH_2019_04
@@ -428,12 +433,31 @@ def test_photosAnchorLocatesPage(api_env):
     assert mine["page"] == 2
     assert mine["items"][0]["photoCode"] == "PH_2013_01"
 
+    # ② 排序键为空（翻拍 / 扫描件没有 EXIF 拍摄时间，takenAt = NULL）：
+    #    9 张里它前面有 8 张非空（NULL 在 DESC 下最大 → 它排最后）-> offset 8 -> 第 5 页
+    nodate = client.get("/api/photos",
+                        params={"size": 2, "anchorPhotoCode": "PH_NODATE"}).json()
+    assert nodate["page"] == 5
+    assert nodate["items"][0]["photoCode"] == "PH_NODATE"
+
+    # ③ 真实场景复刻：某人的这一批里既有带时间的、也有 takenAt 为空的翻拍件，
+    #    点进去的正是那张空的 —— 它必须定位到这一批的**最后一张**，而不是第 1 页
+    assigner.confirm("FC_PH_NODATE_0", "P_beta")
+    mixed = client.get("/api/photos",
+                       params={"size": 1, "personCode": "P_beta",
+                               "anchorPhotoCode": "PH_NODATE"}).json()
+    assert mixed["total"] == 1
+    assert mixed["page"] == 1
+    assert mixed["items"][0]["photoCode"] == "PH_NODATE"
+
 
 def test_photosAnchorFallsBackWhenNotApplicable(api_env):
     """锚点**不适用**时不许乱定位：退回入参 `page`（宁可第 1 页，不给错的位置）。
 
-    三种不适用：① 锚点不满足本次筛选 ② 排序键为空（NULL 落在哪一段得另算）
+    三种不适用：① 锚点不满足本次筛选 ② 锚点照片根本不存在
                 ③ 升序排序（ASC 下 NULL 在最前，是另一套规则）。
+    ⚠️ 「排序键为空（takenAt 是 NULL）」**不在**这一组里 —— 它照样要定位
+       （NULL 在 DESC 下排最后），见 test_photosAnchorLocatesPage 的 ② ③。
     """
     client = api_env["client"]
     # ① 锚点有脸，但本次只要「无脸照片」-> 它不在结果里
@@ -441,11 +465,11 @@ def test_photosAnchorFallsBackWhenNotApplicable(api_env):
                       params={"size": 2, "page": 2, "hasFace": 0,
                               "anchorPhotoCode": "PH_2013_01"}).json()
     assert miss["page"] == 2
-    # ② takenAt 为空 -> 不猜
-    nodate = client.get("/api/photos",
-                        params={"size": 2, "page": 2,
-                                "anchorPhotoCode": "PH_NODATE"}).json()
-    assert nodate["page"] == 2
+    # ② 锚点照片不存在 -> 不猜
+    ghost = client.get("/api/photos",
+                       params={"size": 2, "page": 2,
+                               "anchorPhotoCode": "PH_NOT_EXIST"}).json()
+    assert ghost["page"] == 2
     # ③ 升序不定位
     asc = client.get("/api/photos",
                      params={"size": 2, "desc": 0,

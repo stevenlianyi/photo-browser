@@ -89,6 +89,7 @@ import FaceBox from '@/components/photo/FaceBox.vue'
 import PersonAvatar from '@/components/common/PersonAvatar.vue'
 import PhotoPager from '@/components/photo/PhotoPager.vue'
 import ShotYearFixDialog from '@/components/photo/ShotYearFixDialog.vue'
+import PlaceFixDialog from '@/components/photo/PlaceFixDialog.vue'
 import FixFaceDialog from '@/components/common/FixFaceDialog.vue'
 import { usePhotosStore } from '@/store/photos'
 import { useReviewStore } from '@/store/review'
@@ -148,8 +149,14 @@ const photoCode = computed(() => String(route.params.photoCode || ''))
  */
 const placeText = computed(() => placeDisplayName(photo.value))
 const placeTooltip = computed(() => {
+  const parts = []
   const raw = placeRawName(photo.value)
-  return raw ? `英文聚合键：${raw}` : undefined
+  if (raw) parts.push(`英文聚合键：${raw}`)
+  // R12：人工修正过的照片要能一眼看出"自动值是什么"（排障 + 恢复自动的依据）
+  if (photo.value?.placeIsOverride && photo.value?.placeAutoName) {
+    parts.push(`自动：${photo.value.placeAutoName}`)
+  }
+  return parts.length ? parts.join('；') : undefined
 })
 
 /** 姓名解析：getPhoto 的 faces[] 与 persons[] 是分开的两份数据，要在这里对上 */
@@ -627,6 +634,36 @@ async function onShotYearFixed(data) {
         + '请按其提示跑一次刷新年代档（否则那个人的匹配会静默失准）。',
     )
   }
+}
+
+// ---- 地点修正（DR-52）：这张照片的地点改到别处 / 自由命名 / 清空回自动 ----
+/**
+ * 为什么这个入口也在照片详情页
+ * --------------------------
+ *   地点的两条自动来源（逆地理 / 目录名）都是"这张照片所在的位置"的推断，
+ *   而用户能一眼看出的错误（"这是外婆家"）只存在于**具体某一张照片**上。
+ *   改完会重建整个地点字典（后端同步做），所以只刷新本页 + 缓存。
+ * ⚠️ 好处是**完全可逆**：目录名/逆地理原值都不改写，随时「恢复自动」。
+ */
+const placeFixVisible = ref(false)
+
+/**
+ * 修正成功后：**乐观更新**本地缓存里的地点字段（网格 / 时间轴立刻跟手），
+ * 再重取一次详情 —— 因为 `placeZh`（中文显示名）是服务端按 nameZh 映射算出来的，
+ * 本地算不出来，只能等服务端这一趟。
+ * ⚠️ 地点修改**不动任何识别数据**（人脸 / 质心 / 年代档全不变），
+ *    所以不刷队列角标 —— 与年代修正（那个要 review.fetchBadge()）不同。
+ */
+async function onPlaceFixed(data) {
+  const target = data?.target || {}
+  photos.setPlaceOverride(photo.value?.photoCode, {
+    placeName: target.placeKey || null,
+    placeZh: target.nameZh || null,
+    // 恢复自动后 override 被清掉 -> 不再是人工修正
+    placeIsOverride: !data?.restoreAuto,
+    placeAutoName: data?.autoPlaceKey || null,
+  })
+  await reloadPhoto()
 }
 
 // ---- 缩放查看（CSS 缩放 + 原生滚动，不再发请求）----
@@ -1259,9 +1296,19 @@ watch(photoCode, (code) => {
               </div>
               <div class="flex justify-between gap-3">
                 <dt class="shrink-0 text-ink-weak">地点</dt>
-                <!-- R5：显示**中文**（nameZh ?? placeName）；英文原值进 tooltip -->
+                <!-- R5：显示**中文**（nameZh ?? placeName）；英文原值进 tooltip
+                     R12：人工修正入口（与「年代」行同版式）；tooltip 同时给自动值 -->
                 <dd class="text-right text-ink" :title="placeTooltip">
                   {{ placeText }}
+                  <span
+                    v-if="photo.placeIsOverride"
+                    class="ml-1 text-caption text-brand-ink"
+                    :title="`自动：${photo.placeAutoName ?? '（无）'}（已人工修正）`"
+                    >人工修正</span
+                  >
+                  <el-button size="small" text @click="placeFixVisible = true">
+                    <Pencil class="h-3.5 w-3.5" aria-hidden="true" />修正
+                  </el-button>
                   <span v-if="photo.gps?.lat" class="block text-caption tabular-nums text-ink-weak">
                     {{ photo.gps.lat }}, {{ photo.gps.lon }}
                   </span>
@@ -1505,6 +1552,13 @@ watch(photoCode, (code) => {
       v-model="shotYearVisible"
       :photo="photo"
       @done="onShotYearFixed"
+    />
+
+    <!-- ============ 地点修正（DR-52）============ -->
+    <PlaceFixDialog
+      v-model="placeFixVisible"
+      :photo="photo"
+      @done="onPlaceFixed"
     />
 
     <!-- ============ 标记重复（选一张作为主照片）============ -->

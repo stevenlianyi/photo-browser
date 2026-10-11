@@ -65,9 +65,15 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 from common import paths as paths                                # noqa: E402
+from common import resourcePath as resourcePath                   # noqa: E402
+from config import appIni as appIni                               # noqa: E402
 from config import basicSettings as basicSettings                # noqa: E402
 
-_WEB_DIST = os.path.join(_CODE, "webserver", "dist")
+# ⚠️ R10 起改走 resourcePath（冻结后 `_CODE` 会指向 _internal，
+#    原先那句相对推导会让前端**静默 404** 而 /api/health 照样 200）。
+#    源码模式下取值与本步之前逐字相同（`<repo>/code/webserver/dist`）。
+#    ⚠️ 名字 `_WEB_DIST` 必须保留：test_serve_launcher.py 直接 monkeypatch 它。
+_WEB_DIST = resourcePath.webDistDir()
 _LOCAL_SETTINGS = os.path.join(_SRC, "config", "local_settings.py")
 _LOCAL_SETTINGS_EXAMPLE = _LOCAL_SETTINGS + ".example"
 
@@ -147,14 +153,28 @@ def preflight(port, dev, needWeb):
     indexFile = os.path.join(_WEB_DIST, "index.html")
     if needWeb and not dev:
         if not os.path.isfile(indexFile):
-            fatal.append("前端未构建：%s 不存在\n"
-                         "       先跑：cd code\\webserver; npm install; npm run build"
-                         % indexFile)
+            if resourcePath.isFrozen():
+                # 冻结产物里前端是**打进去的**，缺它只有一种可能：包本身残缺。
+                # 这时候给「npm run build」是无效指引（用户没有 Node，也没有源码）。
+                fatal.append("前端产物缺失：%s 不存在\n"
+                             "       这是打包产物不完整（web\\ 目录丢失）—— "
+                             "请重新安装；若是自行解压，请确认整包解压完整"
+                             % indexFile)
+            else:
+                fatal.append("前端未构建：%s 不存在\n"
+                             "       先跑：cd code\\webserver; npm install; npm run build"
+                             % indexFile)
         else:
             _out("  [ok] 前端产物：%s" % indexFile)
 
     # ---- ② 本机配置 ----
-    if not os.path.isfile(_LOCAL_SETTINGS):
+    if resourcePath.isFrozen():
+        # 冻结产物里 `local_settings.py` 是**包内部件**，"缺文件"这件事不存在。
+        # 真要检查的是外置 `app.ini` —— 而它会自动生成，所以这里不阻塞，
+        # 只把"生效路径"打出来（排障第一现场：到底该改哪个文件）。
+        _out("  [ok] 外置配置：%s"
+             % (appIni.loadedPath() or appIni.iniPath() or "(首次运行将自动生成)"))
+    elif not os.path.isfile(_LOCAL_SETTINGS):
         if os.path.isfile(_LOCAL_SETTINGS_EXAMPLE):
             fatal.append("缺本机配置：%s（该文件被 .gitignore 忽略，不入库）\n"
                          "       先复制一份并改PHOTO_ROOT：\n"
@@ -190,12 +210,18 @@ def preflight(port, dev, needWeb):
                              "       这是**你自己的照片目录**，应用只读不建 —— "
                              "请把照片放进去，或改 %s 里的 PHOTO_ROOT"
                              % (text, target, _LOCAL_SETTINGS))
-            elif key == "database" and not exists:
+            elif key == "db" and not exists:
+                # ⚠️ 这里原先写的是 `key == "database"` —— 而循环给的键是 `"db"`
+                #    （validate_layout 的键），两个函数对同一条路径用了不同键名。
+                #    结果是"库不存在"这条提示**永远不会被走到**，
+                #    后面那个 else 还会把不存在的库打印成 `[ok] 库：...`。
+                #    顺带修掉：提示走 resourcePath 的 frozen 分支 ——
+                #    打包用户没有 Python，`python code\src\tools\build_db.py` 是无效指引。
                 warn.append("库文件还不存在：%s\n"
-                            "         首次使用请先跑一次建库+扫描：\n"
-                            "           python code\\src\\tools\\build_db.py\n"
-                            "           python code\\src\\tools\\scan_cli.py --root <原图目录>"
-                            % target)
+                            "         %s\n"
+                            "         扫描照片：%s"
+                            % (target, resourcePath.dbInitHint("首次使用请先建库"),
+                               resourcePath.scanHint()))
             else:
                 _out("  [ok] %-4s：%s" % (text, target))
 
@@ -215,7 +241,7 @@ def preflight(port, dev, needWeb):
                         _out("  [ok] 库中照片 %s 张" % total)
                     else:
                         warn.append("库里 0 张照片 —— 界面会有内容但列表空\n"
-                                    "         跑一次扫描：python code\\src\\tools\\scan_cli.py")
+                                    "         扫描照片：%s" % resourcePath.scanHint())
             finally:
                 sqliteCommon.closeDb()
         except Exception as e:                                  # noqa: BLE001
@@ -286,11 +312,11 @@ def run(argv=None):
     parser = argparse.ArgumentParser(
         prog="serve.py", description="启动 photo-browser（先体检，再启动）",
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--host", default=basicSettings.SERVER_HOST,
+    parser.add_argument("--host", default=basicSettings.serverHost(),
                         help="监听地址（**只允许回环**，缺省 %s）"
-                             % basicSettings.SERVER_HOST)
-    parser.add_argument("--port", type=int, default=basicSettings.SERVER_PORT,
-                        help="监听端口（缺省 %d）" % basicSettings.SERVER_PORT)
+                             % basicSettings.serverHost())
+    parser.add_argument("--port", type=int, default=basicSettings.serverPort(),
+                        help="监听端口（缺省 %d）" % basicSettings.serverPort())
     parser.add_argument("--db", default=None, help="库文件（缺省按配置）")
     parser.add_argument("--root", default=None,
                         help="原图根（缺省按配置，**只读**）")
@@ -298,6 +324,11 @@ def run(argv=None):
     parser.add_argument("--dev", action="store_true",
                         help="同时起 Vite dev server，并提示打开 5173")
     parser.add_argument("--check-only", action="store_true", help="只做体检，不启动")
+    # R10：`[server] open_browser = 1` 时启动完自动开浏览器。
+    # ⚠️ 缺省 False（无 app.ini 的源码模式下不抢你的浏览器），
+    #    冻结产物的 app.ini 模板写的是 1 —— 桌面用户要的就是那一条。
+    parser.add_argument("--no-browser", action="store_true",
+                        help="启动后不自动打开浏览器（覆盖 app.ini 的 open_browser）")
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
     # ⚠️ 体检前先落路径覆盖，否则查的是「配置里的路径」而不是「本次要用的路径」。
@@ -362,6 +393,18 @@ def run(argv=None):
         _out("     dev 日志：%s" % os.path.join(_CODE, "log", "vite-dev.log"))
     _out("")
     _out("  Ctrl+C 停止。**备份/恢复必须先停服务**（见 README「备份与恢复」）")
+
+    # ---- 按需打开浏览器（R10；`[server] open_browser = 1` 时）----
+    # ⚠️ 开发模式（--dev）**不**自动开：那会打开 8765 上的旧快照，
+    #    而用户该看的是 5173 —— 上面已经用醒目文案提示过了。
+    if not args.no_browser and not args.dev and basicSettings.openBrowser():
+        try:
+            import webbrowser
+            webbrowser.open("http://%s:%d" % (args.host, args.port))
+            _out("  已请求打开浏览器：http://%s:%d" % (args.host, args.port))
+        except Exception as e:                                   # noqa: BLE001 - 兜底
+            # 打不开浏览器**绝不能**影响服务：这只影响"少点一次链接"
+            _out("  [注意] 打开浏览器失败（服务不受影响，请手动访问上面的地址）：%s" % e)
 
     try:
         while thread.is_alive():

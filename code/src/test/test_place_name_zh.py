@@ -797,3 +797,111 @@ def test_placesEndpointIsStillPureRead(zh_env):
     for _ in range(3):
         zh_env["client"].get("/api/places", params={"keyword": "朝阳"})
     assert fingerprint() == before, "GET /api/places 写了库"
+
+
+# ============================================================
+# 七、`nameSource` 严格版（R12 / DR-53）——「人工名永不被地理名覆盖」
+# ============================================================
+# 为什么单独立一节
+# ----------------
+#   R12 之前「只填 nameZh 为空的行」就够了。R12 的「自由输入地点名」造出了
+#   「nameZh 曾经为空、名字却是用户起的」这种行 —— 下一次 rebuildNameZh 会按
+#   坐标把它填成区县名，**用户输入的名字在显示层消失**，而数据层看起来完全正常。
+#   这一节的用例就是钉住那条新纪律：`manual` 行不出现在候选集里。
+
+def _setSource(placeName: str, source) -> int:
+    from database.auto_generated import sqliteCommon as sqliteCommon
+    return sqliteCommon.updateTableGeneral(
+        "pb_place", "placeName = %s", (str(placeName),),
+        {"nameSource": source})
+
+
+def _sourceOf(placeName: str):
+    from database.auto_generated import sqliteCommon as sqliteCommon
+    rows = sqliteCommon.query_pb_place("pb_place", placeName=str(placeName))
+    return rows[0].get("nameSource") if rows else None
+
+
+def test_rebuildNameZhNeverTouchesManualRows(zh_env):
+    """⭐ `nameSource='manual'` 的行，`rebuildNameZh()` **一个字都不碰**。
+
+    ⚠️ 关键构造：这一行**有北京的真实坐标**（本来是能算出「北京市 · 朝阳区」的），
+       把 `nameZh` 清空再跑 —— 旧口径（只看 nameZh 空不空）会把它填回去，
+       新口径（看 nameSource）必须放过它。这就是「用户起的名字会不会被静默盖掉」
+       这条退化的判别用例。
+    """
+    from processor.place import placeNameZh as placeNameZh
+
+    _resetZhModule()
+    _setNameZh("北京", "")
+    _setSource("北京", placeNameZh.NAME_SOURCE_MANUAL)
+
+    report = placeNameZh.rebuildNameZh(dryRun=False)
+    assert report["manualRows"] >= 1, report
+    assert _nameZhOf("北京") == "", (
+        "manual 行的 nameZh 被地理名填回来了 —— 「外婆家」这类名字会在显示层消失")
+    # 再跑一遍：仍然一动不动（不是"第一次碰巧没填"）
+    placeNameZh.rebuildNameZh(dryRun=False)
+    assert _nameZhOf("北京") == ""
+    assert _sourceOf("北京") == placeNameZh.NAME_SOURCE_MANUAL
+
+
+def test_rebuildNameZhMarksGeoAndBackfillsLegacy(zh_env):
+    """`geo` 标记与新填 / 老行回填 / 幂等 —— 三种行一次跑清。
+
+    · 老行（`nameZh` 非空、`nameSource` 为空）-> **只补来源**，名字一个字不动
+    · 空行（两个都空）                    -> 填名字 + 标 `geo`
+    · 第二次跑                             -> `filled` 与 `backfilled` 都是 0
+    """
+    from processor.place import placeNameZh as placeNameZh
+
+    _resetZhModule()
+    # zh_env 已经把「北京」填成「北京市 · 朝阳区」，但（R12 之前的老库就是这样）
+    # nameSource 还是空的 -> 这一条正是"老行回填"的场景
+    _setSource("北京", None)
+    assert _nameZhOf("北京") == "北京市 · 朝阳区"
+
+    report = placeNameZh.rebuildNameZh(dryRun=False)
+    assert report["backfilled"] >= 1, report
+    assert _nameZhOf("北京") == "北京市 · 朝阳区", "回填来源时不许动 nameZh"
+    assert _sourceOf("北京") == placeNameZh.NAME_SOURCE_GEO
+
+    second = placeNameZh.rebuildNameZh(dryRun=False)
+    assert second["backfilled"] == 0 and second["filled"] == 0, second
+
+
+def test_clearedGeoNameIsRefilledButManualIsNot(zh_env):
+    """`geo` 名被清空 -> **可以**复算填回；`manual` 名被清空 -> **绝不**填回。
+
+    ⚠️ 这条是"两种来源的差别"的判决用例：`geo` 是数据集算出来的派生值
+       （与 `photoCount` 同类，清空就该能复算），`manual` 是用户决定。
+       旧用例 `test_rebuildNameZhIsIdempotent` 钉的是前一半，这里把它与后一半
+       放在**同一个数据状态**下对比，避免以后有人"为了修一边"把另一边改坏。
+    """
+    from processor.place import placeNameZh as placeNameZh
+
+    _resetZhModule()
+    _setNameZh("北京", "")
+    _setSource("北京", placeNameZh.NAME_SOURCE_GEO)
+    filled = placeNameZh.rebuildNameZh(dryRun=False)
+    assert filled["filled"] >= 1, filled
+    assert _nameZhOf("北京") == "北京市 · 朝阳区"
+
+    # 换成 manual 再清空 -> 必须填不回来
+    _resetZhModule()
+    _setNameZh("北京", "")
+    _setSource("北京", placeNameZh.NAME_SOURCE_MANUAL)
+    kept = placeNameZh.rebuildNameZh(dryRun=False)
+    assert kept["filled"] == 0, kept
+    assert _nameZhOf("北京") == ""
+
+
+def test_nameSourceIsNotADerivedColumn():
+    """`nameSource` **绝不能**进 `REBUILD_COLUMNS`（与 `nameZh` 同一条纪律）。
+
+    ⚠️ 放进去的后果是两步静默退化：每轮 rebuildPlaces() 把 `manual` 打回 NULL，
+       接着 `rebuildNameZh()` 顺手把人工名盖成区县名 —— 两步各自都不报错。
+    """
+    from processor.place import placeStore
+
+    assert "nameSource" not in placeStore.REBUILD_COLUMNS
