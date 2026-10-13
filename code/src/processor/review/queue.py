@@ -49,12 +49,13 @@ if _SRC_DIR not in sys.path:
 from common import globalDefinition as comGD                      # noqa: E402
 from common import miscCommon as misc                             # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
+from database import queryCommon as query                         # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
 from engine.match import bucket as bucket                        # noqa: E402
 from engine.match import centroid as centroid                     # noqa: E402
 from engine.match import matcher as matcher                       # noqa: E402
 
-_VERSION = "20261005"
+_VERSION = "20261013"
 
 _LOG = misc.setLogNew("reviewQueue", "reviewqueue.log")
 
@@ -426,49 +427,114 @@ def _lastAutoSimilarity(faceCode: str, personCode: str):
         return None
 
 
-def disputedFaces(limit: int = 0, offset: int = 0) -> list:
-    """「我不同意」的**人脸行**（不分组）。
+#: 「我不同意」列表真正用到的列。**刻意只取这 6 列**（不带 BLOB 向量）：
+#: 生成层的 mode="light" 只是剔掉 BLOB，仍会带回十几个文本列，
+#: 而本列表一次要装下 size 张照片的**全部**分组脸，少取一列就少一次拷贝。
+_DISPUTED_COLUMNS: str = ("faceCode, photoCode, personCode, detScore, "
+                          "shotBucket, clusterCode")
 
-    口径 = `personCode IS NOT NULL AND isConfirmed=0 AND isStranger=0
-    AND delFlag='0'`。生成层按 personCode 非空过滤 + Python 侧排掉
-    isConfirmed=1 / isStranger=1。
+
+def _disputedWhere(photoCode: str = "") -> tuple:
+    """(where 串, 绑定值)。口径**逐字**取自 WHERE_DISPUTED，可再限定一张照片。
+
+    为什么 photoCode 收进 SQL（而不是在 api 层对结果再过滤）
+    ------------------------------------------------------
+      「只看某张照片」若在**取完一页之后**再过滤，被筛掉的行已经占掉了
+      offset —— 分页器与数据又各按各的口径数，与本次修掉的
+      「多页返回同一批数据」是同一类错。所以筛选必须进 SQL。
     """
-    step = int(limit or basicSettings.QUEUE_PAGE_ROWS)
-    rows = []
-    offset = int(offset or 0)
-    while True:
-        rowsIn = sqliteCommon.query_pb_face(
-            "pb_face", mode="light", orderBy="recID",
-            limitNum=step, offsetNum=offset)
-        if not rowsIn:
-            break
-        for row in rowsIn:
-            if not str(row.get("personCode") or ""):
-                continue
-            if int(row.get("isConfirmed") or 0) or int(row.get("isStranger") or 0):
-                continue
-            rows.append(row)
-            if limit and len(rows) >= int(limit):
-                return rows
-        if len(rowsIn) < step:
-            break
-        offset += len(rowsIn)
-    return rows
+    where = WHERE_DISPUTED
+    values = [0, 0, comGD.DEL_FLAG_NO]
+    if photoCode:
+        where += " AND photoCode = %s"
+        values.append(str(photoCode))
+    return where, tuple(values)
+
+
+def disputedFaces(limit: int = 0, offset: int = 0, photoCode: str = "") -> list:
+    """「我不同意」的**人脸行**（不分组），offset 直接作用在人脸行上。
+
+    ⚠️ 口径必须写进 SQL。旧实现是「按 recID 取一批原始行 -> Python 里过滤 ->
+       不够就往后再扫」，offset 落在**未过滤行**上，等于没有分页 ——
+       详见 disputedPhotoCodes 头顶那条 bug 记录。
+    """
+    where, values = _disputedWhere(photoCode)
+    sql = ("SELECT " + _DISPUTED_COLUMNS + " FROM pb_face WHERE " + where
+           + " ORDER BY recID")
+    if int(limit or 0) > 0:
+        sql += " LIMIT %s OFFSET %s"
+        values += (int(limit), int(offset or 0))
+    return query.selectList(sql, values)
+
+
+def disputedPhotoCodes(limit: int = 0, offset: int = 0, photoCode: str = "") -> list:
+    """「我不同意」涉及的**照片码**——即「按 photoCode 分组」时的分页轴。
+
+    ⚠️⚠️ 分页轴必须是「照片」，不能是「人脸行」
+    -------------------------------------------------
+      这是一次线上 bug 的修复（用户报「第 1 页翻到第 2 页内容没变，
+      跳到第 501 页又明显不一样」）。旧实现把 offset 当成 **pb_face 原始行**
+      的偏移，Python 侧再「往后扫直到凑满 limit 张脸」——
+      于是 page 只决定「从哪开始找」，不决定「返回哪 20 条」：
+      一批 disputed 脸若集中在靠后的位置，多个页码会返回**完全相同**的数据。
+      而前端分页器的总数恰好是 COUNT(DISTINCT photoCode)（= 照片组数），
+      分页轴与总数口径不同，才会出现「翻几十页一动不动、某一页突然全变」。
+      实测：10006 张照片 / 13762 张脸 的库上，旧实现第 1~76 页返回同一批数据。
+
+      现在：先按 photoCode 分组分页（**一页 = 一组照片**），再取这些照片的脸。
+      页号与分页器（photoGroupTotal）从此是同一个维度，不再有重复页。
+
+    排序 = 该照片**最早那张脸**的 recID（MIN(recID)）：与 disputedFaces 的
+    recID 序一致，对同一份数据稳定（只按 photoCode 字典序排会让「新照片」
+    看不出先后，用户每次翻页看到的顺序也会莫名其妙）。
+    """
+    where, values = _disputedWhere(photoCode)
+    sql = ("SELECT photoCode FROM pb_face WHERE " + where
+           + " GROUP BY photoCode ORDER BY MIN(recID)")
+    if int(limit or 0) > 0:
+        sql += " LIMIT %s OFFSET %s"
+        values += (int(limit), int(offset or 0))
+    rows = query.selectList(sql, values)
+    return [str(row.get("photoCode") or "") for row in rows
+            if row.get("photoCode")]
+
+
+def disputedFacesOfPhotos(photoCodes) -> list:
+    """这批照片的**全部** disputed 人脸行（分组渲染用；此时页粒度已是照片）。
+
+    为什么一次取整批（而不是逐张照片查一遍）：一页 20 张照片就是 20 次
+    查询往返；IN(...) 一次走 idx_pb_face_personCode_isConfirmed 拿到同样结果。
+    """
+    codes = [str(code or "") for code in (photoCodes or ())]
+    codes = [code for code in codes if code]
+    if not codes:
+        return []
+    marks = ", ".join(["%s"] * len(codes))
+    where, values = _disputedWhere()
+    sql = ("SELECT " + _DISPUTED_COLUMNS + " FROM pb_face WHERE " + where
+           + " AND photoCode IN (" + marks + ") ORDER BY recID")
+    return query.selectList(sql, values + tuple(codes))
 
 
 def disputedList(limit: int = 0, offset: int = 0, groupByPhoto: bool = True,
-                 withSimilarity: bool = True) -> list:
+                 withSimilarity: bool = True, photoCode: str = "") -> list:
     """「我不同意」列表 = 自动归属但未经人工确认的脸，**按 photoCode 分组**。
 
     用途（DR-16②）：用户浏览时发现「这张照片里那张脸认错了」，
     在这里一键改判；同一簇（clusterCode）还能批量改判（步骤 11 的
     POST /api/review/batch-fix）。所以每条脸都带 clusterCode。
 
-    ⚠️ limit/offset 作用于**人脸行**，不是分组后的条目数：
-       一张照片里可能认错好几个人，先按行分页才能把内存钉住。
-       总条数用 countDisputed()（直接 SQL count）。
+    ⚠️ limit/offset 作用在**照片组**上（groupByPhoto=1）—— 见
+       disputedPhotoCodes 头顶的分页轴说明；只有 groupByPhoto=0 时才作用在
+       人脸行上。两者都不能再用「原始行偏移 + 向后扫」那套写法。
+       组数（画分页器要的那个数）是 `COUNT(DISTINCT photoCode)`，
+       不是 countDisputed()（那是**脸**数）。
     """
-    rows = disputedFaces(limit=limit, offset=offset)
+    if groupByPhoto:
+        rows = disputedFacesOfPhotos(
+            disputedPhotoCodes(limit=limit, offset=offset, photoCode=photoCode))
+    else:
+        rows = disputedFaces(limit=limit, offset=offset, photoCode=photoCode)
     if not rows:
         return []
     cards = personCards()

@@ -61,7 +61,7 @@ from processor.review import queue as reviewQueue                 # noqa: E402
 
 from fastapi import APIRouter, Query                              # noqa: E402
 
-_VERSION = "20261006"
+_VERSION = "20261013"
 
 _LOG = misc.setLogNew("apiReview", "apireview.log")
 
@@ -192,14 +192,20 @@ def getDisputed(page: int = Query(default=1, ge=1),
 
     两套「总数」——**前端画分页器必须用 photoGroupTotal，不能用 total**
     ------------------------------------------------------------------
-      `page`/`size` 作用在**人脸行**上（一张照片里可能认错好几个人，
-      先按行分页才能把内存钉住 —— queue.disputedList 的同一个理由）。所以：
+      `page`/`size` 作用在**照片组**上：一页 = 最多 size 张照片
+      （= queue.disputedPhotoCodes 的分页轴）。所以：
 
         total            = **人脸行数**（= queue.countDisputed()，验收第 11 条的口径）
         photoGroupTotal  = **分组后的照片组总数**（`COUNT(DISTINCT photoCode)`）
         items 数量        = 本页拿到的组数（<= size，且可能远小于 size）
         groupCount       = 本页这些分了几组（= len(items)）
         faceCountInPage  = 本页覆盖的人脸行数（groupByPhoto=0 时 = len(items)）
+
+      ⚠️ 分页轴是「照片组」这件事**不能放松**（曾经踩过，别再改回行分页）：
+        早年 page/size 作用在 pb_face 的**原始行**上、而口径只在 Python 侧过滤，
+        offset 落在未过滤行上 → 多个页码返回**完全相同**的一批数据
+        （实测 10006 张照片的库上，第 1~76 页一模一样），用户只能靠
+        「翻到第 501 页才明显变化」察觉 —— 见 queue.disputedPhotoCodes。
 
       ⚠️ 为什么必须**两个都给**：
          · `total` 是**数据口径**（验收第 11 条要拿它跟 SQL 逐行核对），
@@ -216,20 +222,19 @@ def getDisputed(page: int = Query(default=1, ge=1),
     total = reviewQueue.countDisputed()
     groupTotal = _disputedGroupTotal(photoCode)
 
-    items = reviewQueue.disputedList(limit=s, offset=at,
+    # photoCode **下推进 SQL**：在结果上再过滤会把 offset 数错（queue._disputedWhere）
+    items = reviewQueue.disputedList(limit=s, offset=at, photoCode=photoCode,
                                      groupByPhoto=bool(groupByPhoto))
-    if photoCode:
-        if groupByPhoto:
-            items = [g for g in items if g.get("photoCode") == str(photoCode)]
-        else:
-            items = [f for f in items if f.get("photoCode") == str(photoCode)]
     faceCount = sum(int(g.get("faceCount") or 0) for g in items) if groupByPhoto else len(items)
+    # hasMore 必须跟着**本接口的分页轴**走：分组时分页轴是照片组，
+    # 用 total（脸数）判定会让前端多出 (groupTotal-total)/20 页空页。
+    pageTotal = groupTotal if groupByPhoto else total
     return {"ok": True, "scope": "groups" if groupByPhoto else "faces",
             "page": p, "size": s,
             "total": total,                       # 脸的行数（**数据口径**）
             "photoGroupTotal": groupTotal,        # 照片组数（**分页口径**）
             "items": items,
-            "hasMore": p * s < total,
+            "hasMore": p * s < pageTotal,
             "groupCount": len(items),
             "faceCountInPage": faceCount,
             "note": "分页器请用 photoGroupTotal 算总页数；total 是人脸行数，"
