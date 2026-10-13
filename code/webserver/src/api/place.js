@@ -59,6 +59,22 @@ export function listPlaces(params = {}) {
   return request.get('/places', { params })
 }
 
+/**
+ * 行政区词表（R13 · DR-54）—— `GET /places/districts`。
+ *
+ * 「省 · 区县」（去重约 2832 条）+ 34 个省级名，来自**与 `nameZh` 同一份**
+ * 离线地理数据集 ⇒ 选中后写进库的字符串与 GPS 算出来的那份**逐字相同**，
+ * 因而能与同区县的地点**归并成一项**（这正是"从行政区选"比"自己打字"值钱的地方）。
+ *
+ * ⚠️ 返回项里的 `ambiguous=true` = 同一省内还有同名区县（实测 8 组，如「辽宁省 · 铁西区」），
+ *    **这份数据区分不了** —— 界面要如实提示，不要假装没有。
+ * ⚠️ 数据源不可用时返回 `items: []` + `ready: false`（降级不报错），
+ *    调用方要能接受"词表为空、只剩自由输入"。
+ */
+export function listDistricts(params = {}) {
+  return request.get('/places/districts', { params })
+}
+
 /** 地点详情（张数 / 年份跨度 / 坐标 / 同组下钻 placeCodes + members） */
 export function getPlace(placeCode, params = {}) {
   return request.get(`/places/${encodeURIComponent(placeCode)}`, { params })

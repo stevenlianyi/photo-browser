@@ -614,6 +614,33 @@ def nameZhOfPlace(placeName: str) -> str:
     return nameZhMap().get(str(placeName), "")
 
 
+def nameGroupKeys(nameZh: str) -> list:
+    """一个 `nameZh` 对应的**全部聚合键**（`delFlag='0'`，去重 + 按名字升序）。
+
+    ⚠️ 这是**展示层归并**（`api/place.groupByNameZh`）在 SQL 侧的同一份口径，R13 用到：
+       同一个 `nameZh` 可能挂着多个 `placeName` —— 实测「北京市 · 朝阳区」有 **8 个**
+       街道级键（Datum / Wangjing / Chaowai / …）。所以「这一项现在有多少张」
+       必须按**成员清单**去数，而不是数其中一个键（那会给出一个偏小的数，
+       而弹窗与地点列表就再也对不上）。
+
+    ⚠️ 走 SQL 而不是 `nameZhMap()` 反向过滤：那张映射是**进程内快照**，
+       B（重命名）刚改完名字时它还是旧的 —— 预览是"提交前最后一句话"，
+       宁可多一次查询也要读真值。
+    """
+    got = str(nameZh or "").strip()
+    if not got or not query.tableExists("pb_place"):
+        return []
+    out = []
+    for one in query.selectList(
+            "SELECT g.placeName AS placeName FROM pb_place g"
+            " WHERE g.delFlag = %s AND g.nameZh = %s"
+            " ORDER BY g.placeName ASC", (comGD.DEL_FLAG_NO, got)):
+        key = str(one.get("placeName") or "")
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
 def liveAggregatePlaces(limitNum: int = 200, keyword: str = "",
                         orderBy: str = "photoCount", desc: bool = True) -> list:
     """直接从 `pb_photo` 现算地点分组（**降级路径**）。

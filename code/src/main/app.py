@@ -261,9 +261,9 @@ def createApp(dbFile: str = None, photoRoot: str = None, thumbRoot: str = None,
         sqliteCommon.closeDb()
 
     application = FastAPI(
-        title="photo-browser",
+        title="相认相册 Sightseen",
         version=_VERSION,
-        description="本地优先的照片浏览 + 人脸归类工具（只绑 127.0.0.1）",
+        description="本地优先的家庭相册工具：按人相认照片，跨年代也能认出同一个人（只绑 127.0.0.1）",
         lifespan=lifespan,
     )
 

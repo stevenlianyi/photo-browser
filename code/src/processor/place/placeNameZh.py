@@ -4,6 +4,12 @@
 #Filename: placeNameZh.py
 #Description: 地点中文名（pb_place.nameZh）的计算与回填 —— 步骤 R4a · DR-28/DR-29
 #
+# 两份东西共用同一份数据源（⚠️ 拼串规则也必须同一条，否则归并会静默失效）
+# ------------------------------------------------------------------------
+#   ① `zhNameOf()`      —— 「**坐标** -> 中文名」（point-in-polygon，派生值）
+#   ② `datasetItems()`  —— 「**词表**」（省 · 区县，供界面上手选，R13 · DR-54）
+#   ② 是 R12 之后才需要的：用户手选地名时手里没有坐标，只有一句话。
+#
 # 要解决什么
 # ----------
 #   `reverse_geocoder` 的数据集（GeoNames）**只有英文、没有语言参数**，
@@ -85,7 +91,7 @@ from database import queryCommon as query                         # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
 from processor.scanner import meta as meta                        # noqa: E402
 
-_VERSION = "20261011"
+_VERSION = "20261012"
 
 _LOG = misc.setLogNew("placeNameZh", "placenamezh.log")
 
@@ -439,7 +445,13 @@ def _buildIndex(payload) -> dict:
     return {"districts": districts, "provinces": provinces,
             "tree": STRtree([item[2] for item in districts]) if districts else None,
             "pTree": STRtree([item[2] for item in provinces]) if provinces else None,
-            "badGeometry": _BAD_GEOMETRY}
+            "badGeometry": _BAD_GEOMETRY,
+            # ⚠️ R13（DR-54）：把数据源的**出处与抓取时间**带进索引，供词表端点
+            #   在界面上如实标注「这是哪一天的行政区快照」（撤县设区是常态，
+            #   用户有权知道这份名单有多新）。`_loadFromPackage`（可选依赖）没有
+            #   这两个字段，取不到就是空串 —— 降级不报错。
+            "source": str((payload or {}).get("source") or ""),
+            "fetchedAt": str((payload or {}).get("fetchedAt") or "")}
 
 
 def _loadIndex() -> dict:
@@ -545,6 +557,131 @@ def status() -> dict:
             "districtNum": len(_INDEX["districts"]) if _INDEX else 0,
             "provinceNum": len(_INDEX["provinces"]) if _INDEX else 0,
             "provinceZhCount": len(PROVINCE_ZH_ALL)}
+
+
+# ============================================================
+# 三之二、行政区**词表**（R13 · DR-54）—— 供「从行政区选地名」用
+# ============================================================
+# 为什么要有这一段
+# ----------------
+#   `zhNameOf()` 是「**坐标 -> 中文名**」（point-in-polygon）。而 R12 之后用户可以在
+#   界面上**手选**一个地名，那时手里没有坐标，只有一句话「这张在朝阳区 / 在外婆家」。
+#   于是需要反过来的那份东西：把**同一个数据源**摊平成一份可选词表（省 · 区县）。
+#
+# ⚠️⚠️ 词表必须与 `zhNameOf()` 用**同一条拼串规则**（`PLACE_ZH_JOINER` + 同一份 payload）
+# ---------------------------------------------------------------------------
+#   词表里选出来的『北京市 · 朝阳区』与 GPS 算出来的『北京市 · 朝阳区』必须**逐字相同**，
+#   否则两者在 `pb_place.nameZh` 上归并不到一起 —— 症状是地点列表里出现**两条同名项**
+#   （各自都有自己的张数），而且**哪儿都不报错**。这是本功能唯一真正会出错的地方，
+#   所以词表**不新写一份拼串逻辑**，而是复用 `basicSettings.PLACE_ZH_JOINER`。
+#
+# ⚠️ 层级只有两级（省级 + 区县级），**没有地级市**
+# --------------------------------------------
+#   数据源如此（DataV areas_v3）。于是「同一省内同名区县」无法区分：实测 2840 条
+#   组成的『省 · 区县』里有 **8 组重复**（河北省两个「桥西区」、辽宁两个「铁西区」…）。
+#   ⇒ 词表里**去重后只给一条**，并把 `ambiguous=True` 如实标出来 ——
+#     假装不存在比标明更糟（用户分不清时会以为是自己的操作错了）。
+#     注意：GPS 自动算出来的 `nameZh` 对这 8 组**同样**分不清，两边口径一致，不引入新错。
+
+#: 词表缓存：`{items, names, norm, snapshot}`。⚠️ 与 `_INDEX` **绑定身份** ——
+#: 数据源换了（或测试把 `_INDEX` 重置了）就重建，不做增量维护。
+_VOCAB: dict = None
+_VOCAB_SOURCE = None
+
+
+def _normName(text: str) -> str:
+    """归一化：**只吃掉空白**（`·` 两侧的空格差异、多余空格）。
+
+    ⚠️ 刻意**不做**繁体/别名/拼音容错：`北京市 朝阳区`（用户自己起的名字）不该
+       因为"像行政区名"就被当成规范名 —— 那是另一种静默改口径。
+    """
+    return "".join(str(text or "").split())
+
+
+def _vocab() -> dict:
+    """行政区词表（**懒建 + 缓存**）。数据源不可用时返回**空词表**（降级不报错）。"""
+    global _VOCAB, _VOCAB_SOURCE
+    if _VOCAB is not None and _VOCAB_SOURCE is _INDEX:
+        return _VOCAB
+    if not ready():
+        _VOCAB = {"items": [], "names": set(), "norm": {},
+                  "snapshot": {"provider": "", "fetchedAt": "",
+                               "districtNum": 0, "provinceNum": 0}}
+        _VOCAB_SOURCE = _INDEX
+        return _VOCAB
+
+    joiner = basicSettings.PLACE_ZH_JOINER
+    # ① 先数一遍：同一条『省 · 区县』出现几次 -> 判 `ambiguous`
+    times = {}
+    for owner, name, _geom in _INDEX["districts"]:
+        label = "%s%s%s" % (owner, joiner, name)
+        times[label] = times.get(label, 0) + 1
+    # ② 再按**数据源原顺序**摊平去重（省顺序 -> 区县顺序，界面上分组后仍是这个序）
+    items, seen = [], set()
+    for owner, name, _geom in _INDEX["districts"]:
+        label = "%s%s%s" % (owner, joiner, name)
+        if label in seen:
+            continue
+        seen.add(label)
+        items.append({"label": label, "province": owner, "district": name,
+                      "level": "district", "ambiguous": times[label] > 1})
+    # ③ 省级也进词表：用户可能只知道到省（实测库里已有一行 nameZh='广东省'，
+    #    就是 GPS 命中了省级多边形但没落进任何区县的那种）。
+    for one in _INDEX["provinces"]:
+        pName = str(one[0] or "")
+        if not pName or pName in seen:
+            continue
+        seen.add(pName)
+        items.append({"label": pName, "province": pName, "district": "",
+                      "level": "province", "ambiguous": False})
+    _VOCAB = {"items": items, "names": seen,
+              "norm": {_normName(one["label"]): one["label"] for one in items},
+              "snapshot": {"provider": _PROVIDER,
+                           "fetchedAt": str(_INDEX.get("fetchedAt") or ""),
+                           "districtNum": len(_INDEX["districts"]),
+                           "provinceNum": len(_INDEX["provinces"]),
+                           "labelNum": len(items),
+                           "source": str(_INDEX.get("source") or "")}}
+    _VOCAB_SOURCE = _INDEX
+    return _VOCAB
+
+
+def datasetItems(keyword: str = "", limit: int = 200) -> dict:
+    """行政区词表（供 `/api/places/districts`）。
+
+    · `keyword` 非空 -> 逐字**包含**匹配（省名或区县名里出现即可）
+    · 顺序：数据源原顺序（省级分组，组内区县按数据源序），**不**按拼音/笔画重排
+      —— 用户找"朝阳区"靠输入过滤，不靠翻列表
+    · 返回 `{items, total, snapshot}`；`total` 是**过滤后**的总数（不受 limit 影响）
+    """
+    book = _vocab()
+    word = str(keyword or "").strip()
+    hit = [one for one in book["items"] if not word or word in one["label"]]
+    total = len(hit)
+    if limit and limit > 0:
+        hit = hit[:int(limit)]
+    return {"items": hit, "total": total, "snapshot": dict(book["snapshot"])}
+
+
+def isDatasetName(text) -> bool:
+    """这个字符串是不是行政区规范名（逐字比较，含 `PLACE_ZH_JOINER` 的空格）。"""
+    return canonicalDatasetName(text) is not None
+
+
+def canonicalDatasetName(text):
+    """文本 -> 词表里的**规范写法**；不是行政区名就返回 None。
+
+    ⚠️ 为什么要有这一步（而不是只做 `in` 判断）：用户**手打**时很容易少打 `·`
+       两侧的空格（`北京市·朝阳区`）。若只做逐字判断，它会被当成"自由输入的
+       新地名"-> 建一行 `nameZh` 为空的键 -> **与 GPS 算出来的那份归并不到一起**，
+       于是地点列表出现两条看起来完全同名的项。⇒ 命中规范名时**取规范写法**
+       （写进 `placeNameOverride` 与 `pb_place.nameZh` 的都是那一份），
+       手打与下拉选走**同一条路**。
+    """
+    got = str(text or "").strip()
+    if not got:
+        return None
+    return _vocab()["norm"].get(_normName(got))
 
 
 # ============================================================

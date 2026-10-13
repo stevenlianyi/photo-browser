@@ -14,6 +14,7 @@
 #   POST   /api/contacts/{personCode}/enable   恢复（响应带「需重新确认人脸」提示）
 #   GET    /api/contacts/duplicates     同名 / 疑似同人合并候选
 #   POST   /api/contacts/import/csv     上传 .csv（?dryRun=true 只回计划）
+#   POST   /api/contacts/import/vcard   上传 .vcf（同款 dryRun 语义）
 #   GET/POST/PATCH /api/families[/{familyCode}]  家庭组维护（P2）
 #
 # 三条硬约束（本模块的存在就是为了守住它们）
@@ -82,6 +83,7 @@ from engine.match import centroid as centroid                     # noqa: E402
 from engine.match import rebucket as rebucket                     # noqa: E402
 from processor.contact import contactCommon as contact            # noqa: E402
 from processor.contact import csv_import as csvImport             # noqa: E402
+from processor.contact import vcard_import as vcardImport         # noqa: E402
 from processor.review import assigner as assigner                 # noqa: E402
 
 from fastapi import APIRouter, File, Query, UploadFile             # noqa: E402
@@ -869,8 +871,51 @@ _DUPLICATE_HINTS: dict = {
 
 
 # ============================================================
-# 七、POST /api/contacts/import/csv
+# 七、导入通讯录（POST /api/contacts/import/csv ｜ /contacts/import/vcard）
 # ============================================================
+
+def _stageUpload(raw: bytes, filename: str, kind: str) -> str:
+    """把上传的字节落到 `<dbDir>\\imports\\<kind>\\upload_<uuid>\\<原文件名>`，返回真实路径。
+
+    ⚠️ **为什么必须落盘**：`csv_import.plan()` / `vcard_import.plan()` 都要一个
+      **真实路径**（要做编码嗅探与折行处理），喂内存字节得把两个 processor 的
+      签名一起改掉 —— 而那两处是命令行也在用的公共实现。
+    ⚠️ 落点是 `paths.imports_dir()`（= `<dbDir>\\imports`）—— **绝不是 photo 目录**。
+    ⚠️ **uuid 落在目录上、文件名保持原样**（不是给文件名加 uuid）：
+      `plan()` 会把 basename 一路写进 `pb_person.memo`（「vCard:0154_Qing Bai.vcf」）
+      与警告文案里 —— 名字改成 `upload_contacts_a1b2c3d4.vcf` 之后，
+      **库里存的和界面上给用户看的都会是一个根本不存在的临时文件名**，
+      三个月后拿人名册对账时没人认得出来源。目录带 uuid 同样解决了
+      「同一秒传两个同名文件互相覆盖」那个静默错。
+    ⚠️ 原文件名要挡目录穿越（`..` / `..\\x.csv`）：basename 之后仍可能是
+      `.` / `..`，join 出去就写到 imports 之外了。
+    """
+    name = os.path.basename((filename or "").replace("\\", "/"))
+    if name in ("", ".", ".."):
+        name = "contacts" + (".vcf" if kind == "vcard" else ".csv")
+    if not os.path.splitext(name)[1]:
+        name += ".vcf" if kind == "vcard" else ".csv"
+    dropDir = os.path.join(paths.imports_dir(), kind, "upload_%s" % uuid.uuid4().hex[:8])
+    try:
+        os.makedirs(dropDir, exist_ok=True)
+    except OSError as e:
+        raise dto.ApiError(dto.CODE_DB_ERROR, "建导入暂存目录失败: %s" % e)
+    tmpPath = os.path.join(dropDir, name)
+    try:
+        with open(tmpPath, "wb") as handle:
+            handle.write(raw)
+    except OSError as e:
+        raise dto.ApiError(dto.CODE_DB_ERROR, "写导入暂存文件失败: %s" % e)
+    return tmpPath
+
+
+async def _readUpload(file: UploadFile) -> bytes:
+    """读上传体并挡住空文件（两个导入端点共用）。"""
+    raw = await file.read()
+    if not raw:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID, "上传的文件是空的")
+    return raw
+
 
 @router.post("/contacts/import/csv", summary="上传 CSV 导入联系人（?dryRun=true 只回计划）")
 async def importCsv(file: UploadFile = File(..., description="CSV 文件（.csv）"),
@@ -891,27 +936,8 @@ async def importCsv(file: UploadFile = File(..., description="CSV 文件（.csv�
       传进来的是内存字节，**先落一个临时文件**给 plan() 读 ——
       plan 需要一个真实路径（它要做编码嗅探）。
     """
-    raw = await file.read()
-    if not raw:
-        raise dto.ApiError(dto.CODE_PARAM_INVALID, "上传的文件是空的")
-    stem = os.path.splitext(os.path.basename(file.filename or "contacts.csv"))[0]
-    suffix = os.path.splitext(file.filename or ".csv")[1] or ".csv"
-    # ⚠️ 落在 paths.imports_dir() 下（= <dbDir>\imports）—— **绝不是 photo 目录**。
-    #    文件名带 uuid：只靠时间戳的话，同一秒里传两个同名文件会互相覆盖，
-    #    而结果是「第二个文件的导入计划里是第一个文件的内容」——
-    #    这类错不报错，只是计划静默地不对。
-    dropDir = os.path.join(paths.imports_dir(), "csv")
-    try:
-        os.makedirs(dropDir, exist_ok=True)
-    except OSError as e:
-        raise dto.ApiError(dto.CODE_DB_ERROR, "建导入暂存目录失败: %s" % e)
-    tmpPath = os.path.join(dropDir, "upload_%s_%s%s" % (stem or "contacts",
-                                                        uuid.uuid4().hex[:8], suffix))
-    try:
-        with open(tmpPath, "wb") as handle:
-            handle.write(raw)
-    except OSError as e:
-        raise dto.ApiError(dto.CODE_DB_ERROR, "写导入暂存文件失败: %s" % e)
+    raw = await _readUpload(file)
+    tmpPath = _stageUpload(raw, file.filename, "csv")
 
     try:
         planned = csvImport.plan(tmpPath)
@@ -926,7 +952,7 @@ async def importCsv(file: UploadFile = File(..., description="CSV 文件（.csv�
 
     if int(dryRun):
         # 暂存文件删掉：dryRun 的定义就是「什么都不留」
-        _silentRemove(tmpPath)
+        _silentRemoveUpload(tmpPath)
         return dto.okBody(dryRun=True, written=False,
                           file=planned.get("source"),
                           encoding=(planned.get("info") or {}).get("encoding"),
@@ -943,6 +969,11 @@ async def importCsv(file: UploadFile = File(..., description="CSV 文件（.csv�
 
     summary = csvImport.apply(planned, ownerID=basicSettings.DEFAULT_OWNER_ID,
                               archive=True)
+    # 归档成功后把暂存件删掉：每导一次留一份，`imports\csv\` 下就会攒满与
+    # `imports\<时间戳>_csv\` 里那份归档副本重复的原件。
+    # ⚠️ 归档**失败**时留着 —— 那时暂存件是唯一的一份。
+    if (summary.get("archive") or {}).get("ok"):
+        _silentRemoveUpload(tmpPath)
     # ⚠️ `applyPlan` 返回的是 **created/updated/skipped/failed 四个 personCode 列表**
     #   （不是计数）。早先按 create/update/skip 取，四个数全是 None ——
     #   而响应仍然是 200，导入也真的成功了，于是「前端显示导入了 0 个人」
@@ -964,15 +995,133 @@ async def importCsv(file: UploadFile = File(..., description="CSV 文件（.csv�
         categoryRemoved=int(summary.get("categoryRemoved") or 0),
         rebucketed=int((summary.get("rebucketed") or {}).get("changed") or 0),
         archive=summary.get("archive") or {},
-        warnings=list(planned.get("warnings") or []) + list(summary.get("warnings") or []),
+        # ⚠️ 只用 `summary` 那份：`applyPlan()` 的 warnings **起步就是 plan 的副本**
+        #   （`summary = {..., "warnings": list(planned["warnings"])}`），
+        #   两份相加会把同一条警告在界面上印两遍。
+        warnings=list(summary.get("warnings") or []),
         familySuggestions=summary.get("familySuggestions") or [])
 
 
-def _silentRemove(path: str) -> None:
+def _silentRemoveUpload(path: str) -> None:
+    """删掉暂存文件，**连它那个 `upload_<uuid>` 目录一起**。
+
+    dryRun 的定义就是「什么都不留」：只删文件会在 `imports\\<kind>\\` 下留一串
+    空目录（每预览一次一个），而空目录在界面上看不见、也没有清理入口。
+    """
     try:
         os.remove(path)
     except OSError:
         pass
+    try:
+        os.rmdir(os.path.dirname(path))
+    except OSError:
+        pass
+
+
+@router.post("/contacts/import/vcard",
+             summary="上传 vCard 导入联系人（?dryRun=true 只回计划）")
+async def importVcard(file: UploadFile = File(...,
+                                             description="vCard 文件（.vcf）"),
+                      dryRun: int = Query(default=0,
+                                          description="**1 = 只回计划，一个字都不写**")):
+    """vCard 导入（步骤 8 的 `vcard_import.plan/apply` 的 HTTP 包装）。
+
+    与 CSV 端点是**同一套语义**（dryRun 只调 plan、暂存文件删掉；实跑先归档再写库），
+    差别只有三处：
+      ① 解析器不同（vobject 优先，失败退回自带行解析器 —— 手机导出的
+         QP 软换行会让 vobject 抛异常，退回后**一个人都不会丢**）；
+      ② 会带出 **KIND:group 家庭组**（写 `pb_family` + 成员的 familyGroupCode）；
+      ③ vCard 里内嵌的 PHOTO（头像）会落盘到 `<thumb>\\<VCARD_SUBDIR>\\`
+         —— 这是「重新导入会覆盖界面修改」之外的第二种副作用，必须在响应里报数。
+
+    ⚠️ **不支持上传目录**：手机/Outlook 那种「一个联系人一个 .vcf」的形态，
+      浏览器给不了目录，所以前端改成**多选**、逐个文件调本端点
+      （每次 `info["files"]` 只有一个元素）。这比在服务端做 zip 解包简单得多，
+      而且每个文件单独出结果 —— 哪一个失败一目了然。
+
+    ⚠️ 写库范围：pb_person / pb_person_category / pb_family（+ 头像文件），
+      **绝不关联照片**（不写 pb_face / pb_photo / pb_photo_person）。
+    """
+    raw = await _readUpload(file)
+    tmpPath = _stageUpload(raw, file.filename, "vcard")
+
+    try:
+        planned = vcardImport.plan(tmpPath)
+    except Exception as e:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID, "vCard 解析失败: %s: %s"
+                           % (type(e).__name__, e))
+
+    items = planned.get("items") or []
+    groups = planned.get("groups") or []
+    creates = [it for it in items if it.get("op") == "create"]
+    updates = [it for it in items if it.get("op") == "update"]
+    skips = [it for it in items if it.get("op") == "skip"]
+    files = (planned.get("info") or {}).get("files") or []
+
+    if int(dryRun):
+        # 同 CSV：dryRun 的定义就是「什么都不留」
+        _silentRemoveUpload(tmpPath)
+        return dto.okBody(dryRun=True, written=False, kind="vcard",
+                          file=planned.get("source"),
+                          fileCount=len(files),
+                          parser="+".join(sorted({str(f.get("parser") or "")
+                                                  for f in files} - {""})),
+                          cardCount=len(items),
+                          totalRows=len(items) + len(groups),
+                          createCount=len(creates), updateCount=len(updates),
+                          skipCount=len(skips), groupCount=len(groups),
+                          preview=[{"op": it.get("op"), "personCode": it.get("personCode"),
+                                    "displayName": it.get("displayName"),
+                                    "hit": it.get("hit"),
+                                    "categories": it.get("categories") or []}
+                                   for it in items[:50]],
+                          groups=[{"familyCode": g.get("familyCode"),
+                                   "familyName": g.get("familyName"),
+                                   "memberCount": len(g.get("members") or []),
+                                   "unresolvedCount": len(g.get("unresolved") or [])}
+                                  for g in groups[:20]],
+                          warnings=planned.get("warnings") or [],
+                          note="dryRun：**一个字节都没写**（含暂存文件已删除）")
+
+    summary = vcardImport.apply(planned, ownerID=basicSettings.DEFAULT_OWNER_ID,
+                                archive=True)
+    # 同 CSV：归档成功后删掉暂存件（失败则留着，那是唯一的一份）
+    if (summary.get("archive") or {}).get("ok"):
+        _silentRemoveUpload(tmpPath)
+    # ⚠️ 计数一律从 `applyPlan` 的**列表**取长度（不是 create/update 这类键名）——
+    #   理由见 CSV 端点里那段说明，同一个坑不踩第二遍。
+    created = list(summary.get("created") or [])
+    updated = list(summary.get("updated") or [])
+    skipped = list(summary.get("skipped") or [])
+    failed = list(summary.get("failed") or [])
+    families = list(summary.get("families") or [])
+    _LOG.info("vCard 导入 %s：新建 %d 更新 %d 跳过 %d 失败 %d 家庭组 %d 头像 %d",
+              planned.get("source"), len(created), len(updated),
+              len(skipped), len(failed), len(families),
+              len(summary.get("avatars") or []))
+    return dto.okBody(
+        dryRun=False, written=True, kind="vcard", file=planned.get("source"),
+        fileCount=len(files),
+        createCount=len(created), updateCount=len(updated),
+        skipCount=len(skipped), failedCount=len(failed),
+        created=created, updated=updated, skipped=skipped, failed=failed,
+        categoryRows=int(summary.get("categoryRows") or 0),
+        categoryAdded=int(summary.get("categoryAdded") or 0),
+        categoryRemoved=int(summary.get("categoryRemoved") or 0),
+        groupCount=len(families),
+        familyCreated=list(summary.get("familyCreated") or []),
+        familyMembers=int(summary.get("familyMembers") or 0),
+        # [(家庭组名, 认不出的成员引用), ...]：**未挂接**，要让人看见
+        familyUnresolved=list(summary.get("familyUnresolved") or []),
+        avatarCount=len(summary.get("avatars") or []),
+        avatarFailedCount=len(summary.get("avatarFailed") or []),
+        rebucketed=int((summary.get("rebucketed") or {}).get("changed") or 0),
+        archive=summary.get("archive") or {},
+        # ⚠️ 只用 `summary` 那份：`applyPlan()` 的 warnings **起步就是 plan 的副本**
+        #   （`summary = {..., "warnings": list(planned["warnings"])}`），
+        #   两份相加会把同一条警告在界面上印两遍。
+        warnings=list(summary.get("warnings") or []),
+        familySuggestions=summary.get("familySuggestions") or [])
 
 
 # ============================================================

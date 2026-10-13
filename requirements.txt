@@ -1,8 +1,8 @@
 # ============================================================
 # photo-browser 后端依赖
 #
-# 安装（venv 建在仓库内，不放照片库）：
-#   C:\Users\NINGMEI\.workbuddy\binaries\python\versions\3.13.12\python.exe -m venv code\.venv
+# 安装（venv 建在仓库内，不放照片库；解释器用 Python 3.13）：
+#   "%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe" -m venv code\.venv
 #   code\.venv\Scripts\pip install -i https://pypi.org/simple -r requirements.txt
 #
 # ⚠️ pip 必须用官方源 https://pypi.org/simple
@@ -104,8 +104,9 @@ httpx
 #   insightface 依赖 Cython 编译，在 Python 3.13 上可能安装失败。
 #   若出现安装失败 / 编译报错：
 #     1) 删除 code\.venv 重建；
-#     2) 改用托管的 Python 3.12 解释器重建 venv：
-#          C:\Users\NINGMEI\.workbuddy\binaries\python\versions\3.12\python.exe -m venv code\.venv
+#     2) 改用 Python 3.12 重建 venv（本机目前只装了 3.13，需先安装 3.12；
+#        本机 `py` 启动器不在 PATH 上，装好后用完整路径）：
+#          "C:\Users\<用户名>\AppData\Local\Programs\Python\Python312\python.exe" -m venv code\.venv
 #     3) 重新执行：code\.venv\Scripts\pip install -i https://pypi.org/simple -r requirements.txt
 #        并重做上面的「安装后必做：清掉 opencv-python」。
 #   再不行 → 放弃 insightface，改用裸 onnxruntime 加载 SCRFD + ArcFace（零编译，

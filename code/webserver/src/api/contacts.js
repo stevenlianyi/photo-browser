@@ -68,6 +68,22 @@ export function importCsv(file, dryRun = false) {
   })
 }
 
+/** 上传 vCard（.vcf）导入联系人（手机导出那条通道；同款 dryRun 语义）
+ *
+ *  ⚠️ 与 CSV 的差别不只是格式：vCard 会带出 **KIND:group 家庭组**，
+ *     且内嵌 PHOTO 的头像会落盘（`avatarCount`）—— 两处都要在界面上报数，
+ *     否则「导完多了个家庭组 / 多了些头像」会显得像是自己冒出来的。
+ *  ⚠️ 「一个联系人一个 .vcf」的 Outlook/手机形态：浏览器给不了目录，
+ *     界面改成**多选**、逐个文件调这个接口（服务端一次只收一个文件）。 */
+export function importVcard(file, dryRun = false) {
+  const form = new FormData()
+  form.append('file', file)
+  return request.post('/contacts/import/vcard', form, {
+    params: { dryRun: dryRun ? 1 : 0 },
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
 /** 家庭组列表 / 详情 / 新建 / 改名（P2，可延后） */
 export function listFamilies(params = {}) {
   return request.get('/families', { params })

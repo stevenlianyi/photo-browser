@@ -310,7 +310,7 @@ def _startDevServer():
 
 def run(argv=None):
     parser = argparse.ArgumentParser(
-        prog="serve.py", description="启动 photo-browser（先体检，再启动）",
+        prog="serve.py", description="启动 相认相册 Sightseen（先体检，再启动）",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default=basicSettings.serverHost(),
                         help="监听地址（**只允许回环**，缺省 %s）"
@@ -350,7 +350,7 @@ def run(argv=None):
 
     # ---- 端口二次确认：体检与启动之间隔了几秒，可能刚被别人占了 ----
     if _portBusy(args.port):
-        _err("端口 %d 在体检之后被占用（一般是另一个 photo-browser 刚起）"
+        _err("端口 %d 在体检之后被占用（一般是另一个 相认相册 刚起）"
              % args.port)
         return 1
 

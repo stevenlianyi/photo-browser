@@ -366,6 +366,84 @@ export const useReviewStore = defineStore('review', () => {
   }
 
   /**
+   * **确认**「我不同意」里的一张脸：机器认的没错。
+   * --------------------------------------------------
+   * 走 PUT /review/{faceCode}/assign（= assigner.confirm）：
+   *   isConfirmed 0 -> 1、link source=1、**立即重算质心**。
+   * 效果有两层：① 这张脸离开「我不同意」（它不再"机器认的、还没人确认"）；
+   *             ② 它成为该人质心的**训练样本** —— 确认得越多，自动匹配越准。
+   *
+   * ⚠️ 与「改判 / 拆分」的区别：那两者改的是**归属**（认成谁），
+   *    确认只改**谁认过**（isConfirmed），归属一个人都不动。
+   *    所以它不需要选人、不需要浮层 —— 一次点击就是正确语义。
+   */
+  async function confirmDisputedFace(face) {
+    const code = String(face?.faceCode || '')
+    const person = String(face?.personCode || '')
+    if (!code || !person) return null
+    busyPhotoCode.value = String(face?.photoCode || '')
+    try {
+      const data = await assignFace(code, { personCode: person })
+      applyCounts(data)
+      await refreshDisputedPage()
+      return data
+    } finally {
+      busyPhotoCode.value = ''
+    }
+  }
+
+  /**
+   * 刷新「我不同意」列表但**留在当前页**（逐条处理的动作不能让列表跳回第一页）。
+   *
+   * ⚠️ 与 `fetchDisputed({ reset: true })`（fix/整张否决在用）的取舍：
+   *    那些动作后面通常跟着"重看一遍队首"，而确认/整张确认是**一条一条往下清**，
+   *    每点一次就跳回 page 1 等于让用户反复从头开始翻。
+   * ⚠️ 本页被处理空时必须**退一页**，否则用户看到的是一页"暂无"而总数还有值
+   *    （分页器与 items 对不上，最容易被当成数据丢了）。
+   */
+  async function refreshDisputedPage() {
+    await fetchDisputed({ reset: false })
+    if (!disputedGroups.value.length && disputedPage.value > 1) {
+      disputedPage.value -= 1
+      await fetchDisputed({ reset: false })
+    }
+  }
+
+  /**
+   * **整张确认**：这一张照片里机器认的脸全对。
+   * --------------------------------------------------
+   * ⚠️ 一张合影里可能认成**好几个人**（group.personCodes 往往不止一个），
+   *    而 batch-assign 的契约是「一批脸归给**同一个人**」，所以先按
+   *    personCode 分桶、每人一次事务。不这么分就只能逐张 assign
+   *    = N 个事务 + N 次质心重算，与「一次点击解决一张照片」正好相反。
+   */
+  async function confirmDisputedGroup(group) {
+    const faces = Array.isArray(group?.faces) ? group.faces : []
+    const buckets = new Map()
+    for (const face of faces) {
+      const person = String(face?.personCode || '')
+      const code = String(face?.faceCode || '')
+      if (!person || !code) continue
+      if (!buckets.has(person)) buckets.set(person, [])
+      buckets.get(person).push(code)
+    }
+    if (!buckets.size) return null
+    busyPhotoCode.value = String(group?.photoCode || '')
+    try {
+      let assigned = 0
+      for (const [personCode, faceCodes] of buckets) {
+        const data = await batchAssign({ faceCodes, personCode })
+        applyCounts(data)
+        assigned += Number(data?.assigned) || 0
+      }
+      await refreshDisputedPage()
+      return { assigned }
+    } finally {
+      busyPhotoCode.value = ''
+    }
+  }
+
+  /**
    * 批量确认：取当前这张脸所在簇的全部成员，一次 POST /review/batch-assign。
    * 验收第 6 条「50 张 ≤3 次点击」：点「批量确认」→ 点对话框里的「确认」= 2 次。
    */
@@ -511,6 +589,8 @@ export const useReviewStore = defineStore('review', () => {
     ignoreCurrent,
     fix,
     fixWholePhoto,
+    confirmDisputedFace,
+    confirmDisputedGroup,
     splitOne,
     openCluster,
     closeCluster,

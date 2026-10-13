@@ -106,7 +106,7 @@ const router = createRouter({
   // 步骤 11 接数据后再考虑滚动行为（scrollBehavior）
 })
 
-const BASE_TITLE = 'photo-browser'
+const BASE_TITLE = '相认相册'
 
 router.afterEach((to) => {
   const title = to.meta?.title

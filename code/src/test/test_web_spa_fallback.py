@@ -145,7 +145,11 @@ def test_docsNotHijacked(webClient):
 
     schema = webClient["client"].get("/openapi.json")
     assert schema.status_code == 200
-    assert schema.json()["info"]["title"] == "photo-browser"
+    # ⚠️ 这个字面量与 `main/app.py` 的 `FastAPI(title=...)` 是**一对**：改名时
+    #    两处必须一起动（本次 photo-browser -> 相认相册 Sightseen）。
+    #    写全等而不是 `in`：这条用例的全部价值就是「文档路由没被兜底吞掉」，
+    #    松成子串匹配以后，兜底路由万一回了一页含产品名的 HTML，它照样会绿。
+    assert schema.json()["info"]["title"] == "相认相册 Sightseen"
 
 
 # ============================================================

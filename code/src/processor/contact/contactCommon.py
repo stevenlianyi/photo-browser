@@ -526,6 +526,14 @@ def planContact(contact: dict, index: dict, prefix: str,
         for field in _CREATE_FIELDS:
             if contact.get(field):
                 row[field] = contact[field]
+        # ⚠️ **幂等键的列名映射**：两个解析器（csv_import 的 UID 列 / vcard_import
+        #    的 UID 属性）都把值放在 `contact["uid"]` 里，而落库的列叫
+        #    `pb_person.vcardUid`（`_CREATE_FIELDS` 里写的就是后者）。
+        #    少这一行，UID **一次都进不了库**：跨次/跨库导入只剩「按显示名认人」
+        #    这一条路（`loadPersonIndex` 的 byUid 永远是空的），
+        #    而下面那句「已把 UID 补上」的警告也就成了假话。
+        if uid:
+            row["vcardUid"] = uid
         if contact.get("ownerID"):
             row["ownerID"] = contact["ownerID"]
         memo = _memoOf(contact, isCreate=True)
@@ -559,6 +567,11 @@ def planContact(contact: dict, index: dict, prefix: str,
             # 下次导入就认不出本人了 -> 又建一个新档案）
             if value:
                 row[field] = value
+        # 同上的列名映射；但这里**只补空**：库里已有的 UID 是「我是谁」的锚点
+        # （下次导入靠它认人），拿本次文件里的另一个 UID 覆盖它，
+        # 等于把锚点换掉 —— 而 uid 变了本来就说明这是另一个幂等键。
+        if uid and not str(existing.get("vcardUid") or "").strip():
+            row["vcardUid"] = uid
         if not str(existing.get("memo") or "").strip():
             memo = _memoOf(contact, isCreate=False)
             if memo:

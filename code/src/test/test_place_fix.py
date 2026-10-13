@@ -237,9 +237,16 @@ def test_previewIsReadOnlyAndReportsImpact(fixEnv, api_rows):
     assert body["target"]["exists"] is True
     assert body["target"]["photoCount"] == 1
     # 影响面：广州 1 -> 0（会变空），华盛顿 1 -> 2
-    assert body["counts"]["from"] == {"placeKey": "广州", "photoCount": 1, "after": 0}
-    assert body["counts"]["to"] == {"placeKey": "华盛顿", "photoCount": 1, "after": 2}
+    # ⚠️ R13 起每一侧还带 `nameZh`（**项级**显示名，供界面直接用；否则前端要拿
+    #    键去反查候选表，而候选表覆盖不到"两边都没有的键"）。
+    assert body["counts"]["from"] == {"placeKey": "广州", "nameZh": None,
+                                     "photoCount": 1, "after": 0}
+    assert body["counts"]["to"] == {"placeKey": "华盛顿", "nameZh": None,
+                                    "photoCount": 1, "after": 2}
     assert body["fromBecomesEmpty"] is True
+    # 键级/项级说清楚：华盛顿 没有 nameZh -> 它自成一"项"，两个数相等
+    assert body["target"]["ownPhotoCount"] == body["counts"]["to"]["photoCount"], body
+    assert body["target"]["isDistrict"] is False, body["target"]
 
     # 纯读：一行都不写
     assert api_rows.photo(PHOTO_GPS).get("placeNameOverride") in (None, "")
@@ -724,3 +731,196 @@ def test_placeDtosExposeNameSource(fixEnv):
 
     detail = client.get("/api/places/%s" % code).json()
     assert detail["nameSource"] == placeNameZh.NAME_SOURCE_MANUAL, detail
+
+
+# ============================================================
+# 七、「从行政区选地名」= 口径乙（R13 · DR-54）
+# ============================================================
+# 这一节盯的还是**静默**错误，而且是最难发现的一类：
+#   用户从行政区词表里选了『北京市 · 朝阳区』，界面两条路看起来都对，
+#   但库里那份 `nameZh` 与 GPS 算出来的**差一个空格**（或压根没写），
+#   于是它归并不进同区县那一项 —— 地点列表出现两条同名项，**哪儿都不报错**。
+
+#: 中国行政区规范名的写法（`PLACE_ZH_JOINER` = " · "，词表与 `zhNameOf` 同一份规则）
+DISTRICT = "北京市 · 朝阳区"
+
+
+def _makeNameGroup():
+    """造一个「同 nameZh 的归并组」：**两个键 + 2 张照片**，名字是区县规范名。
+
+    等价于真实库里的「北京市 · 朝阳区 = 8 个街道级键」的缩小版 ——
+    用来验证"预览与列表都按**项**（归并后）算，而不是按某一个键算"。
+    """
+    from database.auto_generated import sqliteCommon as sqliteCommon
+    from processor.place import placeStore as placeStore
+
+    # 两个键各挂一张照片（PH_2013_01 / PH_DUP 都来自夹具）
+    for code, key in (("PH_2013_01", "朝阳键A"), ("PH_DUP", "朝阳键B")):
+        assert sqliteCommon.updateTableGeneral(
+            "pb_photo", "photoCode = %s", (code,), {"placeNameDir": key}) > 0
+    placeStore.rebuildPlaces()
+    for key in ("朝阳键A", "朝阳键B"):
+        assert sqliteCommon.updateTableGeneral(
+            "pb_place", "placeName = %s", (key,),
+            {"nameZh": DISTRICT, "nameSource": None}) > 0
+    placeStore.nameZhMap(refresh=True)
+    return ["朝阳键A", "朝阳键B"]
+
+
+def test_districtPickWritesNameZhAndMerges(fixEnv, api_rows):
+    """⭐ 选行政区规范名 -> 写 override + 同写 `nameZh` -> 与同区县的行**归并成一项**。"""
+    client = fixEnv["client"]
+    keys = _makeNameGroup()
+
+    prev = client.get("/api/photos/%s/place-fix" % PHOTO_GPS,
+                      params={"placeName": DISTRICT}).json()
+    # 预览必须按**项**算：组内 2 张（不是"这个键自己 0 张"）
+    assert prev["target"]["isDistrict"] is True, prev["target"]
+    assert set(prev["target"]["groupKeys"]) == set(keys + [DISTRICT]), prev["target"]
+    assert prev["target"]["ownPhotoCount"] == 0, prev["target"]
+    assert prev["counts"]["to"]["photoCount"] == 2, prev["counts"]
+    assert prev["counts"]["to"]["after"] == 3, prev["counts"]
+    assert prev["counts"]["to"]["nameZh"] == DISTRICT, prev["counts"]
+    # 键还没建、但"项"已存在（组里有别的键）-> 不能说"这会新建一行"就完事
+    assert prev["target"]["groupRowCount"] == 3, prev["target"]
+
+    after = client.post("/api/photos/%s/place-fix" % PHOTO_GPS,
+                        params={"confirm": 1}, json={"placeName": DISTRICT}).json()
+    assert after["rebuildSummary"]["datasetNamed"] is True, after["rebuildSummary"]
+
+    row = _placeRow(DISTRICT)
+    assert row, "行政区规范名那一行没有被建出来"
+    from processor.place import placeNameZh as placeNameZh
+    assert row["nameZh"] == DISTRICT, (
+        "`nameZh` 必须与 GPS 算出来的那份**逐字相同**（含分隔符），否则归并不上")
+    assert row["nameSource"] == placeNameZh.NAME_SOURCE_MANUAL, row
+
+    # 归并成一项：3 个键 + 3 张照片（2 + 新来的 1）
+    # ⚠️ 比 `members` 的 **placeName** 而不是 `placeCodes`（那一列装的是 placeCode）
+    grouped = client.get("/api/places", params={"groupByNameZh": 1, "size": 200}).json()
+    hit = [i for i in grouped["items"] if i.get("nameZh") == DISTRICT]
+    assert len(hit) == 1, [i.get("nameZh") for i in grouped["items"]]
+    assert {one["placeName"] for one in hit[0]["members"]} == set(keys + [DISTRICT]), hit[0]
+    assert int(hit[0]["photoCount"]) == 3, hit[0]
+    # 列表里的数字与预览里说的那个数**必须一致**（这是本步的存在理由）
+    assert int(hit[0]["photoCount"]) == prev["counts"]["to"]["after"], (hit[0], prev)
+
+
+def test_districtPickIntoSameItemKeepsCount(fixEnv, api_rows):
+    """⭐ 从同区县的某个街道键改成规范名 -> **同一项**，张数一个都不动。
+
+    ⚠️ 这是最容易报错的一个场景：键变了、项没变。若按"键级 -1/+1"报，
+       用户会看到「改了地点，朝阳区从 3 变成 4」这种凭空多出来的表观变化。
+    """
+    client = fixEnv["client"]
+    _makeNameGroup()
+    # 先把这张照片挂到组内的一个键上（= 已经是"朝阳区"的一户，但键是街道名）
+    client.post("/api/photos/%s/place-fix" % PHOTO_GPS,
+                params={"confirm": 1}, json={"placeName": "朝阳键A"})
+    groupedBefore = client.get("/api/places",
+                              params={"groupByNameZh": 1, "size": 200}).json()["items"]
+    before = [i for i in groupedBefore if i.get("nameZh") == DISTRICT][0]
+    assert int(before["photoCount"]) == 3
+
+    prev = client.get("/api/photos/%s/place-fix" % PHOTO_GPS,
+                      params={"placeName": DISTRICT}).json()
+    assert prev["changed"] is True, "键变了 —— 这仍然是一次真实改动"
+    assert prev["sameGroup"] is True, prev
+    assert prev["counts"]["from"]["after"] == prev["counts"]["from"]["photoCount"], prev
+    assert prev["counts"]["to"]["after"] == prev["counts"]["to"]["photoCount"], prev
+    assert prev["fromBecomesEmpty"] is False, prev
+
+    client.post("/api/photos/%s/place-fix" % PHOTO_GPS,
+                params={"confirm": 1}, json={"placeName": DISTRICT})
+    groupedAfter = client.get("/api/places",
+                              params={"groupByNameZh": 1, "size": 200}).json()["items"]
+    after = [i for i in groupedAfter if i.get("nameZh") == DISTRICT][0]
+    assert int(after["photoCount"]) == 3, after
+
+
+def test_districtPickAcceptsHandTypedSpacing(fixEnv, api_rows):
+    """手打少了个空格（`北京市·朝阳区`）也要走**规范写法**那条路。
+
+    ⚠️ 若只做逐字判断，它会被当成"自由输入的新地名" -> 建一个 `nameZh` 为空的键
+       -> **归并不进同区县那一项**，界面上出现两条看起来完全同名的项。
+       （这是"手打"与"下拉选"唯一会产生不同结果的地方。）
+    """
+    client = fixEnv["client"]
+    keys = _makeNameGroup()
+    hand = DISTRICT.replace(" ", "")            # 「北京市·朝阳区」
+    assert hand != DISTRICT
+
+    prev = client.get("/api/photos/%s/place-fix" % PHOTO_GPS,
+                      params={"placeName": hand}).json()
+    assert prev["target"]["placeKey"] == DISTRICT, prev["target"]
+    assert prev["target"]["isDistrict"] is True, prev["target"]
+
+    got = client.post("/api/photos/%s/place-fix" % PHOTO_GPS,
+                      params={"confirm": 1}, json={"placeName": hand}).json()
+    assert got["rebuildSummary"]["datasetNamed"] is True, got["rebuildSummary"]
+    assert _placeRow(DISTRICT).get("nameZh") == DISTRICT
+    # 归并组：3 个键
+    grouped = client.get("/api/places", params={"groupByNameZh": 1, "size": 200}).json()
+    hit = [i for i in grouped["items"] if i.get("nameZh") == DISTRICT]
+    assert {one["placeName"] for one in hit[0]["members"]} == set(keys + [DISTRICT]), hit[0]
+    assert _placeRow(hand) is None, "不该再建一个少空格的行"
+
+
+def test_sameKeyPreviewSaysManualOnly(fixEnv, api_rows):
+    """打开弹窗时预填的是**当前键**：这是 `sameKey`（"记为人工修正"），不是"并进同一项"。
+
+    ⚠️ 两者都是"张数不变"，但含义完全不同：
+       · `sameKey`  = 什么都没挪，只是把当前键显式写成人工修正（以后重扫不再改它）
+       · `sameGroup`= 键变了、但归并出来还是同一项（从街道键换成区县规范名）
+       混在一起的话，用户一打开弹窗就会读到"两边是同一项"——而他什么都没改。
+    """
+    client = fixEnv["client"]
+    _makeNameGroup()
+    cur = str(api_rows.photo(PHOTO_GPS)["placeName"])       # 「广州」
+    body = client.get("/api/photos/%s/place-fix" % PHOTO_GPS,
+                      params={"placeName": cur}).json()
+    assert body["sameKey"] is True and body["sameGroup"] is False, body
+    assert body["counts"]["from"]["after"] == body["counts"]["from"]["photoCount"], body
+    assert body["counts"]["to"]["after"] == body["counts"]["to"]["photoCount"], body
+
+    # 反向：换成**另一个键**时 sameKey 必须为假（否则界面又会说"与当前相同"）
+    other = client.get("/api/photos/%s/place-fix" % PHOTO_GPS,
+                       params={"placeName": "华盛顿"}).json()
+    assert other["sameKey"] is False and other["sameGroup"] is False, other
+
+
+def test_freeTextStillDoesNotWriteNameZh(fixEnv, api_rows):
+    """反面：**自由输入**的名字（不在词表里）仍然不写 `nameZh`（R12 行为不变）。
+
+    ⚠️ 别把所有人都当行政区：`nameZh` 若对自由输入也写，等于把用户起的名字
+       钉成"地理名"，以后既不会被复算也不会被纠正。
+    """
+    client = fixEnv["client"]
+    got = client.post("/api/photos/%s/place-fix" % PHOTO_GPS,
+                      params={"confirm": 1}, json={"placeName": "外婆家"}).json()
+    assert got["rebuildSummary"]["datasetNamed"] is False, got["rebuildSummary"]
+    row = _placeRow("外婆家")
+    assert not row.get("nameZh"), row
+    from processor.place import placeNameZh as placeNameZh
+    assert row.get("nameSource") == placeNameZh.NAME_SOURCE_MANUAL, row
+
+
+def test_districtPreviewDegradesWhenVocabMissing(fixEnv, api_rows, monkeypatch):
+    """词表不可用（地理数据缺失）时：**不能报错**，只是退化成"自由输入"。"""
+    from processor.place import placeNameZh as placeNameZh
+
+    monkeypatch.setattr(placeNameZh, "_INDEX", None, raising=False)
+    monkeypatch.setattr(placeNameZh, "_ZH_READY", None, raising=False)
+    monkeypatch.setattr(placeNameZh, "_VOCAB", None, raising=False)
+    monkeypatch.setattr(placeNameZh, "_VOCAB_SOURCE", object(), raising=False)
+    monkeypatch.setattr(placeNameZh.basicSettings, "PLACE_ZH_ENABLED", False)
+
+    items = placeNameZh.datasetItems(keyword="", limit=0)
+    assert items["items"] == [] and items["total"] == 0
+    assert placeNameZh.isDatasetName(DISTRICT) is False
+    assert placeNameZh.canonicalDatasetName(DISTRICT) is None
+
+    # 接口仍然可用（界面只剩"自由输入"这一条路）
+    prev = fixEnv["client"].get("/api/photos/%s/place-fix" % PHOTO_GPS,
+                                params={"placeName": "外婆家"}).json()
+    assert prev["target"]["isDistrict"] is False, prev["target"]

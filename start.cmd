@@ -1,6 +1,7 @@
 @echo off
 rem ==========================================================================
-rem  photo-browser launcher (Windows)
+rem  Sightseen launcher (Windows)
+rem  (product name is Chinese -- this header stays ASCII, see ENCODING below)
 rem
 rem  WHY .cmd and NOT .ps1
 rem  -------------------
@@ -49,10 +50,11 @@ if not exist "%PY%" (
     echo.
     echo   [BLOCKED] venv not found: %PY%
     echo.
-    echo   Create it once ^(the official PyPI source is mandatory on this
-    echo   machine -- the default mirror cannot find "vobject"^):
+    echo   Create it once from a Python 3.13 interpreter ^(the official PyPI
+    echo   source is mandatory on this machine -- the default mirror cannot
+    echo   find "vobject"^):
     echo.
-    echo     py -3.13 -m venv code\.venv
+    echo     "%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe" -m venv code\.venv
     echo     code\.venv\Scripts\python.exe -m pip install -i https://pypi.org/simple -r requirements.txt
     echo     code\.venv\Scripts\python.exe -m pip uninstall -y opencv-python
     echo.

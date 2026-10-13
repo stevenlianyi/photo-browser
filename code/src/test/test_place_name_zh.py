@@ -103,6 +103,10 @@ def _resetZhModule() -> None:
     placeNameZh._WARNED_ONCE = False
     placeNameZh._PROVIDER = ""
     placeNameZh._LOAD_SECONDS = 0.0
+    # ⚠️ R13 起还有一份**词表缓存**（与 `_INDEX` 绑定身份）：`_INDEX` 被清成 None 后
+    #    它虽然会因身份不同而重建，但显式清掉更稳妥 —— 少一个"依赖缓存失效时机"的用例。
+    placeNameZh._VOCAB = None
+    placeNameZh._VOCAB_SOURCE = None
 
 
 # ============================================================
@@ -905,3 +909,74 @@ def test_nameSourceIsNotADerivedColumn():
     from processor.place import placeStore
 
     assert "nameSource" not in placeStore.REBUILD_COLUMNS
+
+
+# ============================================================
+# 八、行政区**词表**（R13 · DR-54）—— 「从行政区选地名」的那份名单
+# ============================================================
+# 这一节的要害是一句话：**词表里的字符串必须与 `zhNameOf()` 算出来的逐字相同**。
+# 不同的话，用户从下拉里选的『北京市 · 朝阳区』与 GPS 算出来的那份在
+# `pb_place.nameZh` 上归并不到一起 —— 地点列表出现两条同名项，而哪儿都不报错。
+
+def test_datasetVocabLooksLikeNameZh(zh_env):
+    """⭐ 词表与 `zhNameOf()` 同源同写法：**同一份数据、同一条拼串规则**。"""
+    from processor.place import placeNameZh as placeNameZh
+
+    _resetZhModule()
+    book = placeNameZh.datasetItems(keyword="", limit=0)
+    labels = [one["label"] for one in book["items"]]
+    assert book["total"] == len(labels) >= 2800, book["total"]
+    assert len(set(labels)) == len(labels), "词表里有重复项（去重没生效）"
+
+    # 34 个省级都在（省级也能选 —— 实测正式库里已有一行 nameZh='广东省'）
+    provinces = [one for one in book["items"] if one["level"] == "province"]
+    assert len(provinces) == 34, len(provinces)
+    assert "广东省" in labels
+
+    # 区县项必须带 `PLACE_ZH_JOINER`（与 `zhNameOf` 拼出来的那份同一条规则）
+    joiner = placeNameZh.basicSettings.PLACE_ZH_JOINER
+    districts = [one for one in book["items"] if one["level"] == "district"]
+    assert districts and all(joiner in one["label"] for one in districts)
+
+    # ⭐⭐ 最硬的一条：`zhNameOf()` 算出来的名字必须被词表认成**规范名且写法逐字相同**
+    got = placeNameZh.zhNameOf("PL_X", "CN, Beijing, Datun", 39.9842, 116.4007)
+    assert got["nameZh"] == "北京市 · 朝阳区", got
+    assert placeNameZh.canonicalDatasetName(got["nameZh"]) == got["nameZh"], (
+        "词表与 zhNameOf 的写法不一致 —— 手选的地名会与 GPS 算出来的归并不到一起")
+
+
+def test_datasetVocabAmbigousAndFilter(zh_env):
+    """同一省内同名区县要**如实标出来**；过滤只影响条数、不影响 total。"""
+    from processor.place import placeNameZh as placeNameZh
+
+    _resetZhModule()
+    book = placeNameZh.datasetItems(keyword="", limit=0)
+    amb = [one for one in book["items"] if one["ambiguous"]]
+    # 实测 8 组：数据源只有「省 + 区县」两级，地级市分不开（GPS 侧同样分不清）
+    assert len(amb) == 8, [one["label"] for one in amb]
+    assert "辽宁省 · 铁西区" in [one["label"] for one in amb]
+
+    hit = placeNameZh.datasetItems(keyword="朝阳", limit=50)
+    assert "北京市 · 朝阳区" in [one["label"] for one in hit["items"]]
+    assert hit["total"] <= 5, hit["total"]
+    assert placeNameZh.datasetItems(keyword="外婆家")["total"] == 0, "词表里不该有用户自造的名字"
+
+    full = placeNameZh.datasetItems(keyword="广东省", limit=0)
+    cut = placeNameZh.datasetItems(keyword="广东省", limit=3)
+    assert cut["total"] == full["total"] and len(cut["items"]) == 3
+    assert full["total"] >= 100, "省名过滤应当把该省所有区县都带出来"
+
+
+def test_canonicalDatasetNameNormalizesOnlyWhitespace(zh_env):
+    """手打少空格也算规范名；但**不做**别名/繁简/近义容错（那是另一种静默改口径）。"""
+    from processor.place import placeNameZh as placeNameZh
+
+    _resetZhModule()
+    assert placeNameZh.canonicalDatasetName("北京市 · 朝阳区") == "北京市 · 朝阳区"
+    assert placeNameZh.canonicalDatasetName("北京市·朝阳区") == "北京市 · 朝阳区"
+    assert placeNameZh.canonicalDatasetName("  北京市 · 朝阳区  ") == "北京市 · 朝阳区"
+    assert placeNameZh.canonicalDatasetName("广东省") == "广东省"
+    # 下面几个都**不是**行政区规范名 -> None（会被当成"自由输入的新地名"）
+    for text in ("外婆家", "北京市 朝阳区", "北京朝阳区", "北京市 · 朝阳", "", None):
+        assert placeNameZh.canonicalDatasetName(text) is None, text
+        assert placeNameZh.isDatasetName(text) is False, text

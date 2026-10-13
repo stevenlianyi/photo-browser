@@ -22,9 +22,19 @@
   「否决」= fix('unknown')，脸退回 **personCode 为空** → 进「待确认」Tab。
   「改判到某人」= fix('assign')，脸变成人工确认归属 → 从本列表消失。
   两种结果都不再是「机器认的」，所以离开这个列表是对的，不是丢数据。
+
+  「确认」是这一页缺的那一半
+  --------------------------
+  列表里原来只有**否定**动作（否决 / 改判 / 拆分），而绝大多数自动归属
+  其实是**对的** —— 少了「确认」这个出口，用户只能被动地一项项否决，
+  「机器认对了」这件事永远无法变成人工确认，这些脸也永远进不了质心样本
+  （质心只吃 isConfirmed=1 的样本，见 assigner._setBelong）。
+  所以每条脸给「确认」（一次点击，isConfirmed 0->1 + 立即重算质心），
+  每个照片组给「整张确认」（按人分桶批量，一次点击解决一张照片）。
+  它是「整张否决」的正向对偶，位置也对称：组级按钮一上一下。
 -->
 <script setup>
-import { Layers, Split, X } from 'lucide-vue-next'
+import { Check, Layers, Split, X } from 'lucide-vue-next'
 import { RouterLink } from 'vue-router'
 import PersonAvatar from '@/components/common/PersonAvatar.vue'
 import { thumbUrl } from '@/api/static'
@@ -40,7 +50,15 @@ defineProps({
   busyPhotoCode: { type: String, default: '' },
 })
 
-const emit = defineEmits(['reject-group', 'reject-face', 'fix', 'split', 'batch-cluster'])
+const emit = defineEmits([
+  'reject-group',
+  'reject-face',
+  'fix',
+  'split',
+  'batch-cluster',
+  'confirm-face',
+  'confirm-group',
+])
 
 function facesOf(group) {
   return Array.isArray(group?.faces) ? group.faces : []
@@ -74,8 +92,8 @@ function ownerName(group) {
 <template>
   <div class="space-y-3">
     <p class="pb-hint">
-      这些脸是<b>机器自动认的</b>、还没经你确认 —— 浏览照片时看到认错，
-      先来这里整张否决（否决后它们会回到「待确认」Tab）。
+      这些脸是<b>机器自动认的</b>、还没经你确认 —— 认对了就<b>确认</b>（转为人工确认、
+      进入质心样本），认错了就整张否决（否决后它们会回到「待确认」Tab）。
     </p>
 
     <p
@@ -129,6 +147,27 @@ function ownerName(group) {
                 <b class="tabular-nums text-ink">{{ similarityText(face.similarity) }}</b>
                 <span class="sr-only">（未经人工确认，可否决）</span>
               </span>
+              <!--
+                「确认」= 机器认的没错（isConfirmed 0->1 + 重算质心），
+                与「否决」是一对正负动作：确认让它留下并进质心样本，
+                否决让它出去、回待确认。它不选人、不弹浮层 ——
+                因为归属一个人都没动，这正是「一次点击就该生效」的语义。
+              -->
+              <el-tooltip
+                placement="top"
+                content="机器认的没错：这张脸转为「人工确认」，并立刻成为质心样本（认人会越来越准）"
+              >
+                <el-button
+                  size="small"
+                  text
+                  type="primary"
+                  :loading="busyPhotoCode === group.photoCode"
+                  :aria-label="`确认这张脸确实属于 ${face.displayName || '某人'}`"
+                  @click="emit('confirm-face', face)"
+                >
+                  <Check class="mr-1 h-3.5 w-3.5" aria-hidden="true" />确认
+                </el-button>
+              </el-tooltip>
               <el-button size="small" text @click="emit('fix', face)">去改判</el-button>
               <!--
                 「拆分」= 换个主人（走 POST /review/split，**记「谁本来属于谁」且可撤销**）。
@@ -176,8 +215,33 @@ function ownerName(group) {
           </ul>
         </div>
 
-        <!-- 组级操作：整张否决（≤2 次点击）/ 簇内批量改判 -->
+        <!-- 组级操作：整张确认 / 整张否决（≤2 次点击）/ 簇内批量改判 -->
         <div class="flex shrink-0 flex-col items-stretch gap-2">
+          <!--
+            「整张确认」= 「整张否决」的正向对偶：一张照片里机器认的全对。
+            ⚠️ 它和「整张否决」一样走 popconfirm（少一次误点就少一次错记），
+               但落点是**主色**而非危险色 —— 颜色本身就是「留下 vs 清出去」。
+            ⚠️ 一张合影可能认成好几个人，服务端按人分桶批量（store 里做的）。
+          -->
+          <el-popconfirm
+            :title="`这张照片里 ${facesOf(group).length} 张脸机器都认对了？确认后它们转为「人工确认」并进入质心样本`"
+            confirm-button-text="整张确认"
+            cancel-button-text="取消"
+            :width="300"
+            @confirm="emit('confirm-group', group)"
+          >
+            <template #reference>
+              <el-button
+                type="primary"
+                plain
+                :loading="busyPhotoCode === group.photoCode"
+                :aria-label="`整张确认：${photoLabel(group)} 里的 ${facesOf(group).length} 张脸`"
+              >
+                <Check class="mr-1 h-3.5 w-3.5" aria-hidden="true" />整张确认
+              </el-button>
+            </template>
+          </el-popconfirm>
+
           <el-popconfirm
             :title="`把这张照片里 ${facesOf(group).length} 张脸全部否决？它们会回到「待确认」队列`"
             confirm-button-text="整张否决"

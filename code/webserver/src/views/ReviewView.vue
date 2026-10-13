@@ -8,7 +8,8 @@
 
   Tab1：**并排比对**（未知人脸 vs 候选人物头像），候选按相似度降序，
   落在灰区（T_low–T_high）的条目标橙色提示。确认后**自动前进到下一条**。
-  Tab2：按照片分组，整张一键否决 ≤2 次点击（详见 DisputedList 的注释）。
+  Tab2：按照片分组，整张一键否决 ≤2 次点击（详见 DisputedList 的注释）；
+  认对了也能整张**确认**（isConfirmed 0->1 + 重算质心，与「整张否决」互为对偶）。
 
   键盘快捷键（设计稿 §4.6）：1/2/3 选候选、N 新建、S 跳过、I 忽略。
   ⚠️ 快捷键只在**待确认 Tab** 生效，且输入框聚焦时必须让位 ——
@@ -317,6 +318,27 @@ async function onRejectFace(face) {
   } finally {
     review.busyPhotoCode = ''
   }
+}
+
+/**
+ * 确认「我不同意」里的一张脸：机器认的没错。
+ * 语义 = `PUT /review/{faceCode}/assign`：isConfirmed 0->1 + 立即重算质心。
+ * ⚠️ 归属不变（还是原来那个人），所以不选人、不弹浮层 —— 一次点击就是完整语义。
+ * busyPhotoCode 由 store 内的 confirmDisputedFace 负责（同一张照片里的按钮一起转圈）。
+ */
+async function onConfirmDisputedFace(face) {
+  const data = await review.confirmDisputedFace(face)
+  if (!data) return
+  ElMessage.success(
+    `已确认：这张脸属于「${face?.displayName || '某人'}」，已转为人工确认并进入质心样本`,
+  )
+}
+
+/** 整张确认：一张照片里机器认的脸全对（一张合影可能认成好几个人，按人分桶批量提交） */
+async function onConfirmDisputedGroup(group) {
+  const data = await review.confirmDisputedGroup(group)
+  if (!data) return
+  ElMessage.success(`已整张确认：${data.assigned} 张脸转为人工确认并进入质心样本`)
 }
 
 /** 簇内批量改判：一次点击解决 N 张（服务端一个事务 + 一次重算） */
@@ -889,7 +911,8 @@ watch(activeTab, (tab) => {
 
         <div class="pt-2">
           <p class="pb-hint mb-3">
-            按照片分组 · 整张一键否决 ≤2 次点击 · 支持簇内批量改判。
+            按照片分组 · 认对了整张<b>确认</b>（转为人工确认、进入质心样本） ·
+            认错了整张一键否决 ≤2 次点击 · 支持簇内批量改判。
             否决后这些脸回到「待确认」Tab。
           </p>
           <DisputedList
@@ -898,6 +921,8 @@ watch(activeTab, (tab) => {
             :busy-photo-code="review.busyPhotoCode"
             @reject-group="onRejectGroup"
             @reject-face="onRejectFace"
+            @confirm-face="onConfirmDisputedFace"
+            @confirm-group="onConfirmDisputedGroup"
             @fix="openFixFromDisputed"
             @split="openSplit"
             @batch-cluster="onBatchCluster"

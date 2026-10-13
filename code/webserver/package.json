@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "photo-browser Web 前端（本地照片浏览与人脸归类工作台）",
+  "description": "相认相册 Sightseen Web 前端（本地家庭相册，按人相认照片）",
   "//engines": "Node 22.x（本机核实 v22.23.3 / npm 10.9.9）：element-plus 传递依赖 @vueuse/* 要求 >=22，用 18 会刷一屏 EBADENGINE 警告；Vite 7 要求 ^20.19 || >=22.12。engines 只作声明（未开 engine-strict），不会拦住低版本，只是提醒。",
   "scripts": {
     "dev": "vite",

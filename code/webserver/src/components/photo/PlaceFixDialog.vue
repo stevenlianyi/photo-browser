@@ -17,18 +17,27 @@
   ③ **提交后地点字典已重建**（后端在响应里回 rebuildSummary / rebuildElapsedMs），
      所以要提示一句，并让父组件刷新地点相关视图。
 
-  ⚠️ 候选下拉的**值**是「英文聚合键」（`placeName`），不是中文显示名 ——
-     `placeNameOverride` 最终要参与聚合键比较，写中文显示名会与
-     `pb_place.placeName` 对不上（界面看着对、地点列表里却少一张）。
-     标签才显示中文（`placeDisplayName`）+ 张数。
+  ⚠️ 候选下拉由 `PlaceNamePicker` 提供（R13 · DR-54），值可能是两类：
+     ① 已有地点 -> **英文聚合键**（`placeName`）—— `placeNameOverride` 要参与聚合键比较，
+        写中文显示名会与 `pb_place.placeName` 对不上（界面看着对、地点列表里却少一张）；
+     ② 行政区词表 -> **规范中文名**（`北京市 · 朝阳区`）—— 后端会同时把它写进该行的
+        `nameZh`，于是与同区县的 GPS 行**归并成一项**（一次只能写一个字符串，
+        而"整个朝阳区"在库里是 8 个键）。
+
+  ⚠️ 影响面的数字一律是**项级**（归并后），不是键级
+  -------------------------------------------------
+    「北京市 · 朝阳区」在列表里可能是 8 个街道键的合计（2566 张）。弹窗报键级
+    就会变成「0 → 1」而列表说「2566 → 2567」—— 两处各自自洽、都不报错。
+    ⇒ 名字与数字都从后端的 `counts.*`（项级）取，前端**不再自己查候选表**。
 -->
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { RotateCcw } from 'lucide-vue-next'
 import { fixPlace, getPlaceFixImpact } from '@/api/photoAction'
-import { listPlaces, placeDisplayName } from '@/api/place'
+import { placeDisplayName } from '@/api/place'
 import { formatCount } from '@/utils/format'
+import PlaceNamePicker from '@/components/common/PlaceNamePicker.vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -41,16 +50,16 @@ const nameText = ref('')
 const preview = ref(null)
 const loading = ref(false)
 const submitting = ref(false)
-/** 候选地点（`GET /places?groupByNameZh=1`，按张数倒序） */
-const candidates = ref([])
 
 const currentKey = computed(() => String(props.photo?.placeName || ''))
 const currentText = computed(() => placeDisplayName(props.photo))
-/** 未修正时的自动值（「自动：纽约」那一行）：优先用候选表里的中文名 */
+/** 未修正时的自动值（「自动：华盛顿」那一行）—— 名字由后端给（`autoNameZh`） */
 const autoText = computed(() => {
-  const key = String(props.photo?.placeAutoName || '')
-  if (!key) return ''
-  return labelOf(key)
+  const side = {
+    nameZh: preview.value?.autoNameZh,
+    placeKey: preview.value?.autoPlaceKey || props.photo?.placeAutoName,
+  }
+  return sideText(side)
 })
 const hasOverride = computed(() => Boolean(props.photo?.placeIsOverride))
 
@@ -71,27 +80,20 @@ const currentSourceText = computed(() => {
   }[one] || ''
 })
 
-/** 聚合键 -> 界面名字（候选表里有就显示中文名，没有就显示键本身） */
-function labelOf(placeKey, nameZh = '') {
+/**
+ * 一侧（from / to / 自动值）的界面名字：**后端给的 `nameZh` 优先**，没有才回落键本身。
+ *
+ * ⚠️ 不要在前端拿候选表反查 —— 那个表只覆盖"库里有行 + 数据集"两类，
+ *    两者都不含的键会被显示成英文，而它恰好是"清空会回到哪里"的唯一依据。
+ */
+function sideText(side) {
+  const nameZh = String(side?.nameZh || '').trim()
   if (nameZh) return nameZh
-  const key = String(placeKey || '')
-  if (!key) return '（未设置）'
-  const hit = candidates.value.find((one) => String(one.placeName || '') === key)
-  return hit ? placeDisplayName(hit) : key
+  const key = String(side?.placeKey || '').trim()
+  return key || '（未设置）'
 }
 
 let previewTimer = null
-
-async function loadCandidates() {
-  try {
-    const body = await listPlaces({
-      groupByNameZh: 1, page: 1, size: 200, orderBy: 'photoCount', desc: 1,
-    })
-    candidates.value = body?.items ?? []
-  } catch {
-    candidates.value = []
-  }
-}
 
 async function loadPreview() {
   const code = props.photo?.photoCode
@@ -121,7 +123,6 @@ watch(
     // 打开时预填**当前聚合键**（下拉里若有同名选项，会显示成中文标签）
     nameText.value = currentKey.value
     preview.value = null
-    loadCandidates()
     loadPreview()
   },
 )
@@ -146,7 +147,7 @@ async function submit() {
     ElMessage.success(
       targetValue.value == null
         ? `已恢复自动：地点回到「${autoText.value || '原值'}」，地点字典已重建（${ms} ms）`
-        : `地点已改为「${labelOf(data?.target?.placeKey, data?.target?.nameZh)}」，`
+        : `地点已改为「${sideText(data?.counts?.to)}」，`
           + `地点字典已重建（${ms} ms）`,
     )
     emit('done', data)
@@ -190,25 +191,15 @@ async function submit() {
       </dl>
 
       <div class="flex items-end gap-2">
-        <label class="flex-1">
+        <div class="flex-1">
           <span class="block text-caption text-ink-weak">修正为</span>
-          <el-select
-            v-model="nameText"
-            class="mt-1 w-full"
-            filterable
-            allow-create
-            default-first-option
-            clearable
-            placeholder="选一个地点，或直接输入新名字（如 外婆家）"
-          >
-            <el-option
-              v-for="one in candidates"
-              :key="one.placeCode"
-              :value="one.placeName"
-              :label="`${one.nameZh || one.placeName} · ${formatCount(one.photoCount)} 张`"
+          <div class="mt-1">
+            <PlaceNamePicker
+              v-model="nameText"
+              placeholder="选一个地点 / 行政区，或直接输入新名字（如 外婆家）"
             />
-          </el-select>
-        </label>
+          </div>
+        </div>
         <el-button :disabled="!hasOverride" @click="restoreAuto">
           <RotateCcw class="mr-1 h-4 w-4" aria-hidden="true" />恢复自动
         </el-button>
@@ -221,7 +212,7 @@ async function submit() {
         并记为<b>人工命名</b>（重建地址字典时不会被区县名覆盖）。
       </p>
 
-      <!-- 影响面：必须说清两个地点的张数怎么变 -->
+      <!-- 影响面：必须说清两个**项**的张数怎么变（项 = 同中文名归并后的那一行） -->
       <div v-if="loading" class="pb-hint">正在计算影响面…</div>
       <div v-else-if="preview" class="rounded-btn bg-surface px-3 py-2">
         <p v-if="!preview.changed" class="text-caption text-ink-sub">
@@ -229,26 +220,44 @@ async function submit() {
         </p>
         <template v-else>
           <p class="text-caption tabular-nums text-ink">
-            {{ labelOf(preview.counts.from.placeKey) }}
+            {{ sideText(preview.counts.from) }}
             {{ formatCount(preview.counts.from.photoCount) }} →
             <b>{{ formatCount(preview.counts.from.after) }}</b>
             <span aria-hidden="true">　</span>
-            {{ labelOf(preview.counts.to.placeKey, preview.target.nameZh) }}
+            {{ sideText(preview.counts.to) }}
             {{ formatCount(preview.counts.to.photoCount) }} →
             <b>{{ formatCount(preview.counts.to.after) }}</b>
           </p>
-          <p v-if="!preview.target.exists" class="mt-1 text-caption text-brand-ink">
-            「{{ labelOf(preview.target.placeKey, preview.target.nameZh) }}」还不存在，
-            这会<b>新建一个地点</b>，并记为<b>人工命名</b>
-            —— 重建地址字典时不会被区县名覆盖。
+          <!-- ⚠️ 第一眼状态（打开弹窗预填了当前键）：什么都没挪，只是"记为人工修正" -->
+          <p v-if="preview.sameKey" class="mt-1 text-caption text-ink-sub">
+            与当前地点<b>相同</b>：会把这张照片的地点记为<b>人工修正</b>
+            （张数不变；以后重扫 / 逆地理都不会再改动它）。
+          </p>
+          <!-- ⚠️ 同一个归并项：键变了、项没变 —— 张数一个都不动，必须说清楚，
+               否则用户看到"改了地点却什么都没变"会以为没生效 -->
+          <p v-else-if="preview.sameGroup" class="mt-1 text-caption text-ink-sub">
+            两边是<b>同一项</b>（同一个区县下归并在一起）—— 张数不变，
+            只是把这张照片的地点键<b>规范成</b>「{{ sideText(preview.counts.to) }}」。
+          </p>
+          <p v-else-if="preview.target.groupExistingRowCount > 0" class="mt-1 text-caption text-brand-ink">
+            将<b>并入</b>「{{ sideText(preview.counts.to) }}」这一项
+            —— 它当前由 {{ preview.target.groupExistingRowCount }} 处地点归并而成。
+          </p>
+          <p v-else-if="!preview.target.exists" class="mt-1 text-caption text-brand-ink">
+            「{{ sideText(preview.counts.to) }}」还不存在，这会<b>新建一个地点</b>，
+            并记为<b>人工命名</b> —— 重建地址字典时不会被区县名覆盖。
+          </p>
+          <p v-if="preview.target.isDistrict" class="mt-1 text-caption text-ink-weak">
+            这是<b>行政区规范名</b>（与 GPS 算出来的中文名同一份词表），
+            因此会与同区县的地点归并成一项。
           </p>
           <p v-if="preview.fromBecomesEmpty" class="mt-1 text-caption text-warning-ink">
-            「{{ labelOf(preview.counts.from.placeKey) }}」将变为 0 张
+            「{{ sideText(preview.counts.from) }}」将变为 0 张
             （地点行会保留，计数归零）。
           </p>
           <p v-if="preview.restoreAuto" class="mt-1 text-caption text-ink-sub">
             将清除人工修正，回到自动值
-            <b>{{ labelOf(preview.autoPlaceKey) || '（无）' }}</b>。
+            <b>{{ autoText || '（无）' }}</b>。
           </p>
         </template>
       </div>

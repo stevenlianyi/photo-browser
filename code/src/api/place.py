@@ -4,13 +4,14 @@
 #Filename: place.py
 #Description: 地点浏览接口（步骤 R5）—— /api/places* 整个命名空间
 #
-# 七个端点（**纯读 5 个 + 一个写 + 一个显式 405 占位**）
+# 八个端点（**纯读 6 个 + 一个写 + 一个显式 405 占位**）
 # --------------------------------------------
 #   GET   /api/places                       地点列表（字典；groupByNameZh=1 按中文名归并）
 #   POST  /api/places/rebuild               重建地点字典（幂等，从 browse.py 原样搬来）
 #   GET   /api/places/rebuild               **只为保住 405**，见下面「为什么单列这一条」
+#   GET   /api/places/districts             行政区词表（省 · 区县，供"从行政区选地名" · R13/DR-54）
 #   GET   /api/places/{placeCode}           地点详情（含同组下钻 placeCodes / members）
-#   PATCH /api/places/{placeCode}           地点重命名（DR-52；**只改 nameZh**，见该函数）
+#   PATCH /api/places/{placeCode}           地点重命名（DR-53；只改 nameZh + nameSource，见该函数）
 #   GET   /api/places/{placeCode}/photos    该地点的照片（分页 + 全年份计数）
 #   GET   /api/places/{placeCode}/persons   出现在该地点的人（**实时 join**，DR-26/28）
 #
@@ -680,6 +681,51 @@ def placesRebuildOnlyPost():
 
 
 # ============================================================
+# 三之二、GET /api/places/districts —— 行政区**词表**（R13 · DR-54）
+# ============================================================
+# ⚠️ 路径位置有讲究：它必须和 `/places/rebuild` 一样，**写在 `/{placeCode}` 之前** ——
+#    否则会被那个参数段通配吃掉，症状是 `GET /api/places/districts` 返回
+#    「404 这个地点不存在」（而不是词表），调用方一头雾水。
+@router.get("/places/districts",
+            summary="行政区词表（省 · 区县；供「从行政区选地名」）")
+def listDistricts(keyword: str = Query(default=None,
+                                      description="按名字过滤（省名或区县名里包含即可）"),
+                  limit: int = Query(default=200, ge=0, le=3000,
+                                     description="返回条数上限；0 = 不限（全量约 2866 条）")):
+    """把**离线地理数据集**摊平成一份可选词表：`省 · 区县`（去重）+ 34 个省级名。
+
+    为什么要有这个端点（R13 · DR-54）
+    --------------------------------
+      R12 起用户可以**手选**一个地名，而手选时没有坐标 —— `zhNameOf()` 那条
+      「坐标 -> 中文名」用不上。于是需要反过来的东西：**同一份数据源**的词表。
+      界面上「从行政区选」与「自己输入」的区别正是：前者选出来的字符串
+      是**规范名**，会与 GPS 算出来的 `nameZh` **逐字相同**，因而能归并到一起。
+
+    口径（与 `zhNameOf` 同一份规则，**不另写拼串**）
+    ----------------------------------------------
+      · 层级只有**两级**（数据源如此）：省级 + 区县级，**没有地级市**
+      · `ambigous=True` = 同一省内还有同名区县，**这份数据区分不了**（实测 8 组：
+        河北省两个「桥西区」、辽宁两个「铁西区」…）。如实标出来，而不是假装没有
+        ——GPS 自动算出来的 `nameZh` 对这 8 组**同样**分不清，两边口径一致
+      · 顺序 = 数据源原顺序（省级分组、组内区县按数据源序）；找具体某个区县靠
+        `keyword` 过滤，不靠翻列表
+      · 数据源不可用 -> **空列表 + `ready=False`**（降级不报错，界面回落到只剩"自由输入"）
+    """
+    try:
+        got = placeNameZh.datasetItems(keyword=keyword or "",
+                                       limit=int(limit or 0))
+    except Exception as e:                                       # noqa: BLE001
+        _LOG.warning("listDistricts: 词表不可用（%s: %s）", type(e).__name__, e)
+        got = {"items": [], "total": 0, "snapshot": {}}
+    snapshot = dict(got.get("snapshot") or {})
+    return dto.okBody(items=got["items"], total=got["total"],
+                      ready=bool(snapshot.get("labelNum")),
+                      snapshot=snapshot,
+                      note="行政区词表来自离线地理数据集（与 nameZh 同一份），"
+                           "选中后写的是**规范名**，会与 GPS 算出来的同名地点归并成一项")
+
+
+# ============================================================
 # 四、GET /api/places/{placeCode}（详情）
 # ============================================================
 
@@ -876,6 +922,12 @@ def renamePlace(placeCode: str, body: dto.PlaceRenameBody = None) -> dict:
         raise dto.ApiError(dto.CODE_DB_ERROR,
                            "写 pb_place.nameZh 失败: %s"
                            % sqliteCommon.dbHandle().lastErrMsg)
+
+    # ⚠️ 必须让 `placeStore.nameZhMap()` 的进程内快照失效：照片列表/照片详情的
+    #    `placeZh` 走的是那份快照（`browse.photoSummary`），不刷新就会出现
+    #    「地点列表已经是新名字、照片流还是旧名字」—— 同一进程里的静默不一致，
+    #    重启服务后"自己好了"，排障时最难查的那一类。
+    placeStore.nameZhMap(refresh=True)
 
     fresh = _placeRows(placeCode=code) or rows
     out = _placeBase(fresh)

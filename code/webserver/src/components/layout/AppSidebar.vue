@@ -54,9 +54,9 @@ function badgeTitle() {
         class="flex h-8 w-8 shrink-0 items-center justify-center rounded-btn bg-brand text-caption font-semibold text-ink-invert"
         aria-hidden="true"
       >
-        PB
+        相
       </span>
-      <span v-if="!mini" class="truncate text-subtitle text-ink">photo-browser</span>
+      <span v-if="!mini" class="truncate text-subtitle text-ink">相认相册</span>
     </div>
 
     <!-- 导航项 -->

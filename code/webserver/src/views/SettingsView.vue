@@ -1,7 +1,15 @@
 <!--
   P-08 设置（设计稿 §3.2）
   ------------------------------------------------------------
-  照片根目录（只读展示）｜ 识别参数（T_high / T_low / 分年代档策略）｜ 数据维护 ｜ 外观 ｜ 关于
+  照片根目录（只读展示）｜ 联系人导入 ｜ 识别参数（T_high / T_low / 分年代档策略）｜
+  数据维护 ｜ 外观 ｜ 关于
+
+  「联系人导入」为什么在这里（而不是人物库）
+  ----------------------------------------
+  它是**一次性、低频、会覆盖已有字段**的批量写操作：放人物库里等于在每天用的
+  列表页上摆一个「按错就改一堆人」的按钮。设置页本来就是「数据进出与维护」的位置，
+  而人物库空状态缺入口的痛点，用一条跳转链接（`/settings#contact-import`）解决即可 ——
+  真正的界面在 `components/common/ContactImportPanel.vue`。
 
   三条必须写在界面上的纪律
   ----------------------
@@ -25,12 +33,14 @@ import {
   Palette,
   RefreshCw,
   TriangleAlert,
+  Upload,
   Wrench,
 } from 'lucide-vue-next'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import 'element-plus/theme-chalk/el-message.css'
 import { BUCKET_STRATEGIES, useSettingsStore } from '@/store/settings'
 import { formatCount } from '@/utils/format'
+import ContactImportPanel from '@/components/common/ContactImportPanel.vue'
 
 const settings = useSettingsStore()
 
@@ -149,6 +159,16 @@ async function copy(text) {
         目录由后端配置解析，界面上不提供修改入口 ——
         <b>原图始终只读，本工具不提供编辑或覆盖原图的能力</b>。
       </p>
+    </section>
+
+    <!-- ============ 联系人导入 ============ -->
+    <section class="pb-card p-4" aria-labelledby="st-import-title">
+      <h3 id="st-import-title" class="flex items-center gap-2 pb-section-title">
+        <Upload class="h-4 w-4 text-ink-weak" aria-hidden="true" />联系人导入
+      </h3>
+      <div class="mt-3">
+        <ContactImportPanel anchor="contact-import" />
+      </div>
     </section>
 
     <!-- ============ 识别参数 ============ -->
@@ -448,7 +468,8 @@ async function copy(text) {
         <Info class="h-4 w-4 text-ink-weak" aria-hidden="true" />关于
       </h3>
       <p class="mt-3 text-body text-ink-sub">
-        photo-browser · 本地个人 / 家庭照片浏览与人脸归类工具。照片不上传、不出本机，
+        相认相册 Sightseen · 本地个人 / 家庭照片浏览与人脸归类工具。
+        把散落的照片，按人相认，跨年代也能认出同一个人。照片不上传、不出本机，
         单用户使用，没有登录与多用户概念。
       </p>
       <p class="pb-hint mt-2">

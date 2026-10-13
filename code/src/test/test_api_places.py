@@ -347,3 +347,49 @@ def test_listPlacesDoesNotWrite(placesEnv, api_rows):
     logs = [str(r.get("opType") or "") for r in api_rows.logs()]
     assert "REBUILD" not in logs and "PLACE" not in logs, logs
     assert "DISABLE" not in logs
+
+
+# ============================================================
+# 十七、行政区词表端点（R13 · DR-54）
+# ============================================================
+
+def test_placesDistrictsEndpoint(placesEnv, api_rows):
+    """`GET /api/places/districts`：形状 / 过滤 / **路由顺序** / **纯读**。"""
+    client = placesEnv["client"]
+    got = client.get("/api/places/districts", params={"keyword": "朝阳", "limit": 5})
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["ok"] is True and body["ready"] is True, body
+    labels = [one["label"] for one in body["items"]]
+    assert "北京市 · 朝阳区" in labels, labels
+    assert body["total"] >= len(labels)
+    assert body["snapshot"]["districtNum"] >= 2800, body["snapshot"]
+    # 词表条数 = 区县去重数 + 34 省级（≤ 原始区县数 + 34）
+    assert body["snapshot"]["labelNum"] >= body["snapshot"]["districtNum"], body["snapshot"]
+    for one in body["items"]:
+        assert one["level"] in ("district", "province")
+        assert one["label"] and one["province"]
+        assert isinstance(one["ambiguous"], bool)
+
+    # ⚠️ **路由顺序**：`districts` 是静态段，必须排在 `/{placeCode}` 之前，
+    #    否则会被参数段通配吃掉，退化成「404 这个地点不存在」。
+    #    不传参数也要 200（而不是 404/422）。
+    assert client.get("/api/places/districts").status_code == 200
+    # 反向：`/{placeCode}` 参数路由**仍然在**（没被 districts 这条静态路由顶掉）——
+    # 用一个不存在的编码：应当是详情那条路的 404 NOT_FOUND，
+    # 而不是 405（被 rebuild 的占位挡下）或 200（被词表吞掉）。
+    miss = client.get("/api/places/PL_NOT_EXIST_999")
+    assert miss.status_code == 404 and miss.json()["code"] == "NOT_FOUND", miss.text
+
+    # ---- 纯读：一行都不写 ----
+    from database import queryCommon as query
+
+    def fingerprint():
+        return {name: int(query.selectValue(
+            "SELECT COUNT(*) AS rowNum FROM %s" % name, (), default=0) or 0)
+            for name in ("pb_place", "pb_photo", "pb_review_log")}
+
+    before = fingerprint()
+    for _ in range(2):
+        client.get("/api/places/districts", params={"keyword": "桥西"})
+    assert fingerprint() == before, "GET /api/places/districts 写了库"

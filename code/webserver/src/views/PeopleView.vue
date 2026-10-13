@@ -19,6 +19,7 @@ import {
   Plus,
   Search,
   TriangleAlert,
+  Upload,
   UserRound,
 } from 'lucide-vue-next'
 import { ElMessage } from 'element-plus/es/components/message/index'
@@ -89,6 +90,17 @@ onMounted(async () => {
 
 function openCreate() {
   createVisible.value = true
+}
+
+/**
+ * 去设置页的「联系人导入」。
+ *
+ * ⚠️ 导入界面**不在人物库**（它是低频、会覆盖已有字段的批量写操作），
+ *    所以这里只做跳转 + 锚点：`ContactImportPanel` 根元素 id 就是 `contact-import`，
+ *    由它自己在挂载时把视图滚到那块（本项目没配 router 的 scrollBehavior）。
+ */
+function gotoImport() {
+  router.push({ path: '/settings', hash: '#contact-import' })
 }
 
 async function submitCreate(form) {
@@ -329,9 +341,16 @@ async function confirmDisable() {
           <span><b>确认人脸</b> —— 这一步的质量直接决定后续自动归属的准确度</span>
         </li>
       </ol>
-      <el-button type="primary" @click="openCreate">
-        <Contact class="mr-1 h-4 w-4" aria-hidden="true" />先建一个人物
-      </el-button>
+      <!-- 引导必须**可点**：空状态写着「先把通讯录导进来」而全站没有入口时，
+           用户只会以为功能没做（导入界面在设置页，锚点由面板自己接） -->
+      <div class="flex flex-wrap items-center justify-center gap-2">
+        <el-button type="primary" @click="gotoImport">
+          <Upload class="mr-1 h-4 w-4" aria-hidden="true" />去导入联系人
+        </el-button>
+        <el-button @click="openCreate">
+          <Contact class="mr-1 h-4 w-4" aria-hidden="true" />先建一个人物
+        </el-button>
+      </div>
     </section>
 
     <section

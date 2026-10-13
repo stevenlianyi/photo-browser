@@ -19,6 +19,7 @@
 #   26 POST /import/csv?dryRun=true -> 回计划且**不写任何一行**
 #   27 走查：没有任何导出接口（404/405）
 #   28 走查：没有 DELETE /api/contacts/{personCode}
+#   29 POST /import/vcard   -> 同款 dryRun 语义；实跑建档 + KIND:group 落 pb_family
 #
 # ══════════════════════════════════════════════════════════════════
 # ⚠️⚠️ 第 19 条的核心结论（改生日 **必须** 同时刷 pb_face.shotBucket）
@@ -721,6 +722,102 @@ def test_importCsvRealRunCreates(api_env, api_rows):
 def test_importCsvBadContentRejected(api_env):
     got = api_env["client"].post("/api/contacts/import/csv?dryRun=1",
                                  files={"file": ("x.csv", b"", "text/csv")})
+    assert got.status_code == 400
+
+
+# ============================================================
+# 验收 29：POST /import/vcard（设置页「联系人导入」的 vCard 通道）
+# ============================================================
+
+#: ① 新卡（UID + 生日 + 分类）② 库里已有人（靠 displayName 命中 -> update）
+#: ③ 一张 KIND:group 卡（成员靠 UID 关联，验证家庭组落 pb_family）
+VCARD_TEXT = (
+    "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:uid-qian\r\nFN:钱小样\r\n"
+    "N:钱;小样;;;\r\nEMAIL:qian@example.com\r\nTEL:13900139000\r\n"
+    "BDAY:1995-08-08\r\nCATEGORIES:家人\r\nEND:VCARD\r\n"
+    "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:uid-alpha\r\nFN:阿尔法\r\n"
+    "N:阿;尔法;;;\r\nEMAIL:a@example.com\r\nEND:VCARD\r\n"
+    "BEGIN:VCARD\r\nVERSION:3.0\r\nKIND:group\r\nFN:钱家\r\n"
+    "MEMBER:urn:uuid:uid-qian\r\nEND:VCARD\r\n"
+)
+
+
+def test_importVcardDryRunWritesNothing(api_env, api_rows):
+    before = {name: api_rows.count(name) for name in
+              ("pb_person", "pb_person_category", "pb_family")}
+    got = api_env["client"].post("/api/contacts/import/vcard?dryRun=1",
+                                 files={"file": ("contacts.vcf",
+                                                 VCARD_TEXT.encode("utf-8"),
+                                                 "text/vcard")})
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["dryRun"] is True and body["written"] is False
+    assert body["kind"] == "vcard"
+    assert body["fileCount"] == 1
+    assert body["cardCount"] == 2                  # 两张个人卡（组卡不算人）
+    assert body["createCount"] + body["updateCount"] + body["skipCount"] == 2
+    assert body["preview"] and "parser" in body
+    # 家庭组只在计划里出现，**不落库**
+    assert body["groupCount"] == 1
+    assert body["groups"][0]["memberCount"] == 1
+    assert isinstance(body["warnings"], list)
+
+    after = {name: api_rows.count(name) for name in
+             ("pb_person", "pb_person_category", "pb_family")}
+    assert after == before, "dryRun 却写了库：%s -> %s" % (before, after)
+    import os
+    from common import paths as paths
+    dropDir = os.path.join(paths.imports_dir(), "vcard")
+    if os.path.isdir(dropDir):
+        assert os.listdir(dropDir) == [], os.listdir(dropDir)
+
+
+def test_importVcardRealRunCreatesAndBuildsFamily(api_env, api_rows):
+    got = api_env["client"].post("/api/contacts/import/vcard",
+                                 files={"file": ("contacts.vcf",
+                                                 VCARD_TEXT.encode("utf-8"),
+                                                 "text/vcard")})
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["written"] is True
+    assert body["createCount"] == 1               # 钱小样：新
+    assert body["updateCount"] == 1               # 阿尔法：靠 displayName 命中
+    code = body["created"][0]
+    assert code.startswith("VC_")                 # 来源标识与 CSV("CS_") 区分
+    row = api_rows.person(code)
+    assert row["vcardUid"] == "uid-qian"          # ⚠️ UID 必须真的落库
+    assert row["birthday"] == "1995-08-08"
+    # KIND:group -> pb_family，成员挂 familyGroupCode（半自动，不是按姓氏猜）
+    assert api_rows.count("pb_family") == 1
+    assert body["groupCount"] == 1 and body["familyMembers"] == 1
+    assert row["familyGroupCode"] == body["familyCreated"][0]
+    # 原件归档到 db\imports\ 下（**不是 photo 目录**）
+    assert body["archive"]["ok"] is True
+    # ⚠️ 归档成功后**暂存件要删掉**：不然 `imports\vcard\` 下会攒满与
+    #    `imports\<时间戳>_vcard\` 里那份归档副本重复的原件（每导一次一份）。
+    import os
+    from common import paths as paths
+    stageRoot = os.path.join(paths.imports_dir(), "vcard")
+    if os.path.isdir(stageRoot):
+        assert not [n for n in os.listdir(stageRoot) if n.startswith("upload_")], \
+            os.listdir(stageRoot)
+    # 再导一次：两个人都该靠 **vcardUid** 认出来（钉住「UID 落库」这件事 ——
+    # 只剩「按显示名认人」时，同一个人改了名就会建出第二份档案）
+    again = api_env["client"].post("/api/contacts/import/vcard?dryRun=1",
+                                   files={"file": ("contacts.vcf",
+                                                   VCARD_TEXT.encode("utf-8"),
+                                                   "text/vcard")}).json()
+    assert again["createCount"] == 0
+    assert {one["hit"] for one in again["preview"]} == {"vcardUid"}
+
+
+def test_importVcardBadContentRejected(api_env):
+    client = api_env["client"]
+    got = client.post("/api/contacts/import/vcard?dryRun=1",
+                      files={"file": ("x.vcf", b"", "text/vcard")})
+    assert got.status_code == 400
+    got = client.post("/api/contacts/import/vcard?dryRun=1",
+                      files={"file": ("y.vcf", b"hello world", "text/vcard")})
     assert got.status_code == 400
 
 

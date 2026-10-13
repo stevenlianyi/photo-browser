@@ -22,6 +22,7 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { placeDisplayName, renamePlace } from '@/api/place'
+import PlaceNamePicker from '@/components/common/PlaceNamePicker.vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -96,15 +97,16 @@ async function submit() {
       </p>
 
       <div class="flex items-end gap-2">
-        <label class="flex-1">
+        <div class="flex-1">
           <span class="block text-caption text-ink-weak">显示名</span>
-          <el-input
-            v-model="text"
-            class="mt-1"
-            clearable
-            :placeholder="rawName || '（无英文聚合键）'"
-          />
-        </label>
+          <div class="mt-1">
+            <PlaceNamePicker
+              v-model="text"
+              groups="districts"
+              :placeholder="rawName || '（无英文聚合键）'"
+            />
+          </div>
+        </div>
         <el-button @click="clearName">清除</el-button>
       </div>
       <p class="text-caption text-ink-weak">
@@ -116,6 +118,11 @@ async function submit() {
         重建地址字典时**不会再被区县名覆盖**；「清除」同样是人工决定，
         清除后界面固定回落英文聚合键，不会被自动回填。
         <span v-if="isManual">当前已经是人工命名。</span>
+      </p>
+      <p class="text-caption text-warning-ink">
+        ⚠️ 显示名是<b>归并键</b>：改成一个<b>行政区规范名</b>（如「北京市 · 朝阳区」）时，
+        它可能与同区县的地点<b>并成一项</b>；改成别人没用的名字则会单列一项。
+        改完按<b>新名字</b>能筛到、按旧名字不再命中。
       </p>
       <p v-if="merged" class="text-caption text-warning-ink">
         这个地点当前归并了 {{ place.placeCodes.length }} 处（同名地点）——
