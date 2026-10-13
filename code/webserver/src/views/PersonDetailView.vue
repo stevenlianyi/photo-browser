@@ -55,17 +55,20 @@ import { disableContact, getImpact, patchContact } from '@/api/contacts'
 import { fixFace, getRevertible, getReviewLog, undoOperation } from '@/api/review'
 import { useAvatarSources } from '@/utils/avatar'
 import { faceStateOf, similarityText } from '@/utils/faceState'
-import { baseName, formatBucketKey, formatCount } from '@/utils/format'
+import { baseName, formatBucketKey, formatCount, formatFileSize } from '@/utils/format'
 // 进照片详情要**声明来源与翻页范围**：否则详情页的「返回」只会回照片流、
 // 左右箭头会翻到全库（见 utils/photoReturn.js 顶部）
 import { currentSource, goBackOr, photoDetailLink, scopeParam } from '@/utils/photoReturn'
 import { categoryLabelOf, relationLabelOf, usePersonsStore } from '@/store/persons'
 import { useReviewStore } from '@/store/review'
+import { useEraZipStore } from '@/store/eraZip'
+import { eraZipDownloadUrl } from '@/api/eraZip'
 
 const route = useRoute()
 const router = useRouter()
 const persons = usePersonsStore()
 const review = useReviewStore()
+const eraZip = useEraZipStore()
 
 const personCode = computed(() => String(route.params.personCode || ''))
 const person = computed(() => persons.current)
@@ -195,12 +198,19 @@ async function load() {
   // ⚠️ 换人时必须把 Tab3 的「已加载」标记与数据一起清掉：
   //    不清的话，从 A 的详情跳到 B（组件被复用、activeTab 还是 eraSample）
   //    会先把**上一个人的年份队列**渲染出来 —— 它看起来完全合理，只是错的。
+  //    R15 的打包状态同理：不清会把 A 的进度条画在 B 的页面上。
   eraLoaded.value = false
   persons.clearEraSample()
+  eraZip.clear()
   await Promise.all([
     persons.fetchPersonDetail(personCode.value),
     persons.fetchFamilies(),
     loadRevertible(),
+    // 年代档打包现状（R15）：Tab1 是默认 Tab，**不能懒加载** ——
+    // 它的数据就是横带上的「约 0.9 GB / 下载 512 MB」那些字，
+    // 缺失时按钮只能显示「打包 zip」，用户点下去才知道已经打过了。
+    // ⚠️ 单独 catch：打包列表挂了不该让整页人物详情一起白屏。
+    eraZip.fetchBuckets(personCode.value).catch(() => {}),
   ])
   // 换人时若正停在 Tab3，取的是**新那个人**的抽样（不是上面刚清掉的那份）
   if (activeTab.value === 'eraSample') ensureEraSample()
@@ -292,6 +302,9 @@ onMounted(load)
 watch(personCode, load)
 onBeforeUnmount(() => {
   persons.clearPerson()
+  // 离开页面停轮询（**不清服务端任务** —— 它还在后台跑，
+  // 下次进这个人的详情时 fetchBuckets 会从服务端把状态接回来）。
+  eraZip.clear()
 })
 
 // ============================================================
@@ -299,6 +312,85 @@ onBeforeUnmount(() => {
 // ============================================================
 
 const timelineGroups = computed(() => persons.timeline?.groups || [])
+
+// ============================================================
+// Tab1 的年代档打包（R15 · DR-56 ~ DR-58）
+// ============================================================
+//
+// 三条与 Tab3（年代抽样 zip）**不同**的地方：
+//   ① 抽样包只有几十张、**同步**打完；年代档包可以到 GB 级，所以是**异步**，
+//      界面显示「已打包 47/171」而不是一个转圈的按钮；
+//   ② 后端**全局只允许一个**打包任务（用户选定），所以别的档的按钮要禁用；
+//   ③ 已有产物且没过期时**直接下载** —— 不该为「再下一次」重打 1 GB 的包。
+
+/** 打包完成后要自动下载的那一档（空 = 这次不下载） */
+const pendingDownload = ref('')
+
+/**
+ * 触发浏览器下载。
+ *
+ * ⚠️ `<a>` 上**不加** `download` 属性：文件名由服务端的 Content-Disposition
+ *    给（`年代照片_张明_2005-2009.zip`，RFC 5987 中文名）；加了 download
+ *    会用 URL 末段（`download`）当文件名，中文名就白传了。
+ */
+function triggerZipDownload(bucketKey) {
+  const link = document.createElement('a')
+  link.href = eraZipDownloadUrl(personCode.value, bucketKey)
+  link.rel = 'noopener'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+}
+
+/** 时间轴横带上的「打包 / 下载」按钮（组件只发意图，这里做决定） */
+async function onBucketPack(payload) {
+  const code = personCode.value
+  const bucketKey = String(payload?.bucketKey || '')
+  if (!code || !bucketKey) return
+  // 已有产物且没过期：直接下载，省一次「起任务 → 幂等短路」的往返
+  if (payload?.zipExists && !payload?.stale) {
+    triggerZipDownload(bucketKey)
+    return
+  }
+  try {
+    const info = await eraZip.start(code, bucketKey, Boolean(payload?.stale))
+    if (!info?.started) {
+      // 后端幂等短路（列表数据略旧 / 别人刚打完）：产物已就绪，直接下载
+      triggerZipDownload(bucketKey)
+      return
+    }
+    pendingDownload.value = bucketKey
+    ElMessage.info(
+      `开始打包「${info.bucketText || bucketKey}」共 ${formatCount(info.total)} 张`
+      + `（约 ${formatFileSize(info.estBytes)}），完成后会自动下载`,
+    )
+  } catch (e) {
+    // request.js 已弹过 Toast（含「已有打包任务在跑」）
+  }
+}
+
+/** 打完了自动下载 —— 用户点那个按钮的意图是「拿到这个包」，不是「看进度条」 */
+watch(
+  () => eraZip.task?.state,
+  (state) => {
+    if (state === 'READY' && pendingDownload.value) {
+      triggerZipDownload(pendingDownload.value)
+      pendingDownload.value = ''
+      return
+    }
+    if (state === 'FAILED' || state === 'CANCELLED') {
+      pendingDownload.value = ''
+    }
+  },
+)
+
+/** exports 目录占用（只报数、不清理 —— DR-24：不自动删用户文件） */
+const exportsHint = computed(() => {
+  const usage = eraZip.exportsUsage
+  const bytes = Number(usage?.bytes) || 0
+  if (!bytes) return ''
+  return `打包产物已占用 ${formatFileSize(bytes)}（${formatCount(usage?.files || 0)} 个文件），不会自动清理`
+})
 
 /**
  * 进照片详情的来源声明：
@@ -757,12 +849,27 @@ async function setDefaultAvatar(sample) {
               v-else
               :groups="timelineGroups"
               :max-per-bucket="12"
+              :pack-buckets="eraZip.buckets"
+              :pack-task="eraZip.task"
               @select="onTimelineSelect"
+              @pack="onBucketPack"
             />
             <p class="pb-hint">
               时间轴按<b>年代档</b>分组（童年 3 年 / 成年 10 年）——
               人脸跨年龄漂移是这个工具的核心难点（S0 实测：不分年代档时误认率 32.75%，
               分年代档后约 19%）。空年代档不显示；每个年代档最多 12 张，其余折成「+N」。
+            </p>
+            <!--
+              R15：按年代档打包 zip 的口径说明（**必须写**）。
+              横带上的「179 张」与按钮上的「排除重复件后 171 张」是两个数 ——
+              不解释的话，用户拿到 171 个文件的包一定会认为打少了。
+            -->
+            <p class="pb-hint">
+              每个年代档右侧的按钮可以把这个档的<b>全部照片</b>打成一个 zip
+              （<b>已排除重复件</b>；原图已不在磁盘上的会跳过并如实报数）。
+              所以<b>包内文件数可能少于横带上的张数</b> —— 那里含重复件与找不到原图的。
+              打包在后台进行，一次只打一个档，完成后浏览器会自动下载。
+              <span v-if="exportsHint">（{{ exportsHint }}）</span>
             </p>
 
             <!--

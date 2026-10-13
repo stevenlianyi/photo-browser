@@ -55,6 +55,7 @@ from api import browse as browseApi                               # noqa: E402
 from api import contacts as contactsApi                           # noqa: E402
 from api import dto as dto                                        # noqa: E402
 from api import eraSample as eraSampleApi                         # noqa: E402
+from api import eraZip as eraZipApi                               # noqa: E402
 from api import face as faceApi                                   # noqa: E402
 from api import match as matchApi                                 # noqa: E402
 from api import photoAction as photoActionApi                     # noqa: E402
@@ -289,6 +290,11 @@ def createApp(dbFile: str = None, photoRoot: str = None, thumbRoot: str = None,
     # ⚠️ 自成一个模块而不是塞进 browse.py —— 后者的文件头写着「一个字都不写」，
     #    在里面加写接口会让那条纪律变成谎话。详见 api/eraSample.py 文件头。
     application.include_router(eraSampleApi.router, prefix="/api")
+    # 年代档打包（R15 · DR-56 ~ DR-58）：按年代档把该档**全部**照片打包成 zip。
+    # ⚠️ 与抽样（eraSampleApi）**刻意分开**：那个有批次行可回写，这个不落库、
+    #    状态是「文件在不在」+ 进程内任务态；混在一个模块里两种状态模型会打架。
+    # ⚠️ 路径里没有 `export` 字样 —— test_api_smoke 逐条扫 OpenAPI 断言这件事。
+    application.include_router(eraZipApi.router, prefix="/api")
     application.include_router(photoActionApi.router, prefix="/api")
     application.include_router(reviewApi.router, prefix="/api")
     application.include_router(contactsApi.router, prefix="/api")

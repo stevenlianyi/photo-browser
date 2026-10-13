@@ -12,14 +12,15 @@
 
 | 部分 | 范围 | 状态 |
 |---|---|---|
-| 第一部分 | 修正步骤 R 系列（R / R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 / R9 / R10 / R11 / R12 / R13） | 14 项已完成；**待做 1 项：R10（打包分发）** |
+| 第一部分 | 修正步骤 R 系列（R / R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 / R9 / R10 / R11 / R12 / R13 / R14） | 15 项已完成；**待做 1 项：R10（打包分发）** |
 | 第二部分 | 主线 12 步 | ✅ 全部完成（2026-10-07） |
 | 第三部分 | 附录 A/B/C | 状态表 / 输出格式 / **待办** |
 
 **下一步**：**只剩 R10（打包分发）** → M4 一周自测 → 补 R2 的验收证据。详见 **附录 C**。
-（R9 照片旋转、R11 年代抽样、R12 地点修正、R13 从行政区选地名均已完成；R11 的规划见 `plan/年代抽样规划.md`；
+（R9 照片旋转、R11 年代抽样、R12 地点修正、R13 从行政区选地名、R14 单张人脸识别均已完成；R11 的规划见 `plan/年代抽样规划.md`；
 R12 的决策见 DR-52/53（**其中 `nameSource` 已按严格版落地** —— 见 R12 一节末尾的「✅ 落地补记（R12-D）」）；
-R13 的决策见 DR-54，规划见 `plan/开发计划.md` §五「修正步骤 R13」）
+R13 的决策见 DR-54，规划见 `plan/开发计划.md` §五「修正步骤 R13」；
+R14 的决策见 DR-55，规划见 `plan/开发计划.md` §五「修正步骤 R14」）
 
 ---
 
@@ -42,6 +43,7 @@ R13 的决策见 DR-54，规划见 `plan/开发计划.md` §五「修正步骤 R
 - R11 · 年代抽样（每年一张 · DR-45~DR-51，拆 R11a/b/c）
 - R12 · 地点修正（单张照片 + 地点显示名 + `nameSource` 严格版 · DR-52/53）
 - R13 · 从行政区选地名（候选三段 + 规范名当键并写 `nameZh` · DR-54）
+- R14 · 识别这张照片人脸（单张端点 + 只判这一张 + 重提取三件连带 · DR-55）
 
 **二、主线 12 步（已完成留档）**
 
@@ -4456,6 +4458,7 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 | **R11** | **年代抽样**（每年抽一张 · DR-45~DR-51，拆 R11a/b/c） | — | ✅ 已完成（`engine/sample/eraSampler.py` / `api/eraSample.py` / `processor/media/eraPack.py` / `EraSamplePanel.vue`；库内 **9 个批次**，为第 11/12 张表） |
 | **R12** | **地点修正**（单张照片 `placeNameOverride` + 地点显示名 `nameZh`/`nameSource` · 改完自动 rebuild · DR-52/53） | — | ✅ **已完成**（2026-10-11：`pb_photo.placeNameOverride` + `pb_place.nameSource` + 聚合键三段优先 + `processor/place/placeFix.py` + `PlaceFixDialog.vue` / `PlaceRenameDialog.vue` + `test_place_fix.py`；`pytest code/src/test -q` = **1521 passed / 2 skipped / 1 xfailed**，`npm run build` + 双门禁通过）。⚠️ 未做：批量改地点（用户明确不做）；`nameSource` 严格版见 R12 一节末尾的「✅ 落地补记（R12-D）」 |
 | **R13** | **从行政区选地名**（候选三段：已有地点 / 行政区规范名 / 自由输入 · DR-54） | — | ✅ **已完成**（2026-10-12：`placeNameZh.datasetItems/canonicalDatasetName` + `GET /api/places/districts` + `placeStore.nameGroupKeys` + `placeFix` 的**项级**预览 + `components/common/PlaceNamePicker.vue`（A/B 共用）；`pytest code/src/test -q` = **1534 passed / 2 skipped / 1 xfailed**）。⚠️ 未做：拼音首字母过滤、地级市层级（数据源只有两级） |
+| **R14** | **识别这张照片人脸**（P-03「操作」面板的单张识别：`POST /api/facerec/extract-one` + 只判这一张 + 重提取三件连带 · DR-55） | — | ✅ **已完成**（2026-10-13：`api/face.py` 的单张端点与状态轮询 + `queue.loadPendingRows(photoCode=)` + `faceScheduler.engineKwargs()` + `PhotoDetailView.vue` 的四态弹窗；新建 `test/test_api_extract_one.py` **10 条**（引擎打桩）+ 相邻回归 **124 条**全绿；全量 `pytest src/test` = **1508 passed**，另 5 failed + 27 errors 全为地点命名相关（本机缺 `shapely`，与本步无关）；`npm run build` + 双门禁通过）。⚠️ 未做：在真实照片库上真跑一次识别（会改写 `pb_face`） |
 | **R6** | **照片详情左右翻页**（DR-31，A 档，后端零改动） | — | ✅ 已完成（`components/photo/PhotoPager.vue`） |
 | **R7** | **人物头像**（卡片显示照片 + 人脸样本设默认 · DR-40/41） | — | ✅ 已完成（2026-10-08：`personCoversOf` + `AvatarPicker` + 16 条用例；**正式库副本实测 24/24 卡片有封面脸**，改前 0/2030 有 `avatarFaceCode`） |
 | **R8** | **照片年代修正**（人工修正拍摄年 + 编辑入口 · DR-42） | — | ✅ 已完成（2026-10-08：`pb_photo.shotYearOverride` + `comGD.sqlEffectiveShotYear` + `processor/photoTimeFix.py` + `ShotYearFixDialog.vue` + `test_photo_time_fix.py` 12 条用例全绿）；⚠️ 拖拽（P1）与 `takenAt` 修正到日（P2）未做 |
@@ -4497,15 +4500,17 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 > 提醒：新对话里请**只粘贴当前步骤的提示语**，不要把多步一起粘过去，否则上下文会过长导致遗漏约束。
 >
 > **待做 1 项：R10（打包分发）**。
-> R9（照片旋转）、R11（年代抽样）、R12（地点修正）、R13（从行政区选地名）均已完成。
-> 12 步主线于 2026-10-07 全部完成；R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 / R9 / R11 / R12 / R13 均已完成。
+> R9（照片旋转）、R11（年代抽样）、R12（地点修正）、R13（从行政区选地名）、R14（单张人脸识别）均已完成。
+> 12 步主线于 2026-10-07 全部完成；R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 / R9 / R11 / R12 / R13 / R14 均已完成。
 >
 > ⚠️ **编号提醒**：`R7` = 人物头像（DR-40/41）、`R8` = 照片年代修正（DR-42）、
 > `R9` = 照片旋转（DR-43）、`R10` = 打包分发（DR-44）、
 > `R11` = **年代抽样**（DR-45~DR-51，拆 R11a/b/c，规划见 `plan/年代抽样规划.md`）、
 > `R12` = **地点修正**（DR-52/53，单张照片地点 + 地点显示名 + `nameSource` 严格版）、
-> `R13` = **从行政区选地名**（DR-54，候选三段：已有地点 / 行政区规范名 / 自由输入）。
-> 别互相叫错 —— `R12` 是"改这张照片的地点"，`R13` 是"**从哪选**这个地名"。
+> `R13` = **从行政区选地名**（DR-54，候选三段：已有地点 / 行政区规范名 / 自由输入）、
+> `R14` = **单张人脸识别**（DR-55，照片详情「操作」面板 → 只认这一张 + 只判这一张）。
+> 别互相叫错 —— `R12` 是"改这张照片的地点"，`R13` 是"**从哪选**这个地名"，
+> `R14` 是"**只认这一张照片**的人脸"（不是 R10 的打包、也不是主线的识别链路本身）。
 >
 > **R10 完成后（按优先级）**
 > 1. **M4 一周自测**（最重要，不是写代码）：按 `开发计划.md` §八 的建议用法真用一周，

@@ -22,7 +22,7 @@
 <script setup>
 import { computed } from 'vue'
 import PhotoThumb from '@/components/photo/PhotoThumb.vue'
-import { formatBucketKey } from '@/utils/format'
+import { formatBucketKey, formatCount, formatFileSize } from '@/utils/format'
 
 const props = defineProps({
   /**
@@ -34,9 +34,23 @@ const props = defineProps({
   maxPerBucket: { type: Number, default: 12 },
   /** 是否显示文件名（横带里太挤，默认只给年份） */
   showName: { type: Boolean, default: false },
+  /**
+   * 各年代档的打包现状（**后端原样**，R15）：每项含 `timelineKey` / `photoTotal` /
+   * `totalBytes` / `zipExists` / `zipSize` / `stale`。
+   *
+   * ⚠️ 匹配用的是 `timelineKey`（后端给的）而**不是** `bucketKey`：
+   *    时间轴把「无拍摄年份」写作 `(无拍摄年份)`，打包侧要的是 `NOYEAR`。
+   *    组件不翻译这两个键 —— 翻译一次就有一处会忘。
+   */
+  packBuckets: { type: Array, default: () => [] },
+  /**
+   * 当前打包任务快照（后端原样；`state='BUILDING'` 表示正在打）。
+   * 后端**全局只允许一个**打包任务，所以只有一份、不是每档一份。
+   */
+  packTask: { type: Object, default: null },
 })
 
-const emit = defineEmits(['select'])
+const emit = defineEmits(['select', 'pack'])
 
 /** 年代档数超过这个数就切网格布局 */
 const BUCKET_ROW_BREAKPOINT = 6
@@ -51,10 +65,75 @@ const buckets = computed(() =>
         label: formatBucketKey(group.bucketKey),
         photos,
         count: Number(group.count) || photos.length,
+        pack: packOf(group.bucketKey),
       }
     })
     .filter((group) => group.count > 0 && group.photos.length > 0),
 )
+
+/** 时间轴档键 -> 打包项（找不到返回 null：这一档还没算过体积） */
+function packOf(bucketKey) {
+  const key = String(bucketKey || '')
+  return (props.packBuckets || [])
+    .find((one) => String(one.timelineKey || '') === key) || null
+}
+
+/** 正在打的是不是这一档 */
+function packingOf(group) {
+  const task = props.packTask
+  if (!task || String(task.state || '') !== 'BUILDING') return null
+  const pack = group.pack
+  if (!pack || String(task.bucketKey || '') !== String(pack.bucketKey || '')) return null
+  return task
+}
+
+/** 是否有别的档正在打（**全局单任务**：此时所有按钮都不能点） */
+const busyElsewhere = computed(() => String(props.packTask?.state || '') === 'BUILDING')
+
+/**
+ * 按钮文案。四态各自不同 —— 用户扫一眼横带就知道「哪一档打过了、多大」。
+ *
+ * ⚠️ 「不显示体积」与「显示 0 B」是两回事：没打过时**什么都不给**，
+ *    而不是给一个 `0 B`（那看起来像「打了个空包」）。
+ */
+function packTextOf(group) {
+  const task = packingOf(group)
+  if (task) return `${formatCount(task.processed)}/${formatCount(task.total)}`
+  const pack = group.pack
+  if (pack?.zipExists && pack.stale) return '重新打包'
+  if (pack?.zipExists) return `下载 ${formatFileSize(pack.zipSize)}`
+  return '打包 zip'
+}
+
+/**
+ * 按钮下方的副标题：预计体积 / 已打包张数 / 已过期提示。
+ *
+ * 这里就是把「界面张数 ≠ 包内张数」讲清楚的那个地方（plan §6.3）：
+ * 写出「排除重复件后 171 张」，用户才不会以为包打少了。
+ */
+function packHintOf(group) {
+  const task = packingOf(group)
+  if (task) return `已打包 ${formatCount(task.processed)}/${formatCount(task.total)} 张`
+  const pack = group.pack
+  if (pack?.zipExists && pack.stale) {
+    return `原图有变动（现 ${formatCount(pack.photoTotal)} 张，包内 ${formatCount(pack.zipPhotoCount)} 张）`
+  }
+  if (pack?.zipExists) return `已打包 ${formatCount(pack.zipPhotoCount)} 张`
+  if (!pack) return ''
+  return `排除重复件后 ${formatCount(pack.photoTotal)} 张 · 约 ${formatFileSize(pack.totalBytes)}`
+}
+
+/** 点按钮：下载 / 重打 / 首次打包 由父组件决定（组件只管发意图） */
+function emitPack(group) {
+  const pack = group.pack
+  emit('pack', {
+    timelineKey: group.bucketKey,
+    bucketKey: pack?.bucketKey || group.bucketKey,
+    zipExists: Boolean(pack?.zipExists),
+    stale: Boolean(pack?.stale),
+    totalBytes: Number(pack?.totalBytes) || 0,
+  })
+}
 
 const useGrid = computed(() => buckets.value.length > BUCKET_ROW_BREAKPOINT)
 
@@ -72,9 +151,34 @@ function visibleOf(group) {
   <!-- 年代档少：行式（左时间刻度 + 右横向缩略图带） -->
   <ul v-else-if="!useGrid" class="space-y-3">
     <li v-for="group in buckets" :key="group.bucketKey" class="flex gap-3">
-      <div class="w-20 shrink-0 pt-1 text-right">
+      <div class="w-24 shrink-0 pt-1 text-right">
         <p class="text-caption font-medium tabular-nums text-ink">{{ group.label }}</p>
         <p class="text-caption tabular-nums text-ink-weak">{{ group.count }} 张</p>
+
+        <!-- R15：按年代档打包 zip。**组件不发请求** —— 只 emit，
+             由 PersonDetailView 走 store（与上面的 emit('select') 同一纪律） -->
+        <button
+          type="button"
+          class="mt-1 rounded border border-line px-1.5 py-0.5 text-caption text-ink-sub hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="busyElsewhere && !packingOf(group)"
+          :title="packHintOf(group)"
+          @click="emitPack(group)"
+        >
+          {{ packTextOf(group) }}
+        </button>
+        <div
+          v-if="packingOf(group)"
+          class="mt-1 h-1 w-full overflow-hidden rounded bg-black/10"
+          role="progressbar"
+          :aria-valuenow="Number(packingOf(group).percent) || 0"
+          aria-valuemin="0"
+          aria-valuemax="100"
+        >
+          <div class="h-1 rounded bg-sky-500" :style="{ width: `${Number(packingOf(group).percent) || 0}%` }" />
+        </div>
+        <p v-if="packHintOf(group)" class="mt-0.5 text-caption leading-tight text-ink-weak">
+          {{ packHintOf(group) }}
+        </p>
       </div>
       <ul class="flex flex-1 flex-wrap gap-2">
         <li v-for="photo in visibleOf(group).shown" :key="photo.photoCode" class="w-20">
@@ -100,9 +204,35 @@ function visibleOf(group) {
   <!-- 年代档多：网格卡片（每卡一个年代档，横带内换行） -->
   <ul v-else class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
     <li v-for="group in buckets" :key="group.bucketKey" class="pb-card p-3">
-      <div class="flex items-baseline justify-between">
+      <div class="flex items-baseline justify-between gap-2">
         <p class="text-caption font-medium tabular-nums text-ink">{{ group.label }}</p>
         <p class="text-caption tabular-nums text-ink-weak">{{ group.count }} 张</p>
+      </div>
+
+      <!-- R15：按年代档打包 zip（与行式布局同一套文案与禁用规则） -->
+      <div class="mt-2 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          class="rounded border border-line px-1.5 py-0.5 text-caption text-ink-sub hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="busyElsewhere && !packingOf(group)"
+          :title="packHintOf(group)"
+          @click="emitPack(group)"
+        >
+          {{ packTextOf(group) }}
+        </button>
+        <p v-if="packHintOf(group)" class="text-caption leading-tight text-ink-weak">
+          {{ packHintOf(group) }}
+        </p>
+      </div>
+      <div
+        v-if="packingOf(group)"
+        class="mt-1 h-1 w-full overflow-hidden rounded bg-black/10"
+        role="progressbar"
+        :aria-valuenow="Number(packingOf(group).percent) || 0"
+        aria-valuemin="0"
+        aria-valuemax="100"
+      >
+        <div class="h-1 rounded bg-sky-500" :style="{ width: `${Number(packingOf(group).percent) || 0}%` }" />
       </div>
       <ul class="mt-2 flex flex-wrap gap-2">
         <li v-for="photo in visibleOf(group).shown" :key="photo.photoCode" class="w-16">

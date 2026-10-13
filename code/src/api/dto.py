@@ -520,6 +520,19 @@ class EraSampleZipBody(BaseModel):
     force: bool = Field(default=False, description="已有产物也重新打包")
 
 
+class EraZipBody(BaseModel):
+    """POST /api/persons/{personCode}/era-zips/{bucketKey}（R15 · DR-56 ~ DR-58）
+
+    `force=True` = 已有产物也重打。默认 `False` 时若产物已存在，
+    接口**直接短路**返回 `cached=true` + 下载地址（不起后台线程）——
+    「再点一次下载」是最高频的动作，不该为它重打一 GB 的包。
+
+    ⚠️ 请求体可以完全不传（等价于 `force=false`），与 `EraSampleZipBody` 同一惯例。
+    """
+
+    force: bool = Field(default=False, description="已有产物也重新打包")
+
+
 # ============================================================
 # 五、异常处理器注册（由 main/app.py 调用）
 # ============================================================
