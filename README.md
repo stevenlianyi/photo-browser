@@ -83,7 +83,10 @@
 #    本机 `py` 启动器不在 PATH 上，用解释器完整路径（WindowsApps 里的即可）
 & "$env:LOCALAPPDATA\Microsoft\WindowsApps\python.exe" -m venv code\.venv
 code\.venv\Scripts\python.exe -m pip install -i https://pypi.org/simple -r requirements.txt
-code\.venv\Scripts\python.exe -m pip uninstall -y opencv-python      # 只留 headless
+# 两个 opencv 包必须一起卸再重装 headless：只卸 opencv-python 会连
+# headless 要用的 cv2/*.dll 一起删掉，import cv2 直接失败
+code\.venv\Scripts\python.exe -m pip uninstall -y opencv-python opencv-python-headless
+code\.venv\Scripts\python.exe -m pip install -i https://pypi.org/simple opencv-python-headless
 
 # ② 前端依赖 + 构建（Node 必须 >= 22）
 cd code\webserver; npm install; npm run build; cd ..\..

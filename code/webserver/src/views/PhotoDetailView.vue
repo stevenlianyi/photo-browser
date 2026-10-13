@@ -43,7 +43,8 @@
      确认会立即参与质心重算，认错了就是把质心往偏里带（见 P-05 横幅那句话）。
      ⚠️ **改判进行中禁翻**：改判会改掉这张脸的人脸框三态与侧栏「出现的人」，
        请求没回来就跳走 ⇒ 回来时状态陈旧，**而且不报错**。所以 busy 覆盖
-       改判 / 确认 / 忽略 / 标记重复 / 软删除 / 旋转 / 翻页，成功后先 `reloadPhoto()` 再解禁。
+       改判 / 确认 / 忽略 / 标记重复 / 软删除 / 旋转 / **单张识别** / 翻页，
+       成功后先 `reloadPhoto()` 再解禁。
 
      侧栏「未归属的人脸」（§4.4）
      ----------------------------------------
@@ -55,6 +56,24 @@
         否则「第 2 行」在图上找不到是哪一张，清单只剩「知道有几张」的信息量。
         ⚠️ 忽略是四态里唯一**不可逆**的一档（陌生人不再进任何队列），
         所以必须二次确认（P0-3），且只做**单张**：不提供「这张照片全忽略」。
+
+  「操作」里的「识别这张照片人脸」（单张识别）
+  ----------------------------------------
+  ⑧ 为什么它不是全库任务的一个参数：`/facerec/start` 取数走 `scanState = 0`
+     全表分页，没有 photoCode 的概念 —— 想只认一张，只能把整个库认一遍。
+     单张走 `POST /facerec/extract-one`（**不建 pb_scan_job 任务**：它没有"续跑"
+     的语义，落一张 DONE 任务只是给任务列表堆噪音）+ 轮询
+     `/facerec/extract-one/status`（阶段是真的：检测 / 写入 / 清旧归属 / 比对）。
+  ⑨ **重提取**（`replaceFaces`）：会清掉这张照片上已有的**人工确认与自动归属**，
+     所以弹窗必须先把「已确认的 N 张脸会一并清除」说出来（P0-3 不可逆复述）。
+     后端连带做三件事，缺一件都是静默的数据不一致：清幽灵关联
+     （`pb_photo_person` 里"这张照片里再无人出现"的行 —— 不清理则人物时间轴里
+     还有这张照片、点进去一张脸都没有）、重算受影响人物的质心（DR-16：质心只由
+     人工确认的样本生成）、新脸一律停在「待确认」。
+  ⑩ 结果必须能解释：检出几张 / **自动归属了谁**（带相似度）/ 还有几张要人工确认。
+     只说「识别完成」等于什么都没说 —— 那正是本项目反复删掉的那类假入口。
+  ⑪ 并发 = **直接拒绝**（409），不排队：与扫描 / 认脸 / 匹配共用单写入者门闩。
+     排队会让按钮看起来"点了没反应"，而静默排队几十秒后突然开始写库更难解释。
 
   关于 Range
   ---------
@@ -76,10 +95,12 @@ import {
   CircleSlash,
   Copy,
   Download,
+  LoaderCircle,
   Maximize2,
   Pencil,
   RotateCcw,
   RotateCw,
+  ScanFace,
   Search,
   Trash2,
   Undo2,
@@ -107,7 +128,9 @@ import {
   softDelete,
   unmarkDuplicate,
 } from '@/api/photoAction'
-import { originalUrl, thumbUrl } from '@/api/static'
+import { originalUrl, faceUrl, thumbUrl } from '@/api/static'
+// 「识别这一张照片的人脸」（单张；不动全库队列）—— 见 openFaceExtract 上的说明
+import { extractOneFace, getExtractOneStatus } from '@/api/face'
 // 「确认」= 人工确认（与改判同一端点，action=assign）—— 见 confirmPersonFaces
 import { fixFace } from '@/api/review'
 // 「返回」与「翻页范围」的约定（入口声明来源 / 详情页回退）——见文件顶部说明
@@ -523,6 +546,127 @@ async function ignoreFace(face) {
 // ⇒ 未归属的脸（pending）与机器认的脸（disputed）现在走**同一个**浮层：
 //   侧栏那行的「改判」→ FixFaceDialog(assign)，候选 + 全库搜索 + 新建人物都在里面。
 
+// ---- 识别这一张照片的人脸（单张；不动全库队列）----
+/**
+ * 为什么这一格必须有
+ * ----------------
+ *   人脸识别原来只有全库任务（`/facerec/start`，取数走 `scanState = 0`
+ *   全表分页）。想只看「这一张里是谁」，只能把整个库认一遍 ——
+ *   而扫描过的新照片本来就散落各处，最自然的入口就是**正看着的这一张**。
+ *
+ * 为什么是弹窗 + 轮询，而不是一个直接发的按钮
+ * ----------------------------------------
+ *   ① 它**会清掉这张照片上已有的人工确认与自动归属**（replaceFaces 语义），
+ *      属于 P0-3 的「不可逆操作必须先复述」；
+ *   ② 首次识别要加载人脸模型（3~10s），同步等会撞 axios 的 30s 超时，
+ *      症状是「点了转很久然后报超时」而库里其实已经写好了 ⇒ 必须轮询；
+ *   ③ 结果要能解释：检出几张、自动归属于谁、还有几张要人工确认。
+ *      「识别完成」四个字什么都说明不了。
+ *
+ * 并发语义：**直接拒绝，不排队**（后台有扫描/认脸/匹配在跑时返回 409）。
+ *   排队会让按钮看起来"点了没反应"，而静默排队几十秒后突然开始写库更难解释。
+ */
+const faceExtractVisible = ref(false)
+const faceExtracting = ref(false)
+const faceExtractResult = ref(null)
+const faceExtractError = ref('')
+/** 后端报的**真实阶段**（检测 / 写入 / 清旧归属 / 比对）—— 不编百分比 */
+const faceExtractPhase = ref('')
+/** 轮询句柄：**必须**能停 —— 否则翻页/卸载之后它还在打接口 */
+let faceExtractTimer = 0
+
+/**
+ * 这张照片上已被**人工确认**的脸数 —— 重提取会把它们连归属一并清掉。
+ * 数字取自已加载的这张照片（getPhoto 给了 isConfirmed），不另开接口：
+ * 再查一次只会多一个会漂移的口径。
+ */
+const confirmedFaceCount = computed(
+  () => faces.value.filter((face) => Number(face.isConfirmed) === 1).length,
+)
+
+function stopFaceExtractPolling() {
+  if (faceExtractTimer) {
+    window.clearTimeout(faceExtractTimer)
+    faceExtractTimer = 0
+  }
+}
+
+function openFaceExtract() {
+  faceExtractError.value = ''
+  faceExtractResult.value = null
+  faceExtractVisible.value = true
+}
+
+function finishFaceExtract(snap) {
+  stopFaceExtractPolling()
+  faceExtracting.value = false
+  if (!snap || snap.phase === 'error' || snap.lastError) {
+    // 失败要**留在弹窗里**：Toast 一闪而过，而"为什么没认出这张"正是要看的东西
+    faceExtractError.value = snap?.lastError || '识别失败'
+    faceExtractVisible.value = true
+    return
+  }
+  faceExtractResult.value = snap
+  faceExtractVisible.value = true
+  ElMessage.success(snap.message || '识别完成')
+  // 侧栏两个角标要跟着动（新脸是「待确认」，自动归属的是「我不同意」）
+  review.fetchBadge()
+}
+
+async function pollFaceExtract() {
+  try {
+    const snap = await getExtractOneStatus()
+    if (snap?.running) {
+      faceExtractPhase.value = snap.phaseText || faceExtractPhase.value
+      faceExtractTimer = window.setTimeout(pollFaceExtract, 700)
+      return
+    }
+    finishFaceExtract(snap)
+  } catch (error) {
+    // 轮询失败**不能**静默停：界面会永远停在"识别中"，用户只能刷新页面
+    stopFaceExtractPolling()
+    faceExtracting.value = false
+    faceExtractError.value = `识别进度读取失败：${error?.message || error}`
+    faceExtractVisible.value = true
+  }
+}
+
+async function doFaceExtract() {
+  if (faceExtracting.value) return
+  faceExtracting.value = true
+  faceExtractError.value = ''
+  faceExtractResult.value = null
+  faceExtractPhase.value = '正在加载人脸模型（首次约 10 秒）…'
+  try {
+    await extractOneFace({
+      photoCode: photoCode.value,
+      // 按钮语义 = 「重新识别一遍」；代价已在弹窗里复述过
+      replaceFaces: true,
+      // 顺带判是谁（**只判这张照片里的脸**）—— 否则用户还得自己去别处点匹配
+      match: true,
+    })
+    faceExtractVisible.value = false
+    // 不立刻轮询：后端要先起线程，250ms 后再问，少一个必然为空的请求
+    faceExtractTimer = window.setTimeout(pollFaceExtract, 250)
+  } catch (error) {
+    faceExtracting.value = false
+    // 409（已有任务在跑）/ 400（缺依赖）/ 404（原图不在盘上）的 message
+    // 已经是人话，且 request 拦截器已经弹过 Toast —— 这里不重复报错
+    if (error?.code !== 'TASK_STATE_ILLEGAL') {
+      faceExtractError.value = error?.message || '识别没能开始'
+      faceExtractVisible.value = true
+    }
+  }
+}
+
+/** 结果弹窗关掉后才刷照片：识别期间人脸框与侧栏本来就不该被别的东西改写 */
+async function closeFaceExtractResult() {
+  faceExtractVisible.value = false
+  faceExtractResult.value = null
+  faceExtractError.value = ''
+  await reloadPhoto()
+}
+
 // ---- 标记重复（选一张作为主照片）----
 const dupVisible = ref(false)
 const dupKeyword = ref('')
@@ -919,6 +1063,9 @@ const busy = computed(
     Boolean(confirmingPerson.value) ||
     dupSaving.value ||
     delLoading.value ||
+    // 单张识别在飞时也禁翻：结果（新脸框 + 自动归属）属于**这张**照片，
+    // 它靠轮询落回界面 —— 翻走之后结果就会糊到下一张上（与改判同一条纪律）
+    faceExtracting.value ||
     // 旋转请求在飞时也禁翻：角度要落到**这张**照片上，
     // 没回来就跳走会让乐观更新与后到的响应错位（症状是「转完一张按 →，下一张也躺着」）
     rotateSaving.value,
@@ -1043,10 +1190,22 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  stopFaceExtractPolling()
 })
 
 watch(photoCode, (code) => {
   if (!code) return
+  // 识别中途换了照片（busy 已挡住箭头，但 URL / 后退键绕得过去）：
+  // 任务在后端**继续**（不该也没法取消），只是结果属于上一张 ——
+  // 弹回新照片上只会让人以为"这张被识别了"，所以停止轮询、只留一句提示。
+  if (faceExtracting.value) {
+    stopFaceExtractPolling()
+    faceExtracting.value = false
+    ElMessage.info('已离开那张照片：识别在后台继续，结果不再显示在这一页')
+  }
+  faceExtractVisible.value = false
+  faceExtractResult.value = null
+  faceExtractError.value = ''
   reloadPhoto()
   probeRange()
   ensureScopeWindow()
@@ -1497,6 +1656,11 @@ watch(photoCode, (code) => {
           <section class="pb-card p-4" aria-labelledby="pd-actions-title">
             <h3 id="pd-actions-title" class="pb-section-title">操作</h3>
             <div class="mt-3 flex flex-wrap gap-2">
+              <!-- 识别这一张：扫描过的新照片散落在各处，最自然的入口就是正看着的这张 -->
+              <el-button type="primary" :loading="faceExtracting" @click="openFaceExtract">
+                <ScanFace v-if="!faceExtracting" class="mr-1 h-4 w-4" aria-hidden="true" />
+                {{ faceExtracting ? '正在识别人脸…' : '识别这张照片人脸' }}
+              </el-button>
               <el-button
                 v-if="Number(photo.duplicates?.isDuplicate) === 1"
                 :loading="dupSaving"
@@ -1560,6 +1724,102 @@ watch(photoCode, (code) => {
       :photo="photo"
       @done="onPlaceFixed"
     />
+
+    <!-- ============ 识别这张照片人脸（单张）============
+         一个弹窗四种状态（复述 / 进行中 / 结果 / 失败），而不是四个弹窗 ——
+         它们讲的是同一件事的先后，拆开就会有人只看到其中一半。 -->
+    <el-dialog
+      v-model="faceExtractVisible"
+      :title="`识别「${fileLabel}」的人脸`"
+      width="520px"
+      :close-on-click-modal="false"
+    >
+      <!-- ① 复述影响面（P0-3：不可逆操作必须先说清后果） -->
+      <template v-if="!faceExtracting && !faceExtractResult && !faceExtractError">
+        <p class="text-body text-ink-sub">会对这张照片做三件事：</p>
+        <ul class="mt-2 list-disc space-y-1 pl-5 text-body text-ink-sub">
+          <li>重新检测人脸并重算特征（<b>覆盖</b>这张照片原有的人脸行）</li>
+          <li v-if="confirmedFaceCount">
+            ⚠️ 这张照片上<b>已人工确认的 {{ confirmedFaceCount }} 张脸</b>会一并清除，
+            需要重新确认一次（归属不会自动还原）
+          </li>
+          <li v-else>这张照片上还没有人工确认过的人脸，清掉的只有机器判定</li>
+          <li>
+            检测完顺便判「是谁」：<b>只判这张照片里的脸</b>，不会动其他照片的待确认队列
+          </li>
+          <li>磁盘上的原图只读，不会被改动</li>
+        </ul>
+        <p class="pb-hint mt-3">
+          首次识别要加载人脸模型（约 10 秒）。后台正在跑扫描 / 认脸 / 匹配时不能开始 ——
+          单写入者不允许并发，接口会直接拒绝（不排队）。
+        </p>
+      </template>
+
+      <!-- ② 进行中：只报真实阶段，不编百分比 -->
+      <p v-else-if="faceExtracting" class="flex items-center gap-2 text-body text-ink-sub">
+        <LoaderCircle class="h-4 w-4 animate-spin text-brand-ink" aria-hidden="true" />
+        {{ faceExtractPhase || '正在识别人脸…' }}
+      </p>
+
+      <!-- ③ 结果：检出几张 + **自动归属了谁**（这一档是机器认的，可以否决） -->
+      <template v-else-if="faceExtractResult">
+        <p class="text-body text-ink">{{ faceExtractResult.message }}</p>
+        <div v-if="faceExtractResult.assignedTo?.length" class="mt-3">
+          <p class="pb-section-title">机器认成（未确认，可以否决）</p>
+          <ul class="mt-2 space-y-2">
+            <li
+              v-for="one in faceExtractResult.assignedTo"
+              :key="one.faceCode"
+              class="flex items-center gap-2"
+            >
+              <img
+                :src="faceUrl(one.faceCode)"
+                class="h-8 w-8 shrink-0 rounded-full border border-line object-cover"
+                alt=""
+                loading="lazy"
+              />
+              <span class="min-w-0 flex-1 truncate text-body text-ink">
+                {{ one.displayName }}
+              </span>
+              <span v-if="one.score != null" class="shrink-0 text-caption tabular-nums text-ink-weak">
+                相似度 {{ one.score }}
+              </span>
+            </li>
+          </ul>
+          <p class="pb-hint mt-2">
+            这些是机器自动归属的（<b>未人工确认</b>），会出现在「出现的人」里带 ✗ 的那一档；
+            认错了就在那里改判 —— 确认之前它不参与质心。
+          </p>
+        </div>
+        <p v-if="faceExtractResult.matchNote" class="pb-hint mt-2">
+          {{ faceExtractResult.matchNote }}
+        </p>
+        <ul v-if="faceExtractResult.droppedLinks" class="mt-2 list-disc pl-5">
+          <li class="text-caption text-ink-weak">
+            顺带清理了 {{ faceExtractResult.droppedLinks }} 条失效的「某人在此照片」关联
+          </li>
+        </ul>
+      </template>
+
+      <!-- ④ 失败：留在弹窗里（Toast 一闪而过，而"为什么没认出来"正是要看的东西） -->
+      <div v-else>
+        <p class="text-body text-danger-ink">{{ faceExtractError }}</p>
+        <p class="pb-hint mt-2">
+          这张照片的人脸行没有被改动（要么整体成功、要么整体回滚）。
+        </p>
+      </div>
+
+      <template #footer>
+        <template v-if="!faceExtracting && !faceExtractResult && !faceExtractError">
+          <el-button @click="faceExtractVisible = false">取消</el-button>
+          <el-button type="primary" @click="doFaceExtract">开始识别</el-button>
+        </template>
+        <el-button v-else-if="faceExtracting" @click="faceExtractVisible = false">
+          后台继续（完成后会自动弹出结果）
+        </el-button>
+        <el-button v-else type="primary" @click="closeFaceExtractResult">关闭并刷新</el-button>
+      </template>
+    </el-dialog>
 
     <!-- ============ 标记重复（选一张作为主照片）============ -->
     <el-dialog v-model="dupVisible" :title="`把「${fileLabel}」标成谁的副本？`" width="560px">

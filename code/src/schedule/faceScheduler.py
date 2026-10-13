@@ -330,6 +330,15 @@ class FaceScheduler(scanSched.ScanScheduler):
             kwargs["detSize"] = (detSize, detSize)
         return kwargs
 
+    def engineKwargs(self) -> dict:
+        """`_engineKwargs()` 的公开出口。
+
+        为什么要有它：`api/face.py` 的「识别这张照片人脸」（单张，不走任务/批次）
+        也必须用**同一套**引擎参数。各写一份的后果不是报错，而是同一张脸
+        「批量能检出、单张检不出」—— 两套检测口径，用户看到的随机结果。
+        """
+        return self._engineKwargs()
+
     def runBatch(self, jobCode: str, batchSize: int = None,
                  workers: int = None) -> dict:
         """跑**一批**人脸特征提取。返回结构与父类 runBatch 一致。

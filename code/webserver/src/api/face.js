@@ -53,3 +53,43 @@ export function listFaceJobs(params = {}) {
 export function getFacePendingCount() {
   return request.get('/facerec/pending-count', { silent: true })
 }
+
+/**
+ * 识别**这一张**照片的人脸（单张；不建全库任务）。
+ *
+ * 为什么它不是 startFace 的一个参数
+ * ------------------------------
+ *   `/facerec/start` 是全库任务：取数走 `scanState = 0` 全表分页，没有
+ *   photoCode 的概念 —— 想只认一张，只能把整个库认一遍。
+ *   单张是秒级操作（首次要载模型 3~10s），所以它**不建任务、不用游标**，
+ *   进度放在进程内快照里，轮询 /facerec/extract-one/status。
+ *
+ * ⚠️ 它**不阻塞**：接口立刻返回，真正的推理在后端线程里。
+ *   前端必须轮询 —— 同步等会撞 axios 的 30s 超时，症状是
+ *   「点了转很久，然后报超时」，而库里其实已经写好了。
+ *
+ * @param {object} params { photoCode, replaceFaces=true, match=true }
+ *   replaceFaces: 重提取（先删这张照片的旧人脸行再插）。
+ *     **会连带清掉这张照片上已有的人工确认与自动归属** —— 界面必须事前预告。
+ *   match: 检测完顺便判「是谁」（**只判这张照片里的脸**，不动全库待确认队列）。
+ *
+ * 可能的错误（都带人话 message，照原样显示即可）：
+ *   409 TASK_STATE_ILLEGAL  已有任务在跑（扫描 / 认脸 / 匹配），**不排队**
+ *   400 PARAM_INVALID       缺依赖（onnxruntime/cv2）
+ *   404 NOT_FOUND           照片不存在 / 原图不在磁盘上
+ */
+export function extractOneFace(params = {}) {
+  return request.post('/facerec/extract-one', params)
+}
+
+/**
+ * 单张识别的进度（轮询用；阶段是真的，不弹 Toast）。
+ *
+ * 返回里 `assignedTo` 是本次**自动归属**的结果
+ * （[{faceCode, personCode, displayName, score}]）—— 自动归属是「我不同意」
+ * 那一档（isConfirmed=0），界面上必须说得出它认了谁，否则用户只能看到一个
+ * 「识别完成」而不知道机器做了什么。
+ */
+export function getExtractOneStatus() {
+  return request.get('/facerec/extract-one/status', { silent: true })
+}

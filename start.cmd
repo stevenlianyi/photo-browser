@@ -56,7 +56,10 @@ if not exist "%PY%" (
     echo.
     echo     "%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe" -m venv code\.venv
     echo     code\.venv\Scripts\python.exe -m pip install -i https://pypi.org/simple -r requirements.txt
-    echo     code\.venv\Scripts\python.exe -m pip uninstall -y opencv-python
+    echo   ^(both opencv packages must go together -- removing only
+    echo    opencv-python also deletes the cv2 DLLs headless needs^)
+    echo     code\.venv\Scripts\python.exe -m pip uninstall -y opencv-python opencv-python-headless
+    echo     code\.venv\Scripts\python.exe -m pip install -i https://pypi.org/simple opencv-python-headless
     echo.
     pause
     exit /b 1

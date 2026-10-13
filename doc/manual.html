@@ -309,7 +309,7 @@
           <h3>① 按人相认 · 跨年代也能认出同一个人</h3>
           <p>导入通讯录（带出生年月）后，软件会把每个人按<strong>年龄分档</strong>识别：同一张脸，3 岁、13 岁、33 岁、63 岁都归到同一个人名下，而不是每次年龄一变就"认生"。</p>
           <p>相似度落在<strong>灰区</strong>的脸不会静默归类，而是进"待确认"队列，由你点一下认领——既不让机器乱认，也不让你瞎翻。认错了还能一键改判、置未知、新建或标记陌生人，<strong>并且可撤销</strong>。</p>
-          <p class="callout ok" style="background:var(--ok-bg);border-color:var(--ok)">✅ 实测：引入年龄分桶后，误拒率从 <strong>32.75% 降到约 19%</strong>（降幅约 42%）——也就是说，更多"确实是同一个人"的脸被正确认回来了。</p>
+          <p class="callout ok" style="background:var(--ok-bg);border-color:var(--ok)">✅ 实测：引入年代分档后，误拒率从 <strong>32.75% 降到约 19%</strong>（降幅约 42%）——也就是说，更多"确实是同一个人"的脸被正确认回来了。</p>
         </div>
         <div class="fig">
           <svg viewBox="0 0 340 300" role="img" aria-label="同一个人不同年龄的照片聚合成一个人物节点">
@@ -451,13 +451,13 @@
       <p>"认人"这件事最怕两种错：把 A 认成 B（<strong>误受</strong>），以及明明是同一个人却没认出来（<strong>误拒</strong>）。相认相册用四道机制把这两种错都压住：</p>
 
       <div class="kpi">
-        <div class="item"><div class="num">42%</div><div class="lab">年龄分桶后误拒率降幅</div></div>
+        <div class="item"><div class="num">42%</div><div class="lab">年代分档后误拒率降幅</div></div>
         <div class="item"><div class="num">3 档</div><div class="lab">阈值预设可切换</div></div>
         <div class="item"><div class="num">0</div><div class="lab">自动归属动用未确认样本</div></div>
       </div>
 
       <div class="fig-wide">
-        <svg viewBox="0 0 680 250" role="img" aria-label="识别流程：检测→年龄分桶→质心比对→阈值判定→待确认或自动归属">
+        <svg viewBox="0 0 680 250" role="img" aria-label="识别流程：检测→年代分档→质心比对→阈值判定→待确认或自动归属">
           <rect x="0" y="0" width="680" height="250" fill="var(--card)"/>
           <g font-size="12" text-anchor="middle">
             <!-- 步骤框 -->
@@ -468,7 +468,7 @@
             </g>
             <g>
               <rect x="146" y="100" width="104" height="50" rx="9" fill="var(--primary-weak)" stroke="var(--border)"/>
-              <text x="198" y="124" fill="var(--text)" font-weight="600">年龄分桶</text>
+              <text x="198" y="124" fill="var(--text)" font-weight="600">年代分档</text>
               <text x="198" y="140" fill="var(--ink-weak)">按出生年分档</text>
             </g>
             <g>
@@ -507,8 +507,8 @@
         </svg>
       </div>
 
-      <h3>① 年龄分桶</h3>
-      <p>同一人的脸随年龄变化很大。分桶策略按出生年自适应：<strong>0–18 岁每 3 年一档、18 岁以上每 10 年一档</strong>，比对时取相邻三桶的最大值。这是把误拒率从 32.75% 压到约 19% 的关键。</p>
+      <h3>① 年代分档</h3>
+      <p>同一人的脸随年龄变化很大。分档策略按出生年自适应：<strong>0–18 岁每 3 年一档、18 岁以上每 10 年一档</strong>，比对时取相邻三桶的最大值。这是把误拒率从 32.75% 压到约 19% 的关键。</p>
 
       <h3>② 质心防污染</h3>
       <p>用于比对的"标准脸"（质心）<strong>只用你人工确认过的样本</strong>算出来——机器自己猜的脸绝不进标准。某一年龄档确认样本 &lt; 3 张时，退到兜底档；总确认样本 &lt; 3 张时，该人<strong>不参与自动匹配</strong>，交给待确认队列。这样即便早期机器猜错，也不会"污染"后续判断、越错越多。</p>
@@ -584,7 +584,7 @@ code\.venv\Scripts\python.exe code\src\tools\scan_cli.py --root d:\PhotoLib\phot
 
       <h3>首次使用三件事</h3>
       <div class="callout warn">1. <strong>照片要先放进图片目录、再扫描才看得到。</strong>增加照片需先复制到图片目录（默认 <code>d:\photoLib\photo</code>），然后在「扫描任务」里启动新扫描才会被收录。</div>
-      <div class="callout warn">2. <strong>「待确认」需要你先人工确认几张脸才有内容。</strong>自动归属只用人工确认过的样本算质心（防污染），所以刚上手时「我不同意」与自动归属都是空的，<strong>这是正确行为不是故障</strong>。</div>
+      <div class="callout warn">2. <strong>「待确认」需要你先人工确认几张脸才有内容。</strong>自动归属只用人工确认过的样本算质心（防污染），所以刚上手时「我不同意」与自动归属都是空的，<strong>这是正确行为不是故障</strong>。确认几张脸以后（<strong>至少三张</strong>），到「扫描任务」里<strong>再跑一遍匹配（人脸识别）</strong>，就会自动识别你已人工确认的人；你人工确认的越多，识别的<strong>准确度越高</strong>，照片<strong>年代越准</strong>，整体<strong>准确率越高</strong>。</div>
       <div class="callout warn">3. <strong>人员档案从「设置 → 联系人导入」进来</strong>（Outlook 导出的 CSV / 手机导出的 vCard）。先「预览导入计划」（只算不写），确认无误再「确认导入」。</div>
     </section>
 

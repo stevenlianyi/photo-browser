@@ -45,6 +45,7 @@
 import os
 import sys
 import threading
+import time
 from typing import Optional
 
 _HERE_DIR = os.path.dirname(os.path.abspath(__file__))          # .../api
@@ -59,7 +60,14 @@ from common import miscCommon as misc                             # noqa: E402
 from common import paths as paths                                 # noqa: E402
 from common import resourcePath as resourcePath                   # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
+from engine.face import engine as faceEngine                      # noqa: E402
+from engine.face import faceStore as faceStore                    # noqa: E402
+from engine.match import centroid as matchCentroid                # noqa: E402
+from engine.match import matcher as matcher                       # noqa: E402
+from processor.review import assigner as assigner                 # noqa: E402
+from processor.review import queue as reviewQueue                 # noqa: E402
 from schedule import faceScheduler as faceSched                   # noqa: E402
+from schedule import scanScheduler as scanSched                   # noqa: E402
 
 from fastapi import APIRouter, Query                              # noqa: E402
 from pydantic import BaseModel, Field                           # noqa: E402
@@ -399,6 +407,489 @@ def pendingCount() -> dict:
         "note": "pendingPhotos>0 说明有照片还没识别人脸；"
                 "扫完照片不会自动产生待确认人脸 —— 需要先跑人脸识别",
     }
+
+
+# ============================================================
+# 七、POST /api/facerec/extract-one（识别**这一张**照片的人脸）
+# ============================================================
+#
+# 为什么要有它（它补的是哪条断链）
+# --------------------------------
+#   `/facerec/start` 是**全库任务**：取数走 `scanState = 0` 全表分页，
+#   没有、也不该有 photoCode 的概念。于是「我就要看这一张照片里是谁」
+#   在界面上无处可点 —— 用户只能把整个库认一遍，或者去敲 CLI。
+#
+#   它与全库任务是同一条链路的两种粒度，复用顺序刻意与批量一致
+#   （不按同一顺序走，同一张脸会得到两种结果）：
+#     engine.extract -> faceStore.commitOne -> reviewQueue.loadPendingRows
+#     -> matcher.matchMany -> assigner.applyAuto
+#
+# 三条纪律
+# --------
+#   ① **不建 pb_scan_job 任务**。单张是秒级操作：建任务要走状态机、游标、
+#      断点续跑，而它没有「续跑」的语义 —— 落一张 DONE 任务只会在任务列表里
+#      堆噪音。所以进度放在进程内快照 `_ONE`（与 api/match.py 同一理由）：
+#      进程退出就没了，而那正是需要重跑的时候。
+#   ② **并发 = 直接拒绝，不排队**。与扫描 / 人脸提取 / 匹配共用同一把单写入者
+#      门闩；抢不到就 409 说清「谁在占着」。排队会让按钮看起来"点了没反应"，
+#      而静默排队几十秒后突然开始写库更难解释。
+#   ③ **重提取（replaceFaces）会清掉这张照片上已有的归属**，连带三件事必须
+#      做全，缺一件都是静默的数据不一致：
+#        · 人工确认 / 自动归属（isConfirmed / personCode）**不复原**
+#          -> 界面必须事前预告（`confirmedBefore` 就是给它用的）；
+#        · `pb_photo_person` 的关联行会变成「幽灵关联」（这张照片里再无此人）
+#          —— commitOne 只删 pb_face、不碰关联表 -> 这里按 photoCode 清；
+#        · 被删掉的确认样本还留在质心里 -> 重算受影响人物的质心
+#          （DR-16：质心只能由 isConfirmed=1 的样本生成）。
+
+#: 抢闩时用的记号（不是任务，没有 jobCode；用它让报错说得出「谁占着」）
+_ONE_LOCK_OWNER: str = "FACE-ONE"
+
+_ONE_LOCK = threading.Lock()
+
+_ONE: dict = {
+    "running": False,
+    "phase": "idle",
+    "photoCode": "",
+    # ---- 输入 ----
+    "replaceFaces": True,
+    "match": True,
+    # ---- 提取 ----
+    "faceCount": 0,          # 本次写入的人脸条数
+    "rawCount": 0,           # 检测到的（过滤前）人脸数
+    "deletedFaces": 0,       # 重提取删掉的旧人脸行
+    "confirmedBefore": 0,    # 旧人脸里人工确认过的条数（用户要知道丢了什么）
+    "droppedLinks": 0,       # 清掉的幽灵关联行
+    "centroidsRecomputed": 0,
+    "engineElapsed": 0.0,
+    # ---- 匹配（只判这一张）----
+    "matchRan": False,
+    "matched": 0,            # 参与判定的脸数
+    "autoAssigned": 0,       # 自动归属
+    "needReview": 0,         # 落在灰区、仍需人工确认
+    "unknown": 0,            # 判不出来（进聚类）
+    "assignedTo": [],        # [{faceCode, personCode, displayName, score}]
+    "matchNote": "",
+    # ---- 收尾 ----
+    "elapsed": 0.0,
+    "startedYMDHMS": None,
+    "finishedYMDHMS": None,
+    "lastError": "",
+    "message": "",
+    "log": [],
+}
+
+#: 阶段 -> 给用户看的一句话（**阶段是真的**，不编百分比：单张提取只有
+#: 「检测 -> 写入 -> 比对」三段，中间没有可切片的进度）
+_ONE_PHASE_TEXT: dict = {
+    "idle": "还没有识别过单张照片",
+    "loading_model": "正在加载人脸模型（首次约 10 秒）…",
+    "extracting": "正在检测人脸…",
+    "storing": "正在写入人脸…",
+    "cleanup": "正在清理旧归属…",
+    "matching": "正在比对是谁…",
+    "done": "已完成",
+    "error": "出错终止",
+}
+
+
+def _onePatch(**fields) -> None:
+    with _ONE_LOCK:
+        _ONE.update(fields)
+
+
+def _oneLog(text: str) -> None:
+    """往快照里追一行中文说明（上限 20 行，排障与「给用户看」共用）。"""
+    with _ONE_LOCK:
+        lines = list(_ONE.get("log") or [])
+        lines.append("%s %s" % (misc.getTime(), text))
+        _ONE["log"] = lines[-20:]
+
+
+def _oneRunning() -> bool:
+    with _ONE_LOCK:
+        return bool(_ONE.get("running"))
+
+
+def _oneReset(photoCode: str, replaceFaces: bool, doMatch: bool) -> None:
+    """把快照重置成本次任务的初值（**在起线程之前、同步做完**）。
+
+    为什么必须同步做：POST 一返回，前端立刻开始轮询，而后台线程可能还没跑到
+    第一行 —— 那几百微秒里 status 会返回上一次的 `running=False`，
+    前端于是以为"已经跑完了"，读到的却是**上一张照片**的结果。
+    这类"读到别人的结果"在界面上极像"点了没反应 / 结果莫名其妙"。
+    """
+    _onePatch(running=True, phase="loading_model", photoCode=str(photoCode),
+              replaceFaces=bool(replaceFaces), match=bool(doMatch),
+              faceCount=0, rawCount=0, deletedFaces=0, confirmedBefore=0,
+              droppedLinks=0, centroidsRecomputed=0, engineElapsed=0.0,
+              matchRan=False, matched=0, autoAssigned=0, needReview=0,
+              unknown=0, assignedTo=[], matchNote="",
+              startedYMDHMS=misc.getTime(), finishedYMDHMS=None,
+              lastError="", message="", log=[], elapsed=0.0)
+
+
+def _oneSnapshot() -> dict:
+    with _ONE_LOCK:
+        out = dict(_ONE)
+    out["assignedTo"] = list(out.get("assignedTo") or [])
+    out["log"] = list(out.get("log") or [])[-20:]
+    out["phaseText"] = _ONE_PHASE_TEXT.get(str(out.get("phase") or "idle"), "")
+    out["ok"] = True
+    # 谁占着写锁：抢不外乎「扫描 / 认脸 / 匹配」三者之一，界面上要说得出
+    out["busyWriteLock"] = scanSched.writeLockOwner()
+    return out
+
+
+def _blockedOwner() -> str:
+    """当前占着单写入者门闩的人（"" = 空闲）。
+
+    一个出口就够：扫描 / 人脸提取 / 匹配**共用** `scanScheduler` 的模块级
+    `_ACTIVE_STATE`（FaceScheduler 正是靠继承拿到这把闩的），所以
+    `writeLockOwner()` 同时覆盖三者的「正在写库」。
+    """
+    return str(scanSched.writeLockOwner() or "")
+
+
+def _loadPhotoRow(photoCode: str) -> dict:
+    rows = sqliteCommon.query_pb_photo("pb_photo", photoCode=str(photoCode))
+    if not rows:
+        raise dto.ApiError(dto.CODE_NOT_FOUND,
+                           "照片不存在或已软删除: %s" % photoCode)
+    return rows[0]
+
+
+def _photoAbsPath(photoRow: dict) -> str:
+    """pb_photo 行 -> 原图绝对路径（与 faceStore.loadPhotoRows / pool 同一算法）"""
+    relPath = str((photoRow or {}).get("relPath") or "")
+    if not relPath:
+        return ""
+    return os.path.join(os.path.abspath(paths.photo_dir()),
+                        relPath.replace("/", os.sep))
+
+
+def _personNames() -> dict:
+    """personCode -> displayName（一次取回；人物数量级是几百，不是十万）。"""
+    out = {}
+    for row in sqliteCommon.query_pb_person("pb_person", mode="light"):
+        code = str(row.get("personCode") or "")
+        if code:
+            out[code] = str(row.get("displayName") or code)
+    return out
+
+
+def _photoFaceSnapshot(photoCode: str) -> dict:
+    """重提取**之前**这张照片的人脸概览（要被清掉的东西，得先数清楚）。
+
+    返回 {faces, confirmed, persons[], pairs[(person, bucket)]}
+    """
+    faces = sqliteCommon.query_pb_face("pb_face", photoCode=str(photoCode),
+                                       mode="light")
+    persons, pairs, confirmed = set(), set(), 0
+    for row in faces or ():
+        if int(row.get("isConfirmed") or 0):
+            confirmed += 1
+        person = str(row.get("personCode") or "")
+        if not person:
+            continue
+        persons.add(person)
+        bucketKey = str(row.get("shotBucket") or "")
+        if bucketKey:
+            pairs.add((person, bucketKey))
+    return {"faces": len(faces or ()), "confirmed": confirmed,
+            "persons": sorted(persons), "pairs": sorted(pairs)}
+
+
+def _dropOrphanLinks(photoCode: str) -> int:
+    """清掉这张照片的「幽灵关联」：关联行指向的人在这张照片里已无脸。
+
+    ⚠️ 为什么必须做：`faceStore._dropOldFaces` 只删 pb_face，**不碰**
+    pb_photo_person。重提取之后那张关联行还在，症状是
+    「照片详情说这张照片没人」（persons 由 faces 派生，browse.getPhoto）
+    而「人物时间轴里还有这张照片、点进去一张脸都没有」——
+    `assigner.verifyLinks` 会把它判成 orphanLink。
+    """
+    dropped = 0
+    for row in sqliteCommon.query_pb_photo_person("pb_photo_person",
+                                                  photoCode=str(photoCode)):
+        person = str(row.get("personCode") or "")
+        if not person:
+            continue
+        if assigner.facesInPhotoFor(photoCode, person) == 0:
+            dropped += int(assigner.dropLink(photoCode, person) or 0)
+    return dropped
+
+
+def _recomputePersons(personCodes) -> int:
+    """重算一批人物的质心（他们在这张照片上的样本刚被删掉）。返回成功人数。
+
+    为什么必须重算：质心只由 isConfirmed=1 的样本生成（DR-16）。样本删了而
+    质心没重算，那条向量会继续参与匹配 —— 表现是「越用越不准」，且库里
+    看不出任何异常（sampleCount 还停在旧值，看着挺健康）。
+
+    单人失败不拖垮整体：例如那个人脸的桶键与他的生日对不上时，
+    `assertFacesFresh` 会抛 BucketStaleError —— 记日志、继续下一个人。
+    """
+    done = 0
+    for code in sorted(set(str(c) for c in (personCodes or ()) if c)):
+        try:
+            matchCentroid.recomputePerson(code)
+            done += 1
+        except Exception as e:                              # noqa: BLE001
+            _LOG.warning("face/extract-one: 重算人物质心失败 %s: %s: %s",
+                         code, type(e).__name__, e)
+    return done
+
+
+def _matchThisPhoto(photoCode: str) -> dict:
+    """只判**这一张照片**里尚无归属的脸。返回统计，不抛（失败写进 note）。
+
+    为什么不直接调 `/match/run`：那是全库端点，带一个模块级任务快照
+    （api/match.py 的 `_TASK`）—— 从后台线程里调它会污染全局状态，
+    也会把整库待确认队列一起跑掉。这里复用它的**下层实现**：
+    `matcher.matchMany`（纯计算）+ `assigner.applyAuto`（落库 + 日志 + 重算质心）。
+    """
+    out = {"ran": False, "total": 0, "auto": 0, "review": 0, "cluster": 0,
+           "assignedTo": [], "note": ""}
+
+    # 口径唯一出处：processor.review.queue（personCode IS NULL + isStranger=0）
+    rows = reviewQueue.loadPendingRows(photoCode=str(photoCode))
+    if not rows:
+        out["note"] = "这张照片没有需要判定的脸"
+        return out
+
+    matrix, index = matchCentroid.loadAllCentroids()
+    if not int(index.summary().get("vectors") or 0):
+        # 不是故障，是防污染规则的正常结果：没有人工确认过就没有质心
+        out["note"] = ("库里还没有可用的质心（质心只由人工确认的样本生成），"
+                       "本次只完成了人脸检测 —— 先去「待确认」确认一些脸再试")
+        return out
+
+    results = matcher.matchMany(rows, matrix=matrix, index=index)
+    stat = matcher.summarize(results)
+    out.update({"ran": True, "total": len(rows),
+                "auto": int(stat.get("auto") or 0),
+                "review": int(stat.get("review") or 0),
+                "cluster": int(stat.get("cluster") or 0)})
+    if out["auto"] > 0:
+        applied = assigner.applyAuto(results)
+        _oneLog("匹配：自动归属 %d 张（落库 %d 条，重算质心桶 %d 个）"
+                % (out["auto"], int(applied.get("written") or 0),
+                   int(applied.get("centroids") or 0)))
+    names = _personNames()
+    out["assignedTo"] = [
+        {"faceCode": one.faceCode, "personCode": one.personCode,
+         "displayName": names.get(one.personCode, one.personCode),
+         "score": (None if one.score is None else round(float(one.score), 4))}
+        for one in results
+        if one.decision == matcher.DECISION_AUTO and one.personCode]
+    return out
+
+
+class FaceOneBody(BaseModel):
+    """POST /api/facerec/extract-one"""
+    photoCode: str = Field(default="", description="要识别的照片（必填）")
+    replaceFaces: bool = Field(
+        default=True,
+        description="重提取：先删这张照片的旧人脸行再插。**缺省 true** —— "
+                    "按钮的语义就是「重新识别一遍」，代价是这张照片上已有的"
+                    "人工确认与自动归属都会被清掉（界面负责事前预告）")
+    match: bool = Field(
+        default=True,
+        description="提取完顺便判「是谁」（**只判这张照片里的脸**，不动全库队列）")
+
+
+@router.post("/facerec/extract-one", summary="识别这一张照片的人脸（单张；后台线程）")
+def extractOneFace(body: FaceOneBody = None) -> dict:
+    """识别**当前这一张**照片：检测 + 提特征 +（可选）判是谁。
+
+    返回 { ok, started, photoCode, remainingPhotos, poll }。请求内**不做推理**：
+    首次要加载模型（3~10s）、单张 0.2~1s，同步跑会把 HTTP 挂住。
+
+    ⚠️ 前置校验一律在起线程之前做完（依赖、门闩、照片在不在）：
+    失败要立刻以 4xx/409 说清楚，而不是起一个线程让它在后台报错 ——
+    那种「后台静默失败」在界面上与「跑完了但没结果」完全一样。
+    """
+    payload = body or FaceOneBody()
+    photoCode = str(payload.photoCode or "").strip()
+    if not photoCode:
+        raise dto.ApiError(dto.CODE_PARAM_INVALID, "photoCode 必填")
+
+    # ---- ① 单张任务自身互斥（同时只识别一张）----
+    if _oneRunning():
+        raise dto.ApiError(dto.CODE_TASK_STATE_ILLEGAL,
+                           "上一张照片还在识别中，等它结束",
+                           extra={"photoCode": _ONE.get("photoCode")})
+
+    # ---- ② 与全库任务互斥：直接拒绝（用户选的语义是"不排队、不覆盖"）----
+    owner = _blockedOwner()
+    if owner:
+        raise dto.ApiError(dto.CODE_TASK_STATE_ILLEGAL,
+                           "已有任务在跑: %s（单写入者不允许并发；"
+                           "等它结束再识别这张）" % owner,
+                           extra={"activeJobCode": owner})
+
+    # ---- ③ 依赖自检：缺 onnxruntime/cv2 时子进程会静默失败 ----
+    pre = faceSched.preflight()
+    if not pre.get("ok"):
+        raise dto.ApiError(dto.CODE_PARAM_INVALID,
+                           pre.get("hint") or "人脸识别依赖缺失",
+                           extra={"missing": [list(i) for i in pre.get("missing") or ()]})
+
+    # ---- ④ 照片必须存在，且原图在盘上（拔盘/挪走了就别白跑一遍模型）----
+    photoRow = _loadPhotoRow(photoCode)
+    absPath = _photoAbsPath(photoRow)
+    if not absPath or not os.path.isfile(absPath):
+        raise dto.ApiError(dto.CODE_NOT_FOUND,
+                           "原图不在磁盘上: %s" % (absPath or "（relPath 为空）"),
+                           extra={"photoCode": photoCode})
+
+    thread = threading.Thread(
+        target=_runExtractOne,
+        args=(photoCode, photoRow, absPath, bool(payload.replaceFaces), bool(payload.match)),
+        name="pb-face-extract-one", daemon=True)
+    _oneReset(photoCode, bool(payload.replaceFaces), bool(payload.match))
+    try:
+        thread.start()
+    except Exception as e:                                  # noqa: BLE001
+        # 起不来就必须把 running 放回去，否则状态永远停在"识别中"
+        _onePatch(running=False, phase="error",
+                  lastError="起后台线程失败: %s: %s" % (type(e).__name__, e),
+                  finishedYMDHMS=misc.getTime())
+        raise dto.ApiError(dto.CODE_DB_ERROR,
+                           "起后台线程失败: %s" % e)
+    _LOG.info("face/extract-one: %s 后台启动（replace=%s match=%s）",
+              photoCode, payload.replaceFaces, payload.match)
+    return dto.okBody(started=True, running=True, photoCode=photoCode,
+                      replaceFaces=bool(payload.replaceFaces),
+                      match=bool(payload.match),
+                      remainingPhotos=faceSched.countPendingPhotos(),
+                      poll="/api/facerec/extract-one/status")
+
+
+@router.get("/facerec/extract-one/status", summary="单张识别的进度（轮询用）")
+def extractOneStatus() -> dict:
+    """轮询这个。阶段是真的（检测 / 写入 / 清旧归属 / 比对），计数来自真实行数。
+
+    `assignedTo` 是本次**自动归属**的结果（谁被判成了谁 + 分数）——
+    自动归属是 isConfirmed=0（「我不同意」），界面上要说得出它认了谁，
+    否则用户只能看到一个「识别完成」而不知道机器做了什么。
+    """
+    return _oneSnapshot()
+
+
+def _runExtractOne(photoCode: str, photoRow: dict, absPath: str,
+                   replaceFaces: bool, doMatch: bool) -> None:
+    """后台线程体：提取 -> 落库 -> 清旧归属 ->（可选）匹配这一张。
+
+    ⚠️ 门闩**必须**在 finally 里释放：漏一次，之后所有扫描 / 认脸 / 匹配
+    都会被「已有任务在跑」永久挡下，只能重启进程（api/match.py 的血泪）。
+    """
+    started = time.time()
+    locked = False
+    # 快照的初值由端点里的 _oneReset() 同步写好（避免"读到上一张的结果"），
+    # 这里只推进阶段。
+    try:
+        if not scanSched.acquireWriteLock(_ONE_LOCK_OWNER):
+            _onePatch(running=False, phase="error",
+                      lastError="抢单写入者门闩失败：%s 正在写库"
+                                % (scanSched.writeLockOwner() or "?"),
+                      finishedYMDHMS=misc.getTime())
+            return
+        locked = True
+
+        # ---- ① 先记下「这张照片原来挂着谁」：重提取会把它一并清掉 ----
+        before = _photoFaceSnapshot(photoCode)
+        _onePatch(confirmedBefore=int(before["confirmed"]))
+        if replaceFaces and before["faces"]:
+            _oneLog("重提取：这张照片原有 %d 张人脸（其中人工确认 %d 张），已一并清除"
+                    % (before["faces"], before["confirmed"]))
+
+        # ---- ② 提特征（单张同步；引擎首次加载模型 3~10s）----
+        _onePatch(phase="loading_model")
+        engine = faceEngine.getEngine(**_scheduler().engineKwargs())
+        _onePatch(phase="extracting")
+        result = engine.extract(absPath, photoCode)
+        if not result.get("ok"):
+            raise RuntimeError("提取失败：%s" % (result.get("errMsg") or "未知原因"))
+        _onePatch(rawCount=int(result.get("rawCount") or 0),
+                  engineElapsed=round(float(result.get("elapsed") or 0.0), 2))
+        _oneLog("检出 %d 张人脸（检测到 %s 张，用时 %.2fs）"
+                % (len(result.get("faces") or ()), result.get("rawCount"),
+                   float(result.get("elapsed") or 0.0)))
+
+        # ---- ③ 落库（replaceFaces = 先删这张照片的旧人脸行再插）----
+        # 用 commitOne（单张一步到位）而不是 extractAndStore：后者要建进程池，
+        # 而起池的代价（spawn N 个进程 + 各自加载模型）远大于"一张脸"的收益。
+        _onePatch(phase="storing")
+        storeStat = faceStore.commitOne(
+            photoRow, result, dbFile=paths.db_file(),
+            thumbRoot=paths.thumb_dir(), photoRoot=paths.photo_dir(),
+            replaceFaces=bool(replaceFaces))
+        _onePatch(faceCount=int(storeStat.get("faces") or 0),
+                  deletedFaces=int(storeStat.get("deleted") or 0))
+
+        # ---- ④ 清旧归属：幽灵关联 + 受影响人物的质心 ----
+        _onePatch(phase="cleanup")
+        droppedLinks = _dropOrphanLinks(photoCode)
+        recomputed = _recomputePersons(before["persons"])
+        _onePatch(droppedLinks=int(droppedLinks), centroidsRecomputed=int(recomputed))
+        if droppedLinks or recomputed:
+            _oneLog("清理旧归属：清掉 %d 条幽灵关联，重算 %d 个人物的质心"
+                    % (droppedLinks, recomputed))
+
+        # ---- ⑤ 匹配（只判这张照片刚提取出的待确认脸）----
+        mstat = {"ran": False, "total": 0, "auto": 0, "review": 0,
+                 "cluster": 0, "assignedTo": [], "note": ""}
+        if doMatch:
+            _onePatch(phase="matching")
+            mstat = _matchThisPhoto(photoCode)
+            _onePatch(matchRan=bool(mstat["ran"]), matched=int(mstat["total"]),
+                      autoAssigned=int(mstat["auto"]),
+                      needReview=int(mstat["review"]),
+                      unknown=int(mstat["cluster"]),
+                      assignedTo=list(mstat["assignedTo"] or []),
+                      matchNote=str(mstat["note"] or ""))
+
+        # ---- ⑥ 收尾：把「一共做了什么」写成人话 ----
+        elapsed = round(time.time() - started, 2)
+        _onePatch(running=False, phase="done", elapsed=elapsed,
+                  finishedYMDHMS=misc.getTime(),
+                  message=_oneResultText(int(storeStat.get("faces") or 0),
+                                        int(storeStat.get("deleted") or 0),
+                                        mstat if doMatch else None))
+        _LOG.info("face/extract-one: %s 完成（人脸 %d，删除旧行 %d，自动归属 %d，"
+                  "用时 %.2fs）", photoCode, int(storeStat.get("faces") or 0),
+                  int(storeStat.get("deleted") or 0), int(mstat.get("auto") or 0),
+                  elapsed)
+    except Exception as e:                                  # noqa: BLE001
+        errText = "%s: %s" % (type(e).__name__, e)
+        _LOG.error("face/extract-one %s 失败: %s", photoCode, errText)
+        _oneLog("出错：%s" % errText)
+        _onePatch(running=False, phase="error", lastError=errText,
+                  elapsed=round(time.time() - started, 2),
+                  finishedYMDHMS=misc.getTime())
+    finally:
+        if locked:
+            scanSched.releaseWriteLock()
+
+
+def _oneResultText(faceCount: int, deletedFaces: int, mstat: dict = None) -> str:
+    """把结果拼成一句人话（漏掉任何一档都会让用户以为「点了没反应」）"""
+    parts = ["检出 %d 张人脸" % faceCount]
+    if deletedFaces:
+        parts.append("已清除原有 %d 张" % deletedFaces)
+    if mstat is None:
+        return "；".join(parts)
+    if mstat.get("ran"):
+        parts.append("自动归属 %d 张" % int(mstat.get("auto") or 0))
+        if int(mstat.get("review") or 0):
+            parts.append("仍需确认 %d 张" % int(mstat.get("review") or 0))
+        if int(mstat.get("cluster") or 0):
+            parts.append("没认出的 %d 张" % int(mstat.get("cluster") or 0))
+    elif mstat.get("note"):
+        parts.append(str(mstat.get("note")))
+    return "；".join(parts)
 
 
 if __name__ == "__main__":

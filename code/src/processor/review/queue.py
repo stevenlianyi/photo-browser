@@ -199,7 +199,8 @@ def _candidateDict(one: matcher.Candidate, cards: dict) -> dict:
 # ============================================================
 
 def iterPendingRows(pageRows: int = None, offset: int = 0,
-                    orderBy: str = None, descFlag: bool = False):
+                    orderBy: str = None, descFlag: bool = False,
+                    photoCode: str = ""):
     """**逐页吐出**待确认队列的原始行（mode=full：要带 embedding 给 matcher 用）。
 
     orderBy 缺省 recID —— 但那只是"稳定"，不是"有��先级"（见 pendingQueue 的说明）。
@@ -209,6 +210,13 @@ def iterPendingRows(pageRows: int = None, offset: int = 0,
       10 万张未归属的脸 × 2048 字节 embedding = 200MB（DR-12 的同一个坑）。
       队列要"全量排序后取前 N"时，唯一能同时满足「排序正确」与「内存有界」
       的做法就是：分页读 -> 逐页打分 -> 只留 top-K，其余立刻扔掉。
+
+    photoCode
+    ---------
+      非空 = 只看**这一张照片**的待确认脸（「识别这张照片人脸」用）。
+      为什么不放在调用方自己筛：待确认口径只有本模块一处
+      （PENDING_NULL_FIELDS + isStranger），api 层再写一遍 WHERE 必然漂移。
+      走生成层的等值过滤 —— 与全量队列是同一条 SQL 的两个参数。
     """
     step = int(pageRows or basicSettings.QUEUE_PAGE_ROWS)
     at = int(offset or 0)
@@ -216,6 +224,7 @@ def iterPendingRows(pageRows: int = None, offset: int = 0,
         rows = sqliteCommon.query_pb_face(
             "pb_face", mode="full", orderBy=orderBy or "recID",
             descFlag=bool(descFlag), nullFields=PENDING_NULL_FIELDS,
+            photoCode=str(photoCode or ""),
             limitNum=step, offsetNum=at)
         if not rows:
             return
@@ -229,16 +238,20 @@ def iterPendingRows(pageRows: int = None, offset: int = 0,
 
 
 def loadPendingRows(limit: int = 0, offset: int = 0, pageRows: int = None,
-                    orderBy: str = None, descFlag: bool = False) -> list:
+                    orderBy: str = None, descFlag: bool = False,
+                    photoCode: str = "") -> list:
     """待确认队列的**原始行**（一个窗口）。
 
     过滤口径 = `personCode IS NULL`（生成层）+ `isStranger=0`（Python 侧）
     + `delFlag='0'`（生成层缺省）。
+
+    photoCode 非空 = 只取这一张照片的待确认脸（见 iterPendingRows）。
     """
     out = []
     cap = int(limit or 0)
     for row in iterPendingRows(pageRows=pageRows, offset=offset,
-                               orderBy=orderBy, descFlag=descFlag):
+                               orderBy=orderBy, descFlag=descFlag,
+                               photoCode=photoCode):
         out.append(row)
         if cap and len(out) >= cap:
             break
