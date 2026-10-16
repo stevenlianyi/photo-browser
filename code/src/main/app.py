@@ -51,6 +51,7 @@ from common import paths as paths                                 # noqa: E402
 from common import resourcePath as resourcePath                   # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
+from api import album as albumApi                                 # noqa: E402
 from api import browse as browseApi                               # noqa: E402
 from api import contacts as contactsApi                           # noqa: E402
 from api import dto as dto                                        # noqa: E402
@@ -285,6 +286,12 @@ def createApp(dbFile: str = None, photoRoot: str = None, thumbRoot: str = None,
     #   裁剪图路由占着，任何静态段都可能被它接走并 404（见 api/face.py 文件头）。
     application.include_router(matchApi.router, prefix="/api")
     application.include_router(placeApi.router, prefix="/api")
+    # 文件夹浏览（R16 · DR-59~63）：纯读，只有 `/api/albums/path` 一个端点 ——
+    # 目录树与张数现推自 pb_photo.relPath，不落表。照片列表挂在 browse 的
+    # `/api/photos?dirPath=`（复用 photoSummary 与锚点定位），**不在本模块重复**。
+    # ⚠️ 自成一个模块的理由同 place：命名空间收口，且 browse.py 的「一个字都不写」
+    #    那条纪律要保持可读（只读端点也算"自成一体的功能"）。
+    application.include_router(albumApi.router, prefix="/api")
     application.include_router(browseApi.router, prefix="/api")
     # 年代抽样（R11）：读写 pb_era_sample* 两张自己的表 + 落 zip 产物。
     # ⚠️ 自成一个模块而不是塞进 browse.py —— 后者的文件头写着「一个字都不写」，

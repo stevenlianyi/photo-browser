@@ -802,8 +802,18 @@ def apply(planned: dict) -> dict:
                 "insertManyTableGeneral 返回的不是整数而是 %r —— 生成层接口"
                 "变了？（正常应返回 (rtn, columns)，rtn 是 int）" % (rtn,))
         if rtn == -2:                    # sqliteHandle.RET_ERROR
-            failed.append((code, sqliteCommon.dbHandle().lastErrMsg))
-            _LOG.error("导入 %s 失败：%s", code, sqliteCommon.dbHandle().lastErrMsg)
+            # ⚠️ 详情**不能只依赖 lastErrMsg**：它只在 sqliteHandle._err() /
+            #    executeWriteList 里赋值，而"并发写库被打回"等路径可能什么都没留下
+            #    （`_rtn()` 本身永远不会返回 -2，所以留空的 -2 必然来自别处）。
+            #    实测（2026-10-16 11:32，测试与真实导入同时在写同一个库）：
+            #    日志里出现了 `导入 VC_0154_Qing_Bai 失败：` —— 冒号后面是空的，
+            #    等于把唯一的线索丢掉了。详情为空时**自报上下文**，至少能定位到行。
+            detail = str(sqliteCommon.dbHandle().lastErrMsg or "").strip()
+            if not detail:
+                detail = ("底层未给出 lastErrMsg（rtn=%s op=%s 表=pb_person "
+                          "personCode=%s）" % (rtn, item["op"], code))
+            failed.append((code, detail))
+            _LOG.error("导入 %s 失败（op=%s）：%s", code, item["op"], detail)
             continue
         (created if item["op"] == "create" else updated).append(code)
         _LOG.info("%s %s（%s）生日=%s 电话=%s%s", item["op"], code,

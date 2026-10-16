@@ -65,7 +65,7 @@ from common import miscCommon as misc                                  # noqa: E
 from database.auto_generated import sqliteCommon as sqliteCommon      # noqa: E402
 from engine.match import rebucket as rebucket                         # noqa: E402
 
-_VERSION = "20261006"
+_VERSION = "20261016"
 
 _LOG = misc.setLogNew("rebucketCli", "rebucketcli.log")
 
@@ -248,6 +248,14 @@ def main(argv=None) -> int:
 
     # 默认只报不改：改生产数据必须显式 --yes（与 fix_confirmed_flag.py 同一口径）
     dryRun = bool(args.dry_run) or not bool(args.yes)
+    # ⚠️ 判定必须**回写进 args**：三个 cmd 读的是 `args.dry_run`，
+    #    而"用户没给 --dry-run"与"用户没给 --yes"是两个不同的条件 ——
+    #    只把 dryRun 放局部变量，就会出现
+    #      「main 打印 [dry-run] 未写任何一行」+「rebucketXxx(dryRun=False) 真的写了库」
+    #    这种最坏组合（**通知与实际行为相反**）。
+    #    历史上真踩过：`--all` 不带 --yes 直接改了 125 行 shotBucket，
+    #    而用户以为自己只是在只读巡检（见 plan/人脸漏识别研判.md 12.9）。
+    args.dry_run = dryRun
 
     if args.audit:
         return cmdAudit(args)

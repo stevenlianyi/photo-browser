@@ -296,3 +296,60 @@ def test_rescanUpsertKeepsOverride(confirmed, api_rows):
     assert rtn is not None and rtn != -2
 
     assert int(api_rows.photo(PHOTO)["shotYearOverride"]) == FIX_YEAR
+
+
+# ============================================================
+# 七、后置校验（DR-61）：别人后写进来的桶必须被判出来
+# ============================================================
+#
+# 为什么要校验而不是"相信 rebucket 刚跑过"：
+#   写 override 与刷桶是两步，而**别的写入者**（人脸补漏任务 / 重提取 /
+#   单张「识别这张照片人脸」）也可能在同一张照片上写 shotBucket。
+#   一旦有一处按"未归属 + 原始 shotYear"的口径后写进来，界面上就会出现
+#   「年代 2012 / 年代桶 1975–1979」—— 而写 override 的那次操作**自己是成功的**
+#   （bucketsChanged=1），只有事后逐脸比对才能发现。
+
+def test_applyReportsCleanBucketVerify(confirmed, api_rows):
+    """修正成功且没有第三方写入 -> bucketVerify 干净（并且不该多出 warning）"""
+    body = confirmed["client"].post(
+        "/api/photos/%s/shot-year-fix" % PHOTO,
+        params={"confirm": 1}, json={"shotYear": FIX_YEAR}).json()
+    assert body["bucketVerify"]["checked"] == len(FACES)
+    assert body["bucketVerify"]["staleCount"] == 0
+    assert body["bucketVerify"]["stale"] == []
+    assert body["warnings"] == []
+
+
+def test_verifyDetectsBucketOverwrittenByAnotherWriter(confirmed, api_rows):
+    """桶被第三方打回**占位桶** -> verifyBuckets 必须报出来，且给出可执行的下一步。
+
+    这里刻意用 `bucketKeyEqual(FIX_YEAR)` 而不是随手写个字符串：它就是
+    faceStore 在"不知道这张脸属于谁"时能给出的那个等宽 5 年桶 ——
+    与被归属人按生日算出来的自适应桶**不是同一个键**（哪怕年份对得上）。
+    """
+    from database.auto_generated import sqliteCommon
+    from engine.match import rebucket
+    from processor import photoTimeFix
+
+    client = confirmed["client"]
+    client.post("/api/photos/%s/shot-year-fix" % PHOTO,
+                params={"confirm": 1}, json={"shotYear": FIX_YEAR})
+
+    placeholder = bucket.bucketKeyEqual(FIX_YEAR)
+    want = bucket.bucketKeyOf(FIX_YEAR, BIRTH)
+    assert placeholder != want, "夹具前提：占位桶与自适应桶必须是不同的键"
+    for code in FACES:                       # 模拟「另一个写入者」的覆盖
+        row = api_rows.face(code)
+        assert sqliteCommon.update_pb_face(
+            "pb_face", int(row["recID"]),
+            {"shotBucket": placeholder}) == 1
+
+    got = photoTimeFix.verifyBuckets(PHOTO)
+    assert got["checked"] == len(FACES)
+    assert len(got["stale"]) == len(FACES), "被覆盖的桶没被判出来 = 静默错"
+    assert all(one["have"] == placeholder for one in got["stale"])
+    assert all(one["want"] == want for one in got["stale"])
+
+    # 刷回去之后就干净了（这条路径就是 warning 里给出的下一步）
+    rebucket.rebucketPhoto(PHOTO)
+    assert photoTimeFix.verifyBuckets(PHOTO)["stale"] == []

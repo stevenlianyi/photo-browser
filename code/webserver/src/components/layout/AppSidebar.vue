@@ -12,6 +12,7 @@ import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
   ClipboardCheck,
+  FolderTree,
   Gauge,
   Images,
   MapPin,
@@ -28,10 +29,11 @@ import { useSettingsStore } from '@/store/settings'
 const settings = useSettingsStore()
 const review = useReviewStore()
 
-// ⚠️ 键名必须与 router 的 NAV_ITEMS[].icon 逐字一致（R5 加了 MapPin 指「地点」）——
-//    写错一个字母时 `resolveDynamicComponent` 会给出一个空组件：
-//    侧栏少一个图标，页面上**什么都不报**。
-const ICONS = { Gauge, Images, Users, MapPin, ClipboardCheck, ScanLine, Settings }
+// ⚠️ 键名必须与 router 的 NAV_ITEMS[].icon 逐字一致（R5 加了 MapPin 指「地点」、
+//    R16 加了 FolderTree 指「文件夹」）—— 写错一个字母时
+//    `resolveDynamicComponent` 会给出一个空组件：侧栏少一个图标，
+//    页面上**什么都不报**。
+const ICONS = { Gauge, Images, Users, MapPin, FolderTree, ClipboardCheck, ScanLine, Settings }
 
 /** 导航项末尾是设置 → 前面加一条分隔线 */
 const items = computed(() => NAV_ITEMS)

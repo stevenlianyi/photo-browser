@@ -387,9 +387,13 @@ def _shotYearFromMeta(absPath: str, stem: str):
     """
     try:
         from processor.scanner import meta as scannerMeta
+        info = scannerMeta.readMeta(absPath)
+        # ⚠️ exifLocalYear 必须一起传（与 readMeta 内部同一条口径）：
+        #    只给 takenAt（UTC）时跨年照片会差 1 年，本工具就与生产扫描器
+        #    不再"完全同一套规则"，而它存在的理由正是这个承诺。
         got = scannerMeta.resolveShotYear(
-            scannerMeta.readMeta(absPath).get("takenAt"), stem,
-            os.path.getmtime(absPath))
+            info.get("takenAt"), stem, os.path.getmtime(absPath),
+            exifLocalYear=info.get("exifLocalYear"))
         return got.get("shotYear")
     except (OSError, ValueError, TypeError):
         return None

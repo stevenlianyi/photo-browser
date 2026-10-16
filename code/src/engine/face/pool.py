@@ -87,6 +87,10 @@ DEFAULT_ENGINE_KWARGS: dict = {
     "detSize": faceEngine.DEFAULT_DET_SIZE,
     "minDetScore": None,
     "minFaceEdge": None,
+    # 短边门槛按图自适应（None = 跟随 basicSettings.MIN_FACE_EDGE_ADAPTIVE）。
+    # 显式 False 时 minFaceEdge 是**固定绝对值**：S0 复现（backtest_s0）必须这样，
+    # 否则老照片的样本数会与 S0 的统计口径对不上。
+    "adaptiveMinEdge": None,
     "maxYaw": None,
     "wantCrop": True,
     "cropSize": None,

@@ -1,6 +1,6 @@
 {
   "name": "photo-browser-web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "相认相册 Sightseen Web 前端（本地家庭相册，按人相认照片）",

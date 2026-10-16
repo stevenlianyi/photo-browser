@@ -14,14 +14,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build\package.ps1
 产出：
 
 ```
-dist\PhotoBrowser-Setup-0.1.0.exe      ← 给用户的双击安装包（Inno Setup 6，LZMA2）
+dist\PhotoBrowser-Setup-0.2.0.exe      ← 给用户的双击安装包（Inno Setup 6，LZMA2）
 dist\photo-browser\photo-browser.exe   ← 免安装的独立 exe（PyInstaller --onedir）
 ```
+
+> **版本号口径（2026-10-16 起）**：默认版本 = **`0.2.0`**，三处**必须同步**改，
+> 否则会出现「安装包叫 0.1.0、界面/前端是 0.2.0」这种不报错的错位：
+> `build\package.ps1` 的 `$Version` 默认值、`build\installer.iss` 的 `PbVer` 默认值、
+> `code\webserver\package.json` 的 `version`。
+> R10 的历史产物 `PhotoBrowser-Setup-0.1.0.exe` **保留留档，不要删**。
 
 常用变体：
 
 ```powershell
-... -Version 0.2.0                 # 换版本号（决定安装包文件名）
+... -Version 0.3.0                 # 换版本号（决定安装包文件名）；默认是 0.2.0
 ... -SkipFrontend                  # 不重跑 npm run build（用上一次的快照，**有风险**）
 ... -SkipInstaller                 # 只要 exe 目录，不要安装包
 ... -NoClean                       # 不删 dist\photo-browser（增量重打）
@@ -234,7 +240,7 @@ PyInstaller 的产物也常被杀软误报。想彻底解决只能**代码签名
 
 ### 7.9 静默安装 —— **必须显式带 `/CURRENTUSER`（或 `/ALLUSERS`）**
 ```
-PhotoBrowser-Setup-0.1.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART ^
+PhotoBrowser-Setup-0.2.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART ^
     /CURRENTUSER /DIR="E:\apps\photobrowser"
 /LOG="%TEMP%\pb-setup.log"        ; 指定日志路径（否则是 %TEMP%\Setup Log *.txt）
 ```

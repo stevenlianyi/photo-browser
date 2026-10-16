@@ -56,6 +56,23 @@ class TestExifTime:
         assert meta.yearOfUTC("") is None
         assert meta.yearOfUTC(None) is None
 
+    def test_local_year_crossing_new_year(self):
+        """exifTimeLocalYear 取的是**本地**年（DR-61）—— 与 takenAt 的 UTC 年可能差 1"""
+        assert meta.exifTimeLocalYear("1980:01:01 00:04:05") == 1980
+        assert meta.exifTimeLocalYear(b"2023:05:01 12:00:00") == 2023
+        # 同一天里的正常时刻两者一致（别把修法误当成"总是 +1 年"）
+        assert meta.exifTimeLocalYear("2023:05:01 12:00:00") == \
+            meta.yearOfUTC(meta.exifTimeToUTC("2023:05:01 12:00:00"))
+
+    @pytest.mark.parametrize("bad", [None, "", "   ", "0000:00:00 00:00:00",
+                                     "not a date", "2023-05-01", 12345])
+    def test_local_year_invalid_returns_none(self, bad):
+        assert meta.exifTimeLocalYear(bad) is None
+
+    def test_local_year_out_of_range_rejected(self):
+        """超出 SHOT_YEAR_MIN..MAX 的年份不采信（与 _yearInRange 同一条闸）"""
+        assert meta.exifTimeLocalYear("1899:12:31 23:59:59") is None
+
 
 # ============================================================
 # B. shotYear 优先级
@@ -65,6 +82,28 @@ class TestResolveShotYear:
     def test_exif_wins(self):
         got = meta.resolveShotYear("2019-05-01T04:00:00Z", "IMG_20240501.jpg", 0)
         assert got == {"shotYear": 2019, "source": meta.SHOT_YEAR_SRC_EXIF}
+
+    def test_exif_local_yearWinsOverUtcYear(self):
+        """**跨年边界**（DR-61）：本地 1980-01-01 00:04 的照片，UTC 年是 1979。
+
+        拍摄年份要的是**当地**那一年 —— 拿 takenAt（UTC）取前 4 位会少算一年，
+        于是「时间 1980-01-01 00:04」与「年代 1979 / 年代桶 1975–1979」
+        同时出现在界面上（用户报的就是这一条）。
+        """
+        utc = meta.exifTimeToUTC("1980:01:01 00:04:05")
+        assert utc == "1979-12-31T16:04:05Z"                 # 夹具前提
+        got = meta.resolveShotYear(utc, "35x45mm-3.jpg", 0, exifLocalYear=1980)
+        assert got == {"shotYear": 1980, "source": meta.SHOT_YEAR_SRC_EXIF}
+
+    def test_noLocalYearKeepsUtcFallback(self):
+        """老调用方不给 exifLocalYear -> 仍按 UTC 年份兜底（不炸、行为可预期）"""
+        got = meta.resolveShotYear("1979-12-31T16:04:05Z", "x.jpg", 0)
+        assert got == {"shotYear": 1979, "source": meta.SHOT_YEAR_SRC_EXIF}
+
+    def test_badLocalYearIsIgnored(self):
+        got = meta.resolveShotYear("1979-12-31T16:04:05Z", "x.jpg", 0,
+                                   exifLocalYear="不是年份")
+        assert got["shotYear"] == 1979
 
     def test_fallback_to_name(self):
         got = meta.resolveShotYear(None, "IMG_20240501_120000.jpg", 0)
@@ -198,8 +237,19 @@ class TestParseExif:
         assert got["orientation"] == 6
         assert got["cameraModel"] == "TestCam X1"
         assert got["takenAt"] == "2023-05-01T04:00:00Z"
+        # DR-61：本地年与 UTC 年一起给出（跨年照片靠它取对年份）
+        assert got["exifLocalYear"] == 2023
         assert got["lat"] == 39.9072222
         assert got["lon"] == 116.3913889
+
+    def test_local_year_of_crossing_exif(self):
+        """EXIF 本地 1980-01-01 00:04 -> takenAt 落在 1979，本地年是 1980"""
+        from PIL import Image
+        exif = Image.Exif()
+        exif.get_ifd(0x8769)[0x9003] = b"1980:01:01 00:04:05"
+        got = meta.parseExifObject(exif)
+        assert got["takenAt"] == "1979-12-31T16:04:05Z"
+        assert got["exifLocalYear"] == 1980
 
     def test_south_west(self):
         from PIL import Image
@@ -248,6 +298,21 @@ class TestReadMeta:
         assert got["cameraModel"] == "TestCam X1"
         assert got["takenAt"] == "2023-05-01T04:00:00Z"
         assert got["shotYear"] == 2023
+        assert got["shotYearSource"] == meta.SHOT_YEAR_SRC_EXIF
+
+    def test_read_meta_takes_exif_local_year(self, tmp_path, make_photo):
+        """端到端（DR-61）：EXIF 写 1980-01-01 00:04 -> shotYear 必须是 **1980**。
+
+        ⚠️ 这条是「界面显示 1980 的时间、年代却是 1979」那个现象的回归用例：
+           只看 takenAt（UTC）就会算出 1979，而它会让这张照片的人脸落进
+           「1975–1979」这一档（等宽占位桶），与照片上人工修正的年代对不上。
+        """
+        path = make_photo(str(tmp_path / "35x45mm-3.jpg"),
+                          takenAt="1980:01:01 00:04:05")
+        got = meta.readMeta(path)
+        assert got["takenAt"] == "1979-12-31T16:04:05Z"
+        assert got["exifLocalYear"] == 1980
+        assert got["shotYear"] == 1980
         assert got["shotYearSource"] == meta.SHOT_YEAR_SRC_EXIF
 
     def test_file_without_exif_uses_name(self, tmp_path, make_photo):
@@ -302,7 +367,8 @@ class TestReadMeta:
     def test_empty_meta_shape(self):
         got = meta.emptyMeta("a.jpg")
         for key in ("mimeType", "width", "height", "orientation", "cameraModel",
-                    "takenAt", "lat", "lon", "placeName", "shotYear"):
+                    "takenAt", "exifLocalYear", "lat", "lon", "placeName",
+                    "shotYear"):
             assert key in got
 
 

@@ -81,7 +81,7 @@ from config import basicSettings as basicSettings                 # noqa: E402
 from database.auto_generated import sqliteCommon                  # noqa: E402
 from engine.match import bucket as bucket                         # noqa: E402
 
-_VERSION = "20261008"
+_VERSION = "20261016"
 
 _LOG = misc.setLogNew("rebucket", "rebucket.log")
 
@@ -205,18 +205,12 @@ def effectiveShotYear(photoRow) -> object:
     翻拍件/扫描件给的都是"翻拍那一刻"；用户手工填的 `shotYearOverride`
     才是这张照片真正的年代。
 
-    ⚠️ 只做「有值就用、没值才回落到 shotYear」这一条判断，**不做区间校验**：
-       override 写库时已经过 bucket.validShotYear（见 processor/photoTimeFix），
-       这里再卡一次区间只会让"库里有一条越界值"这件事从分桶结果里消失。
-       越界值继续走 bucketKeyAdaptive 的 validShotYear -> 返回空桶键（=不进跨桶比对），
-       是**可见**的，比静默按某个合法年份分桶安全。
-    ⚠️ 空串也当"未修正"：SQLite 里该列应为 NULL，但手工改过库的行可能是 ''。
+    ⚠️ 实现**只此一处**：转发 `bucket.effectiveShotYear()`（纯函数）。
+       faceStore 的占位桶也要用同一个规则，而它不能反向 import 本模块
+       （本模块 import 了 sqliteCommon），所以实现的落点是 bucket.py —
+       这里保留这个入口只为不动既有调用方（photoTimeFix / 批量回填工具）。
     """
-    row = photoRow or {}
-    override = row.get("shotYearOverride")
-    if override is None or str(override).strip() == "":
-        return row.get("shotYear")
-    return override
+    return bucket.effectiveShotYear(photoRow)
 
 
 def shotYearOf(photoCode: str, cache: dict = None) -> object:
@@ -386,6 +380,9 @@ def rebucketPhoto(photoCode: str, dryRun: bool = False) -> dict:
 
     与 rebucketPerson 的区别只在于「主人是谁」是逐张脸查的 ——
     一张合影里可能有好几个不同的人。
+
+    ⚠️ 只处理**一张**照片。要刷一批（人脸任务的收尾兜底，动辄上千张）
+       用 rebucketPhotos()：它共享年/人缓存并只写一次库。
     """
     code = str(photoCode or "")
     out = {"photoCode": code, "faces": 0, "changed": 0, "written": 0,
@@ -414,6 +411,71 @@ def rebucketPhoto(photoCode: str, dryRun: bool = False) -> dict:
                      "personCode": pcode or "(未归属)",
                      "old": info["oldBucket"] or "(NULL)",
                      "new": info["newBucket"] or "(NULL)"})
+    return out
+
+
+def rebucketPhotos(photoCodes, dryRun: bool = False) -> dict:
+    """**一批照片**的全脸 shotBucket 重刷（算完只写一次库）。
+
+    为什么要它（而不是循环调 rebucketPhoto）
+    --------------------------------------
+      它是给「人脸任务的收尾兜底」用的（DR-61）：一个批次动辄上千张照片，
+      逐张调 rebucketPhoto 会变成「每张照片各查一次 pb_photo + 各开一个写事务」。
+      这里共享 yearCache / personCache，全部算完再 _writeBucketRows 一次。
+
+    返回
+    ----
+      {photos, faces, changed, written, personCodes, samples, dryRun}
+      · `personCodes` = 桶键**真的变了**的那些脸的主人（去重、升序）——
+        调用方拿它去 `centroid.recomputePerson`（顺序：先刷桶再重算，DR-22）。
+        ⚠️ 刻意只给"变了的人"：给全部人会让一次全库任务的收尾变成几百次
+           质心重算，而其中绝大多数人的样本集合根本没动。
+
+    ⚠️ 与 rebucketAll 的分工：那个是「全库一次性刷干净」（CLI / 设置页），
+       本函数是「只刷我动过的那些照片」（任务收尾）—— 两者共用 rebucketFace，
+       规则仍然只有 bucket.py 一处。
+    """
+    codes = []
+    for code in (photoCodes or ()):
+        text = str(code or "")
+        if text and text not in codes:
+            codes.append(text)
+    out = {"photos": len(codes), "faces": 0, "changed": 0, "written": 0,
+           "personCodes": [], "samples": [], "dryRun": bool(dryRun)}
+    if not codes:
+        return out
+    yearCache, personCache, owners, pending = {}, {}, set(), []
+    for code in codes:
+        # year 与 personCode -> 主人行 都缓存：同一张照片多人合影、以及
+        # 一批照片里同一个人反复出现时都能省掉查询（与 rebucketAll 同一手法）。
+        year = shotYearOf(code, yearCache)
+        for one in sqliteCommon.query_pb_face("pb_face", photoCode=code,
+                                              mode="light", orderBy="recID"):
+            out["faces"] += 1
+            pcode = str(one.get("personCode") or "")
+            if pcode and pcode not in personCache:
+                personCache[pcode] = _personOf(pcode)
+            info = rebucketFace(one, personCache.get(pcode), dryRun=True,
+                                shotYear=year)
+            if not info["changed"]:
+                continue
+            out["changed"] += 1
+            if pcode:
+                owners.add(pcode)
+            if len(out["samples"]) < _SAMPLE_NUM:
+                out["samples"].append(
+                    {"faceCode": info["faceCode"], "shotYear": year,
+                     "personCode": pcode or "(未归属)",
+                     "old": info["oldBucket"] or "(NULL)",
+                     "new": info["newBucket"] or "(NULL)"})
+            pending.append(info)
+    if pending and not dryRun:
+        out["written"] = _writeBucketRows(pending)
+    out["personCodes"] = sorted(owners)
+    if out["changed"]:
+        _LOG.info("批量刷桶：%d 张照片 / %d 张脸改桶 / 涉及 %d 人（写库 %d）",
+                  out["photos"], out["changed"], len(out["personCodes"]),
+                  out["written"])
     return out
 
 
@@ -559,7 +621,7 @@ def personFaceBuckets(personCode: str, confirmedOnly: bool = False) -> dict:
 def auditBuckets(sampleNum: int = None) -> dict:
     """**桶口径一致性巡检**（只读，不写库）。
 
-    报四件事
+    报五件事
     --------
       ① **桶宽分布**：宽 3 / 宽 10 = 自适应（桶键跟着生日走）；
          宽 5 = 等宽降级（无生日或未归属，**这是合法状态**）；
@@ -572,6 +634,11 @@ def auditBuckets(sampleNum: int = None) -> dict:
          （质心按旧口径建、脸表已按新口径刷）。
       ④ **无主质心**：bucketKey != ALL 的行 sampleCount>0，但该桶已无脸。
          与 ② 的区别：② 是「桶键整个不存在」，④ 是「桶还在、脸走了」。
+      ⑤ **该刷没刷（staleDegraded）**：已归属 + 主人有生日，桶键却是
+         **等宽降级桶**。按口径这类脸的桶必须是自适应桶（宽 3 / 宽 10），
+         所以它不是"合法状态"，而是「按未归属口径刷过一次」的痕迹 ——
+         界面上表现为人物时间轴里多出一个不属于任何人的年代档
+         （用户报的「年代显示 2012、年代桶却是 1975–1979」，DR-61）。
 
     为什么这个巡检是本步最有价值的产出
     ------------------------------
@@ -582,30 +649,49 @@ def auditBuckets(sampleNum: int = None) -> dict:
     """
     keep = int(sampleNum or _SAMPLE_NUM)
 
-    # ---- ① 桶宽分布 ----
+    # ---- ⓪ 人名 -> 生日（①⑤ 都要用；一次取回，全库人数是几百不是十万）----
+    personBirthday = {}
+    for p in sqliteCommon.query_pb_person("pb_person", mode="light"):
+        code = str(p.get("personCode") or "")
+        if code:
+            personBirthday[code] = str(p.get("birthday") or "")
+    livePersons = set(personBirthday)
+
+    # ---- ① 桶宽分布 + ⑤ 该刷没刷（同一次遍历）----
     widthStat = {}
+    staleStat = {"count": 0, "samples": []}
     for row in sqliteCommon.query_pb_face("pb_face", mode="light"):
         key = str(row.get("shotBucket") or "")
         width = bucket.bucketWidth(key)
+        pcode = str(row.get("personCode") or "")
         one = widthStat.setdefault(width, {"count": 0, "samples": [],
                                            "assigned": 0, "degradedOnly": 0})
         one["count"] += 1
-        if str(row.get("personCode") or ""):
+        if pcode:
             one["assigned"] += 1
             if width == SHOT_BUCKET_WIDTH_FALLBACK:
                 one["degradedOnly"] += 1
+                # ⑤ 已归属 + 主人有生日 + 却是**等宽降级桶** —— 按口径它必须是
+                #    自适应桶（宽 3 / 宽 10）。这一档的全部成因都是「按未归属
+                #    口径刷过一次」（人脸提取的占位桶 / 主人行取不到的刷桶），
+                #    症状是人物时间轴上多出一个不属于任何人的年代档。
+                if bucket.birthYearOf(personBirthday.get(pcode)):
+                    staleStat["count"] += 1
+                    if len(staleStat["samples"]) < keep:
+                        staleStat["samples"].append(
+                            {"faceCode": str(row.get("faceCode") or ""),
+                             "photoCode": str(row.get("photoCode") or ""),
+                             "shotBucket": key or "(NULL)",
+                             "personCode": pcode,
+                             "birthday": personBirthday.get(pcode) or "(无)"})
         if len(one["samples"]) < keep:
             one["samples"].append(
                 {"faceCode": str(row.get("faceCode") or ""),
                  "shotBucket": key or "(NULL)",
-                 "personCode": str(row.get("personCode") or "") or "(未归属)"})
+                 "personCode": pcode or "(未归属)"})
 
     # ---- ②③④ 逐人比对 ----
     orphanCentroids, mismatchedFaces, ownerlessCentroids = [], [], []
-    livePersons = set(str(p.get("personCode") or "")
-                      for p in sqliteCommon.query_pb_person("pb_person",
-                                                             mode="light")
-                      if str(p.get("personCode") or ""))
     faceInfo = {}
     for row in sqliteCommon.query_pb_face("pb_face", mode="light"):
         code = str(row.get("personCode") or "")
@@ -655,14 +741,24 @@ def auditBuckets(sampleNum: int = None) -> dict:
             "自适应分桶从未生效（DR-20）。若这些人已归属且主人有生日，"
             "说明脸表桶键还没刷：跑 rebucket_cli.py --all --recompute"
             % (degradedCount, SHOT_BUCKET_WIDTH_FALLBACK))
+    if staleStat["count"]:
+        warnings.append(
+            "%d 张脸「已归属 + 主人有生日」却仍是等宽 %d 年降级桶 —— "
+            "这些脸的年代档与它主人的生日口径不符，人物时间轴上会多出"
+            "不属于任何人的年代档档位（DR-61）。跑 "
+            "rebucket_cli.py --all --recompute 刷一次；若刷完又出现，"
+            "说明有人脸写入路径还在按「原始 shotYear + 未归属」口径覆盖它。"
+            % (staleStat["count"], SHOT_BUCKET_WIDTH_FALLBACK))
     return {"widthStat": widthStat, "orphanCentroids": orphanCentroids,
             "mismatchedFaces": mismatchedFaces,
             "ownerlessCentroids": ownerlessCentroids,
+            "staleDegraded": staleStat,
             "warnings": warnings,
             "adaptiveCount": adaptiveCount, "degradedCount": degradedCount,
             "personCount": len(livePersons),
             "faceCount": sum(one["count"] for one in widthStat.values()),
-            "clean": not (orphanCentroids or mismatchedFaces or ownerlessCentroids)}
+            "clean": not (orphanCentroids or mismatchedFaces or ownerlessCentroids
+                          or staleStat["count"])}
 
 
 def assertFacesFresh(personCode: str, confirmedOnly: bool = False,
@@ -756,6 +852,14 @@ def formatAudit(report: dict) -> str:
     add("   小结：自适应桶 %d 张 / 等宽降级 %d 张"
         % (report.get("adaptiveCount", 0), report.get("degradedCount", 0)))
     add("")
+    stale = report.get("staleDegraded") or {}
+    add("⑤ 该刷没刷（已归属 + 主人有生日，却仍是等宽 %d 年降级桶）：%d 张"
+        % (SHOT_BUCKET_WIDTH_FALLBACK, int(stale.get("count") or 0)))
+    for one in (stale.get("samples") or [])[:_SAMPLE_NUM]:
+        add("     脸=%-34s 桶=%-10s 人=%-24s 生日=%s"
+            % (one.get("faceCode", "-"), one.get("shotBucket", "-"),
+               one.get("personCode", "-"), one.get("birthday", "-")))
+    add("")
     for key, title, note in (
             ("orphanCentroids", "② 孤儿质心",
              "pb_person_centroid 里的桶键在该人脸表中一张脸都没有"),
@@ -774,7 +878,7 @@ def formatAudit(report: dict) -> str:
         add("⚠ %s" % text)
     if report.get("warnings"):
         add("")
-    add("结论：%s" % ("桶口径一致：无孤儿质心 / 失配脸 / 无主质心"
+    add("结论：%s" % ("桶口径一致：无孤儿质心 / 失配脸 / 无主质心 / 无该刷没刷的脸"
                     if report.get("clean")
                     else "❌ 存在上述问题，先跑 rebucket 再重算质心"))
     return "\n".join(out)
@@ -791,6 +895,8 @@ if __name__ == "__main__":
     print("自适应桶宽    : 童年 %d 年 / 成年 %d 年（分界 %d 岁）"
           % (CHILD_WIDTH, ADULT_WIDTH, bucket.CHILD_MAX_AGE))
     print("桶键计算      : 一律走 bucket.bucketKeyAdaptive()（规则不在本模块重写）")
+    print("有效拍摄年    : bucket.effectiveShotYear()（人工修正优先，全项目唯一口径）")
+    print("批量刷桶      : rebucketPhotos(photoCodes)（人脸任务收尾兜底，一次写库）")
     print("写入纪律      : 只改 shotBucket 一列；upsert + forceColumns；不用 update_pb_face")
     print("库            :", sqliteCommon.dbFilePath())
     print()

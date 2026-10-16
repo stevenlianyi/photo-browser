@@ -63,7 +63,7 @@ if _SRC_DIR not in sys.path:
 
 from common import paths as paths                                 # noqa: E402
 
-_VERSION = "20261007"
+_VERSION = "20261016"
 
 #: 备份里 db\ 的子目录名（与源目录同名，便于人工核对）
 DB_SUBDIR: str = paths.DB_DIR_NAME
@@ -136,7 +136,11 @@ def copyTree(src: str, dst: str, skipDbSideFiles: bool = True) -> tuple:
             except OSError as e:
                 print("  ! 跳过 %s（%s）" % (fromPath, e))
             if copied % _PROGRESS_EVERY == 0:
-                print("    ... 已复制 %d 个文件（%.1f）" % (copied, humanSize(total)))
+                # ⚠️ humanSize() 返回的是**已经格式化好的字符串**（"12.3 MB"），
+                #    这里只能用 %s。用 %.1f 的话 `bytes.__mod__` 直接 TypeError，
+                #    而这一行在拷贝**每一批**都执行 —— 于是备份在拷 thumb 的头几百个
+                #    文件时必崩，用户看到的是"备份失败"，前半截还留了个半成品目录。
+                print("    ... 已复制 %d 个文件（%s）" % (copied, humanSize(total)))
     if skipped:
         print("  · 跳过 %d 个 -wal/-shm 文件（说明可能有进程仍开着这个库）" % skipped)
     return copied, total
@@ -208,21 +212,36 @@ def doBackup(destRoot: str = None, label: str = None) -> dict:
     assertNoWal(dbDir)
 
     os.makedirs(targetRoot, exist_ok=False)
-    dbFiles, dbBytes = copyTree(dbDir, os.path.join(targetRoot, DB_SUBDIR))
-    thumbFiles, thumbBytes = copyTree(thumbDir, os.path.join(targetRoot, THUMB_SUBDIR))
+    try:
+        dbFiles, dbBytes = copyTree(dbDir, os.path.join(targetRoot, DB_SUBDIR))
+        thumbFiles, thumbBytes = copyTree(thumbDir, os.path.join(targetRoot, THUMB_SUBDIR))
 
-    manifest = {
-        "backupCode": code,
-        "createdYMDHMS": stamp(),
-        "label": label or None,
-        "source": {"db": dbDir, "thumb": thumbDir, "photo": photoDir},
-        "db": {"files": dbFiles, "bytes": dbBytes, "sizeText": humanSize(dbBytes)},
-        "thumb": {"files": thumbFiles, "bytes": thumbBytes, "sizeText": humanSize(thumbBytes)},
-        "note": "不含 photo\\（原图只读源，不在备份内）；恢复只还原索引与缩略图",
-    }
-    with open(os.path.join(targetRoot, paths.BACKUP_MANIFEST_NAME), "w",
-              encoding="utf-8") as fh:
-        json.dump(manifest, fh, ensure_ascii=False, indent=2)
+        manifest = {
+            "backupCode": code,
+            "createdYMDHMS": stamp(),
+            "label": label or None,
+            "source": {"db": dbDir, "thumb": thumbDir, "photo": photoDir},
+            "db": {"files": dbFiles, "bytes": dbBytes, "sizeText": humanSize(dbBytes)},
+            "thumb": {"files": thumbFiles, "bytes": thumbBytes,
+                      "sizeText": humanSize(thumbBytes)},
+            "note": "不含 photo\\（原图只读源，不在备份内）；恢复只还原索引与缩略图",
+        }
+        with open(os.path.join(targetRoot, paths.BACKUP_MANIFEST_NAME), "w",
+                  encoding="utf-8") as fh:
+            json.dump(manifest, fh, ensure_ascii=False, indent=2)
+    except Exception as e:                       # noqa: BLE001 - 备份是"整体成功或整体没有"
+        # ⚠️ 半成品**必须删掉**，不能留在 backup 根目录里
+        #   （这是本条 try/except 存在的唯一理由）：
+        #   doRestore 只检查 db\ 与 thumb\ 两个子目录在不在，而中途崩掉的备份
+        #   **两个都在** —— 它在 list 里看起来与正常备份一模一样，
+        #   用户 restore 之后才发现少了几万张缩略图，
+        #   而库里的 faceCount / 人脸数与磁盘上的文件数从此对不上，且不报错。
+        shutil.rmtree(targetRoot, ignore_errors=True)
+        print("[Error] 备份失败：%s: %s" % (type(e).__name__, e), file=sys.stderr)
+        print("        已删除半成品目录（它会被 list 当成一个可用备份）：%s"
+              % targetRoot, file=sys.stderr)
+        return {"ok": False, "backupCode": code, "path": targetRoot,
+                "errMsg": "%s: %s" % (type(e).__name__, e)}
 
     print("")
     print("  db    : %d 个文件 / %s" % (dbFiles, humanSize(dbBytes)))
@@ -271,8 +290,17 @@ def doList(destRoot: str = None) -> list:
         if thumbSize == "?":
             thumbSize = humanSize(dirSize(os.path.join(full, THUMB_SUBDIR))[1])
         created = str(manifest.get("createdYMDHMS") or "?")
-        print("%-22s %-10s %-10s %s" % (name, dbSize, thumbSize, created))
-        out.append({"backupCode": name, "path": full, "manifest": manifest})
+        # ⚠️ **缺 manifest = 上次备份中途失败**（manifest 最后才写）。
+        #   这种目录的 db\ 与 thumb\ 都已建好，尺寸看上去还挺正常 ——
+        #   所以必须在这一行就把它标成"不可用"，而不是让用户拿它去恢复。
+        broken = not os.path.isfile(mFile)
+        if broken:
+            dbSize = thumbSize = "⚠不完整"
+        print("%-22s %-10s %-10s %s%s"
+              % (name, dbSize, thumbSize, created,
+                 "  ← 缺 manifest，中途失败，不能用于恢复" if broken else ""))
+        out.append({"backupCode": name, "path": full, "manifest": manifest,
+                    "broken": broken})
     print("")
     print("恢复某个备份：python code/src/tools/backup.py restore --code <备份编号>")
     return out
@@ -292,6 +320,18 @@ def doRestore(code: str, destRoot: str = None, assumeYes: bool = False) -> dict:
         if not os.path.isdir(os.path.join(source, name)):
             print("[Error] 备份不完整（缺 %s\\）：%s" % (name, source), file=sys.stderr)
             return {"ok": False, "errMsg": "备份不完整，缺 %s" % name}
+    # ⚠️ **必须有 manifest** 才算一次完整备份。
+    #   manifest 是最后写的，所以"中途失败/被 Ctrl-C 的备份"缺它；
+    #   而上面那两个子目录检查它照样能过（拷贝是按目录走的，崩在 thumb 的一半时
+    #   db\ 与 thumb\ 都已建好）—— 只查子目录的话，一次拷到 60% 的备份会被当成
+    #   正常备份恢复进去，之后缩略图与库里的人脸数对不上，而且**一直对不上**。
+    if not os.path.isfile(os.path.join(source, paths.BACKUP_MANIFEST_NAME)):
+        print("[Error] 这不是一次完整备份（缺 %s）：%s"
+              % (paths.BACKUP_MANIFEST_NAME, source), file=sys.stderr)
+        print("        manifest 是最后写的 —— 缺它说明上一次备份**中途失败**了，"
+              "里面的缩略图只拷了一部分。", file=sys.stderr)
+        return {"ok": False,
+                "errMsg": "备份不完整，缺 manifest（多半是上次备份中断留下的）"}
 
     dbDir = paths.db_dir()
     thumbDir = paths.thumb_dir()

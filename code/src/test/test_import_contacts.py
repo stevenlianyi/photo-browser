@@ -223,6 +223,30 @@ class TestIdempotent:
         assert not res["updated"], \
             "写失败却进了 updated —— CLI 会显示「更新成功」，实际一条没写"
 
+    def test_write_failure_without_errmsg_still_says_why(self, lib, tmp_path,
+                                                         monkeypatch):
+        """rtn=-2 而 `lastErrMsg` 为空时，失败详情**不能是空串**。
+
+        为什么单独立一条
+        --------------
+          真实日志里出现过 `导入 VC_0154_Qing_Bai 失败：` —— **冒号后面什么都没有**
+          （2026-10-16 11:32，测试与真实导入同时在写同一个库）。
+          `lastErrMsg` 只在 sqliteHandle._err() / executeWriteList 里赋值，
+          而那条路径可能什么都没留下 —— 一句只剩冒号的报错等于把"为什么失败"
+          这条线索彻底丢掉，与本项目「报错必须能定位」的纪律直接冲突。
+        """
+        writeVcf(str(tmp_path), "0154_Qing Bai.vcf", CARD_MIN)
+        planned = ic.plan(str(tmp_path))
+        sqliteCommon.dbHandle().lastErrMsg = ""       # 冒充"底层什么都没留下"
+        monkeypatch.setattr(ic.sqliteCommon, "insertManyTableGeneral",
+                            lambda *args, **kwargs: (-2, ()))
+        res = ic.apply(planned)
+        assert res["failed"], "写失败却没进 failed"
+        code, reason = res["failed"][0]
+        assert str(reason).strip(), "失败详情是空串 —— 日志里将只剩一个冒号"
+        assert "op=" in str(reason) and str(code) in str(reason), \
+            "兜底文案必须带上可定位的上下文（op / personCode）：%r" % (reason,)
+
 
 # ============================================================
 # 三、撞车分级

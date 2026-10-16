@@ -32,9 +32,13 @@
 #      → ③ `centroid.recomputePerson`（DR-22）。反了会**静默**失配：
 #      质心按旧年代档建、脸按新年代档刷，该人的匹配率归零而库里看不出任何异常。
 #   ③ **规则不在本模块重写**：年代档一律调 `rebucket`（它再调 `bucket`），
-#      「有效年份」一律调 `rebucket.effectiveShotYear` /
+#      「有效年份」一律调 `bucket.effectiveShotYear`（`rebucket` 转发它）/
 #      `comGD.sqlEffectiveShotYear`。
 #   ④ **只改库，不碰 photo 目录**。本模块连 `paths` 都不 import。
+#   ⑤ **写完要验**（DR-61）：落库后逐脸比对「库里桶键 == 当前口径算出来的桶键」，
+#      不一致就作为 warning 交出去（见 verifyBuckets）。因为同一张照片上
+#      可能有人脸任务在同时写 shotBucket —— 那种情况下写 override 的这次
+#      操作会**看不出问题**（自己的 rebucket 成功过），而界面上的年代档是错的。
 #
 # 不碰的东西
 # ----------
@@ -66,7 +70,7 @@ from engine.match import centroid as centroid                     # noqa: E402
 from engine.match import rebucket as rebucket                     # noqa: E402
 from processor.review import assigner                             # noqa: E402
 
-_VERSION = "20261008"
+_VERSION = "20261016"
 
 _LOG = misc.setLogNew("photoTimeFix", "phototimefix.log")
 
@@ -129,6 +133,39 @@ def _personOf(personCode: str) -> dict:
                                             delFlag="*", mode="light"):
         return row
     return {}
+
+
+def verifyBuckets(photoCode: str) -> dict:
+    """**后置校验**（DR-61）：这张照片的人脸桶是不是**真的**按当前口径刷好了。
+
+    为什么必须校验而不是"相信 rebucket 刚跑过"
+    ----------------------------------------
+      写 override 与刷桶是两步，而**别的写入者**也可能在同一张照片上写
+      shotBucket（人脸补漏任务、重提取、单独点「识别这张照片人脸」）。
+      一旦有一处按"未归属 + 原始 shotYear"的口径后写进来，
+      界面上就会出现「年代 2012 / 年代桶 1975–1979」这种自相矛盾 ——
+      而响应里 `bucketsChanged=1` 会让人以为一切正常。
+      所以这里按当前口径（有效年 + 各人出生年）**重算一遍逐张比对**，
+      不一致就把它当作一条 warning 交出去（界面会弹），而不是静默留下。
+
+    返回 {"checked": n, "stale": [{faceCode, personCode, have, want}, …]}
+    """
+    stale, checked = [], 0
+    personCache = {}
+    for one in _facesOf(photoCode):
+        pcode = str(one.get("personCode") or "")
+        if pcode and pcode not in personCache:
+            personCache[pcode] = _personOf(pcode)
+        checked += 1
+        # 不给 shotYear：expectedBucketOf 会回查 pb_photo 的有效拍摄年
+        # （override 此刻已经落库，所以拿到的是修正后的年份）。
+        want = rebucket.expectedBucketOf(one, personCache.get(pcode) or None)
+        have = str(one.get("shotBucket") or "")
+        if want != have:
+            stale.append({"faceCode": str(one.get("faceCode") or ""),
+                          "personCode": pcode, "have": have or "(NULL)",
+                          "want": want or "(NULL)"})
+    return {"checked": checked, "stale": stale}
 
 
 def targetYearOf(photoRow: dict, shotYear):
@@ -361,8 +398,26 @@ def applyFix(photoCode: str, shotYear=None) -> dict:
     #    回查 pb_photo，写入前拿到的是旧值。
     rebucketed = rebucket.rebucketPhoto(code)
 
+    # ---- ②.5 后置校验：桶是不是真的刷对了（DR-61）----
+    # ⚠️ 顺序在「重算质心」之后、留痕之前：它只读库，不影响任何写入顺序。
+    verify = verifyBuckets(code)
+
     # ---- ③ 重算涉及人物质心 ----
     centroids, warnings = _recomputePersons(personCodes)
+    if verify["stale"]:
+        # 不是"这次修正失败"：修正本身已经落库了。它说明**有另一个写入者**
+        # 在同一张照片上又写了一次 shotBucket（补漏任务 / 重提取 / 单张识别）。
+        # 静默吞掉的话，用户会在人物时间轴上看到一个不该存在的年代档，
+        # 而库里没有任何线索。
+        warnings.append({
+            "personCode": "",
+            "error": ("照片 %s 有 %d/%d 张脸的年代档与本照片的有效年份不一致"
+                      % (code, len(verify["stale"]), verify["checked"])),
+            "advice": ("再点一次「保存并重算年代档」，或跑 "
+                       "python code\\src\\tools\\rebucket_cli.py --photo %s --yes"
+                       " 把它刷回来；若反复出现，说明同一时间有人脸任务在写这张照片"
+                       % code),
+        })
 
     # ---- ④ 留痕（主日志 + 每个受影响人一条成员日志）----
     logCode = assigner.newLogCode()
@@ -396,6 +451,11 @@ def applyFix(photoCode: str, shotYear=None) -> dict:
             "facesRebucketed": int(rebucketed.get("faces") or 0),
             "bucketsChanged": int(rebucketed.get("changed") or 0),
             "persons": personCodes,
+            # 后置校验：这张照片现在的人脸桶是否**真的**等于当前口径算出来的值。
+            # `stale` 非空 = 有别的写入者同时改了这张照片（见 verifyBuckets）。
+            "bucketVerify": {"checked": int(verify["checked"] or 0),
+                             "staleCount": len(verify["stale"]),
+                             "stale": verify["stale"]},
             "centroids": [c for stat in centroids
                           for c in (stat.get("buckets") or [])],
             "warnings": warnings, "logCode": logCode,
@@ -461,7 +521,17 @@ def revertFromLog(logRow: dict) -> dict:
     photo = _photoRow(photoCode)
     _writeOverride(photoCode, restoreValue)
     rebucketed = rebucket.rebucketPhoto(photoCode)
+    verify = verifyBuckets(photoCode)                 # 后置校验（与 applyFix 同口径）
     centroids, warnings = _recomputePersons(personCodes)
+    if verify["stale"]:
+        warnings.append({
+            "personCode": "",
+            "error": ("照片 %s 有 %d/%d 张脸的年代档与还原后的有效年份不一致"
+                      % (photoCode, len(verify["stale"]), verify["checked"])),
+            "advice": ("跑 python code\\src\\tools\\rebucket_cli.py --photo %s --yes"
+                       " 刷一次；若反复出现，说明同一时间有人脸任务在写这张照片"
+                       % photoCode),
+        })
 
     db = sqliteCommon.dbHandle()
     undoCode = assigner.newLogCode()
@@ -490,6 +560,9 @@ def revertFromLog(logRow: dict) -> dict:
             "facesRebucketed": int(rebucketed.get("faces") or 0),
             "bucketsChanged": int(rebucketed.get("changed") or 0),
             "persons": personCodes,
+            "bucketVerify": {"checked": int(verify["checked"] or 0),
+                             "staleCount": len(verify["stale"]),
+                             "stale": verify["stale"]},
             "missingFaces": [],
             "centroids": [c for stat in centroids
                           for c in (stat.get("buckets") or [])],
@@ -506,7 +579,7 @@ if __name__ == "__main__":
     print("改的列      : pb_photo.shotYearOverride（值原样进参数元组，None=NULL）")
     print("有效年份    : rebucket.effectiveShotYear（override 优先，全项目唯一口径）")
     print("联动顺序    : ①写 override -> ②rebucket.rebucketPhoto -> "
-          "③centroid.recomputePerson（DR-22）")
+          "③centroid.recomputePerson（DR-22）-> ④verifyBuckets 后置校验（DR-61）")
     print("日志        : pb_review_log opType=%s（可撤销，走 /api/review/undo）"
           % assigner.OP_BUCKET_FIX)
     print("库          :", sqliteCommon.dbFilePath())

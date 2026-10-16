@@ -56,10 +56,12 @@ if _SRC_DIR not in sys.path:
 
 from api import dto                                               # noqa: E402
 from common import globalDefinition as comGD                      # noqa: E402
+from config import basicSettings as comBS                         # noqa: E402
 from common import miscCommon as misc                             # noqa: E402
 from database import queryCommon as query                         # noqa: E402
 from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
 from engine.match import bucket as bucket                         # noqa: E402
+from processor.album import dirPath as albumDirPath               # noqa: E402
 from processor.place import placeStore as placeStore              # noqa: E402
 
 from fastapi import APIRouter, Query                              # noqa: E402
@@ -668,6 +670,12 @@ def listPhotos(page: int = Query(default=1, ge=1),
                shotYearFrom: int = Query(default=None, description="拍摄年下界（含）"),
                shotYearTo: int = Query(default=None, description="拍摄年上界（含）"),
                placeName: str = Query(default=None, description="地点精确匹配（非模糊）"),
+               dirPath: str = Query(default=None,
+                                    description="目录**精确匹配**（非模糊）："
+                                                "目录键 = relPath 去掉文件名，`/` 分隔；"
+                                                "根目录传 `%s`。"
+                                                "只取该目录**直属**的照片（不含子目录）"
+                                                % comBS.ALBUM_ROOT_TOKEN),
                hasFace: int = Query(default=None, description="1 只看有人脸 / 0 只看无人脸"),
                isDuplicate: int = Query(default=None, description="1 只看重复照片"),
                isMissing: int = Query(default=None, description="1 只看库里有磁盘上没有的"),
@@ -699,6 +707,16 @@ def listPhotos(page: int = Query(default=1, ge=1),
        `placeName` 再精确匹配，于是**两种写法返回同一批照片**。
        ⚠️ 仍然**不是 LIKE**：中文名这一侧同理，「…和静县」与「…和什托洛盖乡」
        模糊匹配会互相命中，用户会以为筛错了。
+
+    目录筛选（`dirPath`）—— R16 · DR-60/62
+    --------------------------------------
+      「文件夹」浏览用的筛选：目录**精确匹配**，且只取该目录**直属**的照片。
+      目录键由 `processor.album.dirPath` 从 `relPath` 现推（目录 = relPath 去掉
+      最后一段；根目录 = 空串）。⚠️ **不是 LIKE**：`LIKE 'dir/%'` 会把子目录照片
+      一并捞出，且目录名里的 `%` / `_` 是通配符（本库实测有 `2016_05_01_三亚`），
+      会静默多报。
+      这个筛选**自动被 `anchorOffsetOf()` 带上** ⇒ 「从目录里点开一张老照片后
+      左右翻页」不需要额外的后端代码。
 
     锚点定位（`anchorPhotoCode`）
     --------------------------
@@ -766,6 +784,20 @@ def listPhotos(page: int = Query(default=1, ge=1),
     if isMissing is not None:
         where.append("p.isMissing = %s")
         values.append(int(bool(isMissing)))
+    if dirPath is not None:
+        # R16（DR-60/62）：「文件夹」浏览的照片流。**只多这一个片段**。
+        # ⚠️ 判据是 `is not None` 而**不是**真值判断：归一后根目录得到的是**空串**，
+        #    用 `if dirPath:` 会让「根目录」静默退化成「不筛选」⇒ 返回全库照片。
+        # ⚠️ 必须是**等值**比较，**严禁** `LIKE 'dir/%'`：① 会把子目录照片一并捞出
+        #    （本功能口径是"仅直属"）；② 目录名里的 `%` / `_` 在 LIKE 下是通配符
+        #    （本库实测有 `2016_05_01_三亚` 这类），会**静默多报**且零报错。
+        # ⚠️ 表达式只从 `processor.album.dirPath` 取（唯一口径），不在这里重写一遍
+        #    `rtrim(...)` —— 重写就是「树说 45 张、网格说 44 张」的配方。
+        reason = albumDirPath.invalidReason(dirPath)
+        if reason:
+            raise dto.ApiError(dto.CODE_PARAM_INVALID, reason)
+        where.append(albumDirPath.dirKeySql("p") + " = %s")
+        values.append(albumDirPath.normalizeDirKey(dirPath))
     if keyword:
         # ⚠️ LIKE 的值必须走参数；但通配符本身是**用户输入的一部分**，
         #    所以这里用「包一层通配」而不是把 % 拼进 sqlstr。

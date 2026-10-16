@@ -2,8 +2,10 @@
 ;  photo-browser 安装包（Inno Setup 6）
 ;
 ;  编译：
-;     ISCC.exe /DVer=0.1.0 build\installer.iss
+;     ISCC.exe /DPbVer=0.2.0 build\installer.iss
 ;   （或直接跑 build\package.ps1，它会连 PyInstaller 一起做完）
+;   ⚠️ 参数名是 **PbVer**（不是 Ver）—— 与下面 #ifndef 里那个名字必须逐字一致；
+;      写错不会报错，只会静默用默认版本号。build\package.ps1 传的就是 /DPbVer=。
 ;
 ;  产出：dist\PhotoBrowser-Setup-<版本>.exe
 ;
@@ -27,7 +29,7 @@
 ; ==========================================================================
 
 #ifndef PbVer
-  #define PbVer "0.1.0"
+  #define PbVer "0.2.0"
 #endif
 
 #define AppName "Photo Browser"

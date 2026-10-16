@@ -461,6 +461,7 @@ _ONE: dict = {
     "confirmedBefore": 0,    # 旧人脸里人工确认过的条数（用户要知道丢了什么）
     "droppedLinks": 0,       # 清掉的幽灵关联行
     "centroidsRecomputed": 0,
+    "bucketsFixed": 0,       # 桶口径兜底改掉的 shotBucket 条数（DR-61）
     "engineElapsed": 0.0,
     # ---- 匹配（只判这一张）----
     "matchRan": False,
@@ -520,9 +521,10 @@ def _oneReset(photoCode: str, replaceFaces: bool, doMatch: bool) -> None:
     这类"读到别人的结果"在界面上极像"点了没反应 / 结果莫名其妙"。
     """
     _onePatch(running=True, phase="loading_model", photoCode=str(photoCode),
-              replaceFaces=bool(replaceFaces), match=bool(doMatch),
-              faceCount=0, rawCount=0, deletedFaces=0, confirmedBefore=0,
-              droppedLinks=0, centroidsRecomputed=0, engineElapsed=0.0,
+             replaceFaces=bool(replaceFaces), match=bool(doMatch),
+             faceCount=0, rawCount=0, deletedFaces=0, confirmedBefore=0,
+             droppedLinks=0, centroidsRecomputed=0, bucketsFixed=0,
+             engineElapsed=0.0,
               matchRan=False, matched=0, autoAssigned=0, needReview=0,
               unknown=0, assignedTo=[], matchNote="",
               startedYMDHMS=misc.getTime(), finishedYMDHMS=None,
@@ -837,6 +839,20 @@ def _runExtractOne(photoCode: str, photoRow: dict, absPath: str,
         if droppedLinks or recomputed:
             _oneLog("清理旧归属：清掉 %d 条幽灵关联，重算 %d 个人物的质心"
                     % (droppedLinks, recomputed))
+
+        # ---- ④之二 桶口径兜底（DR-61）----
+        # 提取只会给**新脸**写等宽占位桶；这张照片上已归属的脸（replaceFaces=False
+        # 的增量路径）桶键不动（faceStore 不再覆盖它）。这里按当前口径再对一遍：
+        # 照片的有效拍摄年被改过、或主人刚换过时，这一遍才是它们真正的桶键。
+        # 只影响这一张照片，代价可以忽略。
+        sealStat = faceSched.sealBuckets([photoCode])
+        _onePatch(bucketsFixed=int(sealStat.get("changed") or 0))
+        if int(sealStat.get("changed") or 0):
+            _oneLog("年代档口径：按当前年份/生日重刷 %d 张人脸（重算 %d 人质心）"
+                    % (int(sealStat.get("changed") or 0),
+                       int(sealStat.get("persons") or 0)))
+        if sealStat.get("errMsg"):
+            _oneLog("年代档口径兜底未完成：%s" % sealStat["errMsg"])
 
         # ---- ⑤ 匹配（只判这张照片刚提取出的待确认脸）----
         mstat = {"ran": False, "total": 0, "auto": 0, "review": 0,

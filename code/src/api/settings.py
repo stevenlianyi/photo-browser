@@ -135,12 +135,28 @@ def _centroidOverview() -> dict:
         str(one.get("bucketKey") or "") for one in query.selectList(
             "SELECT DISTINCT bucketKey AS bucketKey FROM pb_person_centroid"))
     missing = sorted(k for k in faceBuckets if k and k not in centroidBuckets)
+    # DR-61：**该刷没刷**的精确计数 —— 已归属 + 主人有生日 + 桶键却是等宽降级桶。
+    # 这类脸的年代档口径已经错了（时间轴上会多出不属于任何人的档位），
+    # 而且它**不是**「参数改了还没重算」那种可等状态：按口径它必须先是自适应桶。
+    # 判据就是"桶宽 = 降级宽"：end - start == BUCKET_EQUAL_WIDTH - 1。
+    staleDegradedFaces = int(query.selectValue(
+        "SELECT COUNT(*) AS rowNum FROM pb_face f"
+        " JOIN pb_person p ON p.personCode = f.personCode"
+        " WHERE f.delFlag = %s AND f.isStranger = 0"
+        " AND f.shotBucket IS NOT NULL AND f.shotBucket <> ''"
+        " AND f.shotBucket <> 'ALL'"
+        " AND CAST(substr(f.shotBucket, 6, 4) AS INT)"
+        "   - CAST(substr(f.shotBucket, 1, 4) AS INT) = %s"
+        " AND p.birthday IS NOT NULL AND LENGTH(p.birthday) >= 4",
+        (comGD.DEL_FLAG_NO,
+         int(basicSettings.BUCKET_EQUAL_WIDTH) - 1)) or 0)
     return {"faceCount": faceRows,
             "centroidRows": bucketRows,
             "enabledBuckets": enabledRows,
             "faceBucketKeys": len(faceBuckets),
             "bucketsWithoutCentroid": missing[:20],
-            "bucketsWithoutCentroidTotal": len(missing)}
+            "bucketsWithoutCentroidTotal": len(missing),
+            "staleDegradedFaces": staleDegradedFaces}
 
 
 @router.get("/settings", summary="设置页的全部数据（路径 / 识别参数 / 质心现状 / 备份）")
@@ -435,6 +451,13 @@ def listBackups(limit: int = 20) -> list:
         manifest["path"] = full
         manifest["hasDb"] = os.path.isdir(os.path.join(full, "db"))
         manifest["hasThumb"] = os.path.isdir(os.path.join(full, "thumb"))
+        # ⚠️ **缺 manifest = 那次备份中途失败**（manifest 最后才写）。
+        #   只看 hasDb/hasThumb 的话，它与一次正常备份长得一模一样
+        #   （两个子目录都已建好），用户会拿它去恢复，得到一个"库在、
+        #   缩略图只剩 8 MB"的库 —— 之后所有缩略图 404，而且**不报错**。
+        #   与 tools/backup.py 的 doRestore 闸门同一条口径。
+        manifest["hasManifest"] = os.path.isfile(manifestFile)
+        manifest["broken"] = not manifest["hasManifest"]
         items.append(manifest)
         if len(items) >= int(limit):
             break

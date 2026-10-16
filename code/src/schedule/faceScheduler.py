@@ -56,7 +56,7 @@ from database.auto_generated import sqliteCommon as sqliteCommon  # noqa: E402
 from engine.face import faceStore as faceStore                    # noqa: E402
 from schedule import scanScheduler as scanSched                   # noqa: E402
 
-_VERSION = "20261007"
+_VERSION = "20261016"
 
 _LOG = misc.setLogNew("faceScheduler", "facescheduler.log")
 
@@ -64,6 +64,76 @@ _LOG = misc.setLogNew("faceScheduler", "facescheduler.log")
 #: 为什么不存 memo：memo 是给人看的自由文本，参数塞进去迟早被覆写；
 #: 而"这一轮是重提取"直接决定要不要删旧人脸行，写错=静默产生孤儿行。
 _REPLACE_LABEL: str = "REPLACE"
+
+#: 每批提取之后是否做一次「桶口径兜底」（DR-61）。关掉它只影响兜底，
+#: 不影响提取本身 —— 但关掉之后，任何一条按占位口径写桶的路径都会静默留在库里。
+SEAL_BUCKETS_AFTER_EXTRACT: bool = True
+
+
+def sealBuckets(photoCodes, recompute: bool = True) -> dict:
+    """**桶口径兜底**：把本批动过的照片的 shotBucket 按当前口径重刷，并重算质心。
+
+    为什么需要这一步（DR-61）
+    ------------------------
+      人脸提取只知道"这张脸长什么样、在哪张照片上"，**不知道它属于谁** ——
+      所以它写的是等宽占位桶。而年代档的真口径是
+      `f(有效拍摄年, 该脸主人的出生年)`（自适应宽 3 / 宽 10）。
+      两者之间原本只靠"归属那一刻刷一次"来对齐（DR-20/R2），于是任何一次
+      重提取 / 增量补漏 / 批量重跑都可能把某些脸留在占位桶上 ——
+      用户看到的就是「年代 2012，年代桶 1975–1979」这类自相矛盾的界面，
+      而库里**一处都不报错**。
+      兜底放在任务收尾（本函数）而不是散在各写入点：任务才是"这一批照片
+      现在是什么状态"的完整边界，一次把口径对齐，写入点再也不用各自记得刷。
+
+    范围与顺序
+    ----------
+      · 只刷**本批实际写过的照片**（FaceStore.drainTouched），不是全库；
+      · 顺序仍是 **先刷桶 -> 再重算质心**（DR-22），且只重算"桶键真的变了"
+        的那些人（`rebucketPhotos` 返回的 personCodes）。
+
+    ⚠️ **绝不抛异常**：它挂在任务收尾上，抛出去会把一个已经跑完（照片都已落库、
+      scanState 已推进）的任务改成 FAILED —— 那是**最坏的错误归因**。
+      失败只记日志 + 计数，由返回值带出去给人看。
+    """
+    stat = {"photos": 0, "faces": 0, "changed": 0, "written": 0,
+            "persons": 0, "failed": 0, "skipped": False, "errMsg": ""}
+    codes = [str(c) for c in (photoCodes or ()) if str(c or "")]
+    if not codes:
+        return stat
+    if not SEAL_BUCKETS_AFTER_EXTRACT:
+        stat["skipped"] = True
+        stat["errMsg"] = "SEAL_BUCKETS_AFTER_EXTRACT = False"
+        return stat
+    stat["photos"] = len(codes)
+    try:
+        from engine.match import rebucket as rebucket
+        info = rebucket.rebucketPhotos(codes)
+        stat["faces"] = int(info.get("faces") or 0)
+        stat["changed"] = int(info.get("changed") or 0)
+        stat["written"] = int(info.get("written") or 0)
+        if stat["changed"]:
+            _LOG.info("收尾刷桶：%d 张照片 / %d 张脸改桶 / 写库 %d",
+                      stat["photos"], stat["changed"], stat["written"])
+    except Exception as e:                              # noqa: BLE001
+        stat["errMsg"] = "刷桶失败: %s: %s" % (type(e).__name__, e)
+        _LOG.error("收尾刷桶失败（%d 张照片）：%s", stat["photos"], stat["errMsg"])
+        return stat
+    if not (recompute and info.get("personCodes")):
+        return stat
+    from engine.match import centroid as centroid
+    for code in info["personCodes"]:
+        try:
+            centroid.recomputePerson(code)
+            stat["persons"] += 1
+        except Exception as e:                          # noqa: BLE001
+            # 例如那个人的**别的**照片还残留旧口径桶键（assertFacesFresh 拦下）。
+            # 不是本次提取造成的，所以只记一条日志，不让整批变 FAILED。
+            stat["failed"] += 1
+            _LOG.warning("收尾重算质心失败 %s: %s: %s（先跑 rebucket_cli.py --all）",
+                         code, type(e).__name__, e)
+    if stat["persons"]:
+        _LOG.info("收尾重算质心：%d 人（失败 %d）", stat["persons"], stat["failed"])
+    return stat
 
 
 def parseCursor(raw) -> int:
@@ -202,7 +272,8 @@ class FaceScheduler(scanSched.ScanScheduler):
         让 HTTP 请求具备改写源文件的能力不该由设计买单。
         """
         allowed = ("workers", "modelPack", "minDetScore", "minFaceEdge",
-                   "maxYaw", "detSize", "wantCrop", "replaceFaces")
+                   "adaptiveMinEdge", "maxYaw", "detSize", "wantCrop",
+                   "replaceFaces")
         clean = dict((k, v) for k, v in kwargs.items()
                      if k in allowed and v is not None)
         with self._lock:
@@ -317,17 +388,27 @@ class FaceScheduler(scanSched.ScanScheduler):
             "modelPack": options.get("modelPack") or "buffalo_l",
             "minDetScore": float(options.get("minDetScore")
                                  or basicSettings.MIN_DET_SCORE),
-            "minFaceEdge": int(options.get("minFaceEdge")
-                               or basicSettings.MIN_FACE_EDGE),
+            # ⚠️ minFaceEdge **只在用户真的覆盖过时**才传：不传 = None =
+            #    "按图自适应"（1280x960 -> 48px，见 engine.effectiveMinFaceEdge）。
+            #    这里若顺手写 int(options.get(...) or MIN_FACE_EDGE)，
+            #    等于每次都给一个显式 64，自适应被静默关掉，老照片照旧认不出。
             "maxYaw": int(options.get("maxYaw") or basicSettings.MAX_YAW),
             "wantCrop": True,
             # 丢弃明细默认回传（pool.DEFAULT_ENGINE_KWARGS 已为 True）；
             # 不覆盖：收集是常开的，开关只控制"要不要打印"
             "reportRejected": True,
         }
+        edge = options.get("minFaceEdge")
+        if edge:
+            kwargs["minFaceEdge"] = int(edge)
         detSize = int(options.get("detSize") or 0)
         if detSize > 0:
             kwargs["detSize"] = (detSize, detSize)
+        # 短边自适应：不显式覆盖就跟随 basicSettings（None 不写进 kwargs，
+        # 见 engine.FaceEngine.adaptiveMinEdge 的三态语义）
+        adaptive = options.get("adaptiveMinEdge")
+        if adaptive is not None:
+            kwargs["adaptiveMinEdge"] = bool(adaptive)
         return kwargs
 
     def engineKwargs(self) -> dict:
@@ -457,6 +538,16 @@ class FaceScheduler(scanSched.ScanScheduler):
             if fatal:
                 raise RuntimeError(fatal)
 
+            # ---- 桶口径兜底（DR-61）----
+            # ⚠️ 放在 fatal 之后：整池失败时脸都没写进去，刷桶只会白跑一遍。
+            # ⚠️ 短路的判据是 faceRows > 0：本批一张脸都没落库 = 没有任何一行
+            #    的 shotBucket 可能被这一批改过（照片计数补丁不碰桶），
+            #    此时再对上千张照片各查两次库纯属浪费。
+            sealStat = {"photos": 0, "faces": 0, "changed": 0, "written": 0,
+                        "persons": 0, "failed": 0, "skipped": True, "errMsg": ""}
+            if int(store.get("faceRows") or 0) > 0:
+                sealStat = sealBuckets(out.get("touchedPhotos") or [])
+
             # ---- 落进度（一次事务，且**在置状态之前**）----
             # 顺序很关键：先记账再改状态。反过来的话，进程在两步之间被杀，
             # 库里的照片已是 scanState=1（提取过了）而 processedCount 没涨，
@@ -502,6 +593,16 @@ class FaceScheduler(scanSched.ScanScheduler):
                          "dropped": poolSummary.get("dropped") or {},
                          "failures": poolSummary.get("failures") or [],
                          "engineInfo": poolSummary.get("engineInfo") or {}},
+                # 桶口径兜底的实绩（DR-61）：改了 N 张脸的桶键、重算了 M 人。
+                # 正常情况下它是 0（新脸都是未归属，占位桶就是它的正确桶）；
+                # 一旦不为 0，就说明**确实有脸的身份/年代口径刚被对齐**。
+                "seal": {"photos": int(sealStat.get("photos") or 0),
+                         "changed": int(sealStat.get("changed") or 0),
+                         "written": int(sealStat.get("written") or 0),
+                         "persons": int(sealStat.get("persons") or 0),
+                         "failed": int(sealStat.get("failed") or 0),
+                         "skipped": bool(sealStat.get("skipped")),
+                         "errMsg": str(sealStat.get("errMsg") or "")},
                 "elapsed": elapsed,
             }
             _LOG.info("faceBatch %s: %d 张（有人脸 %d / 无人脸 %d / 失败 %d）"

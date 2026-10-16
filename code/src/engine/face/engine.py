@@ -31,10 +31,20 @@
 #
 # 质量过滤（提取阶段做掉，**丢弃不入库**）
 # ----------------------------------------
-#   detScore < MIN_DET_SCORE(0.6) / 人脸框短边 < MIN_FACE_EDGE(64px) / |poseYaw| > MAX_YAW(45°)
+#   detScore < MIN_DET_SCORE(0.6) / 人脸框短边 < 生效门槛 / |poseYaw| > MAX_YAW(45°)
 #   阈值全部来自 config/basicSettings，与 S0 脚本逐字对齐 —— 否则步骤 5 的统计
 #   与 S0 的统计就不是同一个口径，验收第 1 条（±2%）没有意义。
 #   丢弃原因码与 S0 完全一致：decode_fail / no_face / low_det / too_small / side_face / zero_vec
+#
+# 短边门槛 = MIN_FACE_EDGE，**但按图自适应**（R17，见 effectiveMinFaceEdge）
+#   ------------------------------------------------------------------
+#   64px 是照 12MP 图定的绝对值，在 1280x960 的老照片上会把 46~63px 的**可用脸**
+#   全部丢掉（实测那批脸与已确认样本相似度 0.83~0.93，本该自动归属）。
+#   所以改成"只对小图放宽"：1280x960 -> 48px，大图（>=1280 短边）仍是 64px。
+#   ⚠️ 三处判定**必须**调同一个函数：两个后端的 detect（阶段 1）与 filterAndRank。
+#      任何一处自己写裸比较，就会出现"检测阶段留下的脸在排序阶段被丢"这类不一致。
+#   ⚠️ 显式传 minFaceEdge（S0 复现 / --min-edge / API）时它仍是**上限**，
+#      adaptiveMinEdge=False 可整条关掉 —— backtest_s0 必须关，否则 S0 口径漂移。
 #
 # ⚠️ pose 缺失时**保留**该脸（与 S0 一致）
 #    S0 脚本是 `if pose is not None and len(pose) >= 3` 才过滤，pose 取不到就放过。
@@ -305,6 +315,61 @@ class FaceHit(object):
 # 四、质量过滤与排序
 # ============================================================
 
+def effectiveMinFaceEdge(imgW: int, imgH: int, minFaceEdge: int = None,
+                         adaptive: bool = None) -> int:
+    """**本模块唯一**的「人脸框短边门槛」口径：按图片尺寸自适应后的像素值。
+
+    规则（两条，互斥）
+    ------------------
+      ① **显式给了 minFaceEdge** -> 原样返回，就是固定绝对值。
+         不放宽、也不收紧：用户/脚本明说的数字必须一比一执行
+         （`--min-edge 200` 就是 200，`--min-edge 20` 就是 20）。
+         S0 复现（backtest_s0）走的就是这条路：minFaceEdge=64 + adaptive=False。
+      ② **没给**（None，缺省路径）-> 自适应：
+         effective = clamp(min(MIN_FACE_EDGE, 图片短边 x MIN_FACE_EDGE_RATIO),
+                           MIN_FACE_EDGE_FLOOR, MIN_FACE_EDGE)
+
+         1280x960  ->  min(64, 38) = 38
+         800x600   ->  min(64, 24) = 24  ->  下限 32
+         3456x2304 ->  min(64, 138) = 64   （与自适应前**逐字一致**）
+         边界在**短边 1600**（= 64 / 0.04）：短边 >= 1600 一律 64px；
+         1440x1080 这类 4MP 老照片属于放宽档（1080 短边 -> 43px）。
+
+    ⚠️ 为什么①要先于②：如果把显式值当"上限"再按比例放宽，`--min-edge 200`
+       在 1280x960 上会变成 48 —— 用户想**更严**，系统却给了**更松**，
+       而且不报错。宁可"显式值关掉自适应"（用户明说了就以他为准），
+       也不要做这种反向放宽。
+
+    参数
+    ----
+      minFaceEdge : 显式覆盖值（API / --min-edge）。None = 走自适应。
+      adaptive    : None = 取 basicSettings.MIN_FACE_EDGE_ADAPTIVE；
+                    False = 整条关掉（自适应路径退化为固定 MIN_FACE_EDGE）。
+
+    为什么门槛必须是"像素"而不是"占比"，又必须跟着图变
+    --------------------------------------------------
+      ArcFace 的输入是 face_align 把脸框仿射到 112x112，**判别力取决于脸框本身的
+      像素数**（50px 的脸也能对齐，只是细节少）。而"多少像素算够"与整图尺寸无关：
+      1280x960 的 50px 脸和 4000x3000 的 50px 脸，特征质量是同一档。
+      ⇒ 用一个固定的绝对像素值去卡不同年代的照片，必然要么漏老照片的可用脸、
+        要么放过大图的噪声脸。按短边取比例，等于"人脸至少要占画面短边的 5%"。
+    """
+    # ① 显式值 = 固定绝对值（见上面 ⚠️：绝不做"反向放宽"）
+    if minFaceEdge is not None:
+        return int(minFaceEdge)
+    edge0 = int(basicSettings.MIN_FACE_EDGE)
+    if adaptive is None:
+        adaptive = bool(basicSettings.MIN_FACE_EDGE_ADAPTIVE)
+    if not adaptive:
+        return edge0
+    short = min(int(imgW or 0), int(imgH or 0))
+    if short <= 0:
+        return edge0
+    scaled = int(round(short * float(basicSettings.MIN_FACE_EDGE_RATIO)))
+    floor = int(basicSettings.MIN_FACE_EDGE_FLOOR)
+    return max(min(edge0, scaled), min(floor, edge0))
+
+
 def scoreQuality(detScore: float, shortEdge: int, minFaceEdge: int = None) -> float:
     """综合质量分 = detScore × 尺寸系数，落在 0~1。
 
@@ -361,7 +426,7 @@ def clampNormBBox(bbox) -> tuple:
 
 def filterAndRank(rawFaces: list, imgW: int, imgH: int,
                   minDetScore: float = None, minFaceEdge: int = None,
-                  maxYaw: float = None) -> tuple:
+                  maxYaw: float = None, adaptiveMinEdge: bool = None) -> tuple:
     """质量过滤 + 主脸判定 + 排序。返回 (合格 FaceHit 列表, 丢弃原因统计 dict)。
 
     rawFaces
@@ -372,9 +437,14 @@ def filterAndRank(rawFaces: list, imgW: int, imgH: int,
     过滤
     ----
       detScore < minDetScore        -> low_det
-      短边 < minFaceEdge            -> too_small   （短边 = min(x2-x1, y2-y1)，像素）
+      短边 < 生效门槛               -> too_small   （短边 = min(x2-x1, y2-y1)，像素）
       |poseYaw| > maxYaw            -> side_face   （pose 为 None 时不过滤，见模块头说明）
       embedding L2 范数 < 1e-9      -> zero_vec
+
+    生效门槛 = effectiveMinFaceEdge(imgW, imgH, minFaceEdge, adaptiveMinEdge)
+      —— minFaceEdge 为 None 时按图自适应（1280x960 -> 48px），
+      显式给了就原样用（固定值）。它同时决定 quality 的尺寸系数基准，
+      这样"刚过线的小脸 quality 落在候选队列后面"这条语义不变。
 
     排序
     ----
@@ -391,12 +461,16 @@ def filterAndRank(rawFaces: list, imgW: int, imgH: int,
     """
     if minDetScore is None:
         minDetScore = basicSettings.MIN_DET_SCORE
-    if minFaceEdge is None:
-        minFaceEdge = basicSettings.MIN_FACE_EDGE
     if maxYaw is None:
         maxYaw = basicSettings.MAX_YAW
+    # ⚠️ minFaceEdge 这里**不能**先解析成 basicSettings.MIN_FACE_EDGE：
+    #    None 是"允许按图自适应"的信号，提前填成 64 等于把自适应整个关掉
+    #    （而且是静默的：函数照跑，只是老照片继续被丢）。
     w = max(1, int(imgW))
     h = max(1, int(imgH))
+    # 短边门槛按图自适应（大图恒等于 minFaceEdge，见 effectiveMinFaceEdge）。
+    # 覆盖 minFaceEdge 本身：下面 ② 与 scoreQuality 都读它 ⇒ 口径只有一处。
+    minFaceEdge = effectiveMinFaceEdge(w, h, minFaceEdge, adaptiveMinEdge)
     rejected = dict((code, 0) for code in REASON_CODES)
 
     kept = []
@@ -468,17 +542,32 @@ def filterAndRank(rawFaces: list, imgW: int, imgH: int,
 # ============================================================
 
 class _Limits(object):
-    """三个质量阈值（构造时把 None 解析成 basicSettings 的缺省值）"""
+    """三个质量阈值（构造时把 None 解析成 basicSettings 的缺省值）+ 短边自适应开关。
 
-    __slots__ = ("minDetScore", "minFaceEdge", "maxYaw")
+    edgeFor(w, h) 是两个后端的**唯一**短边判据来源（与 filterAndRank 同一个函数），
+    别在 detect 里写裸比较 —— 那正是"检测阶段留下了、排序阶段又丢掉"的来源。
+    """
 
-    def __init__(self, minDetScore=None, minFaceEdge=None, maxYaw=None):
+    __slots__ = ("minDetScore", "minFaceEdge", "maxYaw", "adaptiveMinEdge")
+
+    def __init__(self, minDetScore=None, minFaceEdge=None, maxYaw=None,
+                 adaptiveMinEdge=None):
         self.minDetScore = (basicSettings.MIN_DET_SCORE if minDetScore is None
                             else float(minDetScore))
-        self.minFaceEdge = (basicSettings.MIN_FACE_EDGE if minFaceEdge is None
-                            else int(minFaceEdge))
+        #: ⚠️ **保留 None**：None = 走按图自适应（effectiveMinFaceEdge 的②），
+        #:    显式值 = 固定绝对值（①）。别在这里填 basicSettings 的默认 64 ——
+        #:    那会把自适应静默关掉（见 effectiveMinFaceEdge 的说明）。
+        self.minFaceEdge = None if minFaceEdge is None else int(minFaceEdge)
         self.maxYaw = (float(basicSettings.MAX_YAW) if maxYaw is None
                        else float(maxYaw))
+        #: None = 跟随 basicSettings.MIN_FACE_EDGE_ADAPTIVE；False = 固定绝对值
+        self.adaptiveMinEdge = (None if adaptiveMinEdge is None
+                                else bool(adaptiveMinEdge))
+
+    def edgeFor(self, imgW: int, imgH: int) -> int:
+        """这张图的生效短边门槛（px）"""
+        return effectiveMinFaceEdge(imgW, imgH, self.minFaceEdge,
+                                    self.adaptiveMinEdge)
 
 
 class _FaceHolder(object):
@@ -540,7 +629,7 @@ class _InsightFaceBackend(object):
     def __init__(self, modelPack: str = DEFAULT_MODEL_PACK,
                  detSize: tuple = DEFAULT_DET_SIZE, modelRoot: str = None,
                  minDetScore: float = None, minFaceEdge: int = None,
-                 maxYaw: float = None):
+                 maxYaw: float = None, adaptiveMinEdge: bool = None):
         from insightface.app import FaceAnalysis
         kwargs = {"name": modelPack, "providers": list(CPU_PROVIDERS),
                   "allowed_modules": list(self.ALLOWED_MODULES)}
@@ -558,7 +647,7 @@ class _InsightFaceBackend(object):
         self.modelPack = modelPack
         #: 实际加载到的模型名（诊断用：一眼看出 pose 能不能用）
         self.loadedModules = tuple(sorted(self.app.models.keys()))
-        self.limits = _Limits(minDetScore, minFaceEdge, maxYaw)
+        self.limits = _Limits(minDetScore, minFaceEdge, maxYaw, adaptiveMinEdge)
         self.reportRejected = False
         self.det = self.app.models.get("detection")
         self.rec = self.app.models.get("recognition")
@@ -580,6 +669,8 @@ class _InsightFaceBackend(object):
         """
         pre = dict((code, 0) for code in REASON_CODES)
         det, kpss = self.det.detect(img)
+        # 短边门槛按图自适应（与 filterAndRank 同一函数）。img 是原图 (h, w, c)
+        edge = self.limits.edgeFor(img.shape[1], img.shape[0])
         out = []
         dropped = []            # reportRejected=True 时带上被丢弃的脸（无 embedding）
         for index in range(det.shape[0]):
@@ -600,7 +691,7 @@ class _InsightFaceBackend(object):
             if detScore < self.limits.minDetScore:
                 _drop(REASON_LOW_DET)
                 continue
-            if shortEdge < self.limits.minFaceEdge:
+            if shortEdge < edge:
                 _drop(REASON_TOO_SMALL)
                 continue
             # ---- 阶段 2：姿态（侧脸）----
@@ -747,7 +838,7 @@ class _RawOnnxBackend(object):
     def __init__(self, modelRoot: str = None, detSize: tuple = DEFAULT_DET_SIZE,
                  meanShapePath: str = None, minDetScore: float = None,
                  minFaceEdge: int = None, maxYaw: float = None,
-                 modelPack: str = None):
+                 modelPack: str = None, adaptiveMinEdge: bool = None):
         import onnxruntime as ort
 
         # ⚠️ 本后端要的是**包目录**（含三个 onnx）；而 FaceEngine 统一传下来的
@@ -776,7 +867,7 @@ class _RawOnnxBackend(object):
         # 0.5~0.6 区间里「刚好够 64px 但不够清晰」的脸，而那正是质量过滤要拦的对象
         self.detThresh = 0.5
         self.nmsThresh = 0.4
-        self.limits = _Limits(minDetScore, minFaceEdge, maxYaw)
+        self.limits = _Limits(minDetScore, minFaceEdge, maxYaw, adaptiveMinEdge)
         self.reportRejected = False
         # ---- 姿态（可选）----
         self.pose = None
@@ -985,6 +1076,8 @@ class _RawOnnxBackend(object):
         """
         pre = dict((code, 0) for code in REASON_CODES)
         det, kpss = self._detect(img)
+        # 短边门槛按图自适应（与 filterAndRank 同一函数）。img 是原图 (h, w, c)
+        edge = self.limits.edgeFor(img.shape[1], img.shape[0])
         if det.shape[0] == 0:
             pre[REASON_NO_FACE] += 1
             pre["__raw__"] = 0
@@ -1010,7 +1103,7 @@ class _RawOnnxBackend(object):
             if detScore < self.limits.minDetScore:
                 _drop(REASON_LOW_DET)
                 continue
-            if shortEdge < self.limits.minFaceEdge:
+            if shortEdge < edge:
                 _drop(REASON_TOO_SMALL)
                 continue
             # ---- 阶段 2：姿态（侧脸）----
@@ -1327,7 +1420,7 @@ class FaceEngine(object):
     def __init__(self, modelPack: str = DEFAULT_MODEL_PACK,
                  detSize: tuple = DEFAULT_DET_SIZE,
                  minDetScore: float = None, minFaceEdge: int = None,
-                 maxYaw: float = None,
+                 maxYaw: float = None, adaptiveMinEdge: bool = None,
                  wantCrop: bool = True, cropSize: int = None,
                  cropSquare: bool = None, cropQuality: int = None,
                  backend: str = "auto", modelRoot: str = None,
@@ -1336,8 +1429,16 @@ class FaceEngine(object):
                             else float(minDetScore))
         self.minFaceEdge = (basicSettings.MIN_FACE_EDGE if minFaceEdge is None
                             else int(minFaceEdge))
+        #: 原始入参（None = 允许按图自适应）。**必须原样传给下层**：
+        #: 一旦在这里填成 64，filterAndRank 与两个后端都会认为"用户明说了 64"，
+        #: 自适应彻底失效，而且不报错。
+        self.minFaceEdgeArg = None if minFaceEdge is None else int(minFaceEdge)
         self.maxYaw = (float(basicSettings.MAX_YAW) if maxYaw is None
                        else float(maxYaw))
+        #: None = 跟随 basicSettings.MIN_FACE_EDGE_ADAPTIVE；
+        #: False = 固定绝对值（S0 复现口径、命令行 --no-adaptive-edge）
+        self.adaptiveMinEdge = (None if adaptiveMinEdge is None
+                                else bool(adaptiveMinEdge))
         self.wantCrop = bool(wantCrop)
         self.cropSize = int(cropSize or basicSettings.FACE_CROP_SIZE)
         self.cropSquare = (bool(basicSettings.FACE_CROP_SQUARE) if cropSquare is None
@@ -1352,7 +1453,8 @@ class FaceEngine(object):
         self.backendTrace = ""
         self.loadError = ""
         chosen = (backend or "auto").lower()
-        limits = (self.minDetScore, self.minFaceEdge, self.maxYaw)
+        limits = (self.minDetScore, self.minFaceEdgeArg, self.maxYaw,
+                  self.adaptiveMinEdge)
         # ---- 模型根：**只在这里解析一次**，再分发给两个后端（R10）----
         #
         # 为什么必须在这里解析而不是各后端自己解析：
@@ -1370,7 +1472,8 @@ class FaceEngine(object):
                                                     modelRoot=baseRoot,
                                                     minDetScore=limits[0],
                                                     minFaceEdge=limits[1],
-                                                    maxYaw=limits[2])
+                                                    maxYaw=limits[2],
+                                                    adaptiveMinEdge=limits[3])
                 self.backendName = self._backend.name
             except Exception as e:
                 import traceback
@@ -1389,7 +1492,8 @@ class FaceEngine(object):
                                             minDetScore=limits[0],
                                             minFaceEdge=limits[1],
                                             maxYaw=limits[2],
-                                            modelPack=self.modelPack)
+                                            modelPack=self.modelPack,
+                                            adaptiveMinEdge=limits[3])
             self.backendName = self._backend.name
         self.modelRoot = getattr(self._backend, "root", "")
         # reportRejected：把**被丢弃的人脸**也一并回传（只有 detScore/短边/yaw，
@@ -1414,6 +1518,12 @@ class FaceEngine(object):
             "detSize": self.detSize,
             "minDetScore": self.minDetScore,
             "minFaceEdge": self.minFaceEdge,
+            #: 自适应是否生效（True/False）+ 实际规则，诊断"为什么这张收进来了"用
+            "adaptiveMinEdge": (bool(basicSettings.MIN_FACE_EDGE_ADAPTIVE)
+                                if self.adaptiveMinEdge is None
+                                else bool(self.adaptiveMinEdge)),
+            "minFaceEdgeRatio": float(basicSettings.MIN_FACE_EDGE_RATIO),
+            "minFaceEdgeFloor": int(basicSettings.MIN_FACE_EDGE_FLOOR),
             "maxYaw": self.maxYaw,
             "embeddingDim": EMBEDDING_DIM,
             "embeddingBytes": EMBEDDING_BYTES,
@@ -1486,8 +1596,8 @@ class FaceEngine(object):
 
         hits, rejected = filterAndRank(
             rawFaces, result["imgW"], result["imgH"],
-            minDetScore=self.minDetScore, minFaceEdge=self.minFaceEdge,
-            maxYaw=self.maxYaw)
+            minDetScore=self.minDetScore, minFaceEdge=self.minFaceEdgeArg,
+            maxYaw=self.maxYaw, adaptiveMinEdge=self.adaptiveMinEdge)
         # 后端已分阶段拦掉的不重复计数（filterAndRank 对存活者再判一次，幂等）。
         # ⚠️ no_face 例外：后端与 filterAndRank 都会报「这张图一张脸都没有」，
         #    相加会把 7 张无脸照片报成 15 张。这类"同一件事被两处各数一遍"

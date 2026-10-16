@@ -8,19 +8,25 @@
 
 ---
 
-## 当前状态（2026-10-11）
+## 当前状态（2026-10-16）
 
 | 部分 | 范围 | 状态 |
 |---|---|---|
-| 第一部分 | 修正步骤 R 系列（R / R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 / R9 / R10 / R11 / R12 / R13 / R14） | 15 项已完成；**待做 1 项：R10（打包分发）** |
+| 第一部分 | 修正步骤 R 系列（R / R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 / R9 / R10 / R11 / R12 / R13 / R14 / R15 / R16） | **全部完成**（R16 文件夹浏览 2026-10-16 落地）；**暂无待做步骤** |
 | 第二部分 | 主线 12 步 | ✅ 全部完成（2026-10-07） |
 | 第三部分 | 附录 A/B/C | 状态表 / 输出格式 / **待办** |
 
-**下一步**：**只剩 R10（打包分发）** → M4 一周自测 → 补 R2 的验收证据。详见 **附录 C**。
+**下一步**：没有待做的开发步骤了 —— 回到 **M4 一周自测** 与 **清待确认队列**（详见 **附录 C**）。
 （R9 照片旋转、R11 年代抽样、R12 地点修正、R13 从行政区选地名、R14 单张人脸识别均已完成；R11 的规划见 `plan/年代抽样规划.md`；
 R12 的决策见 DR-52/53（**其中 `nameSource` 已按严格版落地** —— 见 R12 一节末尾的「✅ 落地补记（R12-D）」）；
 R13 的决策见 DR-54，规划见 `plan/开发计划.md` §五「修正步骤 R13」；
-R14 的决策见 DR-55，规划见 `plan/开发计划.md` §五「修正步骤 R14」）
+R14 的决策见 DR-55，规划见 `plan/开发计划.md` §五「修正步骤 R14」；
+**R15 = 年代档打包**（DR-56~58，规划见 `plan/年代档打包规划.md` 与 `plan/开发计划.md` §五「📦 年代档打包」）
+**已完成**，只在总纲与规划文件里登记，本节**没有**它的提示语正文；
+**R16 = 文件夹浏览**（DR-59~63，规划见 `plan/文件夹浏览规划.md`），提示语在本文件第一部分末尾）
+
+**版本口径（2026-10-16 用户确认）**：**本版本起打包版本号定为 `0.2.0`**
+（`code/webserver/package.json` / `build/package.ps1` 的 `-Version` 默认值 / `build/installer.iss` 的 `PbVer` 默认值 三处同步）。
 
 ---
 
@@ -44,6 +50,8 @@ R14 的决策见 DR-55，规划见 `plan/开发计划.md` §五「修正步骤 R
 - R12 · 地点修正（单张照片 + 地点显示名 + `nameSource` 严格版 · DR-52/53）
 - R13 · 从行政区选地名（候选三段 + 规范名当键并写 `nameZh` · DR-54）
 - R14 · 识别这张照片人脸（单张端点 + 只判这一张 + 重提取三件连带 · DR-55）
+- R15 · 年代档打包（人物详情按年代档全量打包 zip · DR-56~58）—— ⚠️ **本节没有提示语正文**，规划见 `plan/年代档打包规划.md`
+- **R16 · 文件夹浏览**（按目录逐级浏览 + 目录内左右翻页 + 就地识别 · DR-59~63）—— ✅ **已完成**（2026-10-16），规划与落地结果见 `plan/文件夹浏览规划.md`
 
 **二、主线 12 步（已完成留档）**
 
@@ -106,7 +114,10 @@ R14 的决策见 DR-55，规划见 `plan/开发计划.md` §五「修正步骤 R
 # 第一部分 · 修正步骤（R 系列）
 
 > 每一步**单独开一个新对话**执行；提示语在下面的 `text` 围栏里，整段复制。
-> 顺序无关的已在各节「什么时候做」里写明。**当前待做：R9**。
+> 顺序无关的已在各节「什么时候做」里写明。**当前待做：R16（文件夹浏览）**。
+> ⚠️ R10（打包分发）**已落地**（`dist\PhotoBrowser-Setup-0.1.0.exe` 与 `dist\photo-browser\` 均已产出，
+> 2026-10-13）—— 它的提示语保留在下面留档，**不要再跑一遍**；要改版本号走
+> `build\package.ps1 -Version 0.2.0`（本版本起默认就是 **0.2.0**）。
 
 ## 修正步骤 R · 返工修正步骤 1–6（纠错闭环 DR-16）
 
@@ -2414,7 +2425,7 @@ export function resetRotate(photoCode) { ... }
 
 ---
 
-## 修正步骤 R10 · 打包分发（Windows exe / 安装包）
+## 修正步骤 R10 · 打包分发（Windows exe / 安装包）—— ✅ 已完成（留档）
 
 > **什么时候做**：R9 之后。**只碰「进程模型 / 路径解析 / 配置读取」三件事，不动业务逻辑。**
 > **核心判断**：`--onedir` + Inno Setup，模型随包，配置外置，**卸载绝不删照片库**。
@@ -3275,6 +3286,225 @@ nameSource 优先级：手工(3) > 目录名(2) > 逆地理(1)；已有手工命
 ② 用户明确 **"单文件 ≤ 300 行放宽到 600 行"**（`placeFix.py` 358 行不再拆）。
 
 ---
+
+## 修正步骤 R16 · 文件夹浏览（按目录逐级浏览 + 目录内左右翻页 · DR-59~63）—— ✅ 已完成（2026-10-16，提示语留档）
+
+> **什么时候做**：随时。**与 R10（打包）互不相干** —— 本步纯只读，不碰 `photo/`、不写任何业务表。
+> **形态已定**（用户四问四答）：入口名 **「文件夹」**、**单页双侧栏**、**仅当前目录直属照片**、**不显示空目录**。
+> **完整规划见 `plan/文件夹浏览规划.md`**（口径逐字、端点、scope 编码、性能、验收 20 条），
+> **需求③的产物见 `plan/人脸漏识别研判.md`**。
+> **核心判断**：本功能的**唯一真风险是目录键口径**（一处漂移就变成"树说 45 张、网格说 44 张"，
+> 而两处各自看都对），所以那个表达式必须**只写一份**、逐例验证。
+
+````text
+【photo-browser · 修正步骤 R16 · 文件夹浏览】
+
+## 目标
+① 侧栏在「地点」**之后**新增一级导航 **「文件夹」**（`/folders`），**不加 badge**
+② **单页双侧栏**：左目录树 + 右图片网格，同一页完成「逐级下钻 + 看图」，切换目录不跳页
+③ 目录树**只显示库内有照片的目录**（由 `pb_photo.relPath` 派生）；每项显示**直属**张数
+④ 右侧只显示**当前目录直属**的照片（子目录在左侧单独下钻）
+⑤ 点图进入既有照片详情，**在该目录范围内**左右箭头与键盘 `←/→` 连续翻看
+   （显示「第 N / 共 M」，M = 该目录张数；到首尾置灰不循环；返回回到原来那个目录）
+⑥ 照片详情页的「识别这张照片人脸」（DR-55 / R14）**原样可用** —— 本步**零新增识别入口**
+⑦ **不新增表、不新增列、不需要迁移、不写任何业务表、不落 `pb_review_log`**
+
+## 前置（已核实，请自己再确认一遍）
+- 步骤 1–12、R2~R15 均已完成（**R10 打包也已落地**：`dist\PhotoBrowser-Setup-0.1.0.exe`）
+- `code/src/api/browse.py` 的 `/api/photos` 已支持 `personCode/personCodes/mode/shotYearFrom/
+  shotYearTo/placeName/hasFace/isDuplicate/isMissing/keyword/orderBy/desc/anchorPhotoCode`
+- `code/webserver/src/utils/photoReturn.js` 的 `SCOPE_TYPES`（L53）当前是 `['person','place']`
+- `code/webserver/src/views/PhotoDetailView.vue` 的 `loadScopePage`（L876-913）已实现
+  「首屏锚点定位 + 窗口按需生长」，且 `gotoOffset`（L1108-1140）用 `route.query` **原样透传**
+- 测试基线：`pytest code/src/test -q` = **1534 passed / 2 skipped / 1 xfailed**
+  （⚠️ 本机缺 `shapely` 时地点命名相关用例会报错，属既有现象，与本次改动无关）
+
+## 必须先读的项目文档
+- `plan/文件夹浏览规划.md` —— **本步的完整口径，尤其第三节（目录键）与第七节（性能）**
+- `plan/开发计划.md` §四 **DR-59 ~ DR-63** 与 §五「📁 文件夹浏览」
+- `plan/UI/photo-browser UI 设计.md` §4.10（P-11 ASCII）、§6.2 流程十
+- `plan/人脸漏识别研判.md` —— 需求③的结论（本步**不改**其中任何一条，只是它顺带产出了）
+
+## 实测事实（我已查过，可复核）
+- `pb_photo` 现有 **6 个索引**：`photoCode`(UNIQUE) / `relPathHash`(UNIQUE) / `fileHash` /
+  `shotYear` / `scanState` / `movedToPhotoCode` ⇒ **`relPath` 上没有索引**，
+  而目录键是列上的函数 ⇒ **有索引也用不上**，所以树端点必须**一次聚合**而不是逐层查询
+- `database/queryCommon.py` 的 `_SQL_FUNCTIONS`（L139-149）是**手写枚举**：
+  `COUNT SUM AVG MIN MAX TOTAL GROUP_CONCAT LENGTH SUBSTR TRIM UPPER LOWER ROUND ABS IF NULLIF`
+  ⇒ **`RTRIM` / `REPLACE` 都不在其中**（见下面 **§1.2**）
+- `api/request.js` 的 `paramsSerializer`（L47-56）**主动丢弃** `undefined` / `null` / `''`
+  ⇒ 传 `dirPath=''` 时**参数根本不会发出**（见下面 **§4.1**）
+
+---
+
+## 一、目录键口径（**本步唯一的真风险点**）
+
+### 1.1 新增 `code/src/processor/album/dirPath.py`（两套等价实现，只此一处）
+
+```python
+def dirKeySql(alias: str) -> str:
+    """目录键的 SQL 表达式。返回：目录路径（不带尾斜杠）或空串（= 根目录）。"""
+    # rtrim(rtrim(relPath, replace(relPath, '/', '')), '/')
+
+def dirKeyOf(relPath: str) -> str:
+    """目录键的 Python 实现；**必须与 dirKeySql 逐字等价**。"""
+```
+
+**逐例验证（必须实测，不要只写代码）**：根目录文件（`abc.jpg` → 空串）、多级（`a/b/c.jpg` → `a/b`）、
+含空格与中文（`2013.07.26 华盛顿/DSC_1.jpg` → `2013.07.26 华盛顿`）、含下划线、
+无扩展名、以及**库里真实存在的一批 `relPath`**。SQL 侧与 Python 侧结果**逐字相同**。
+
+> 原理：第一次 `rtrim` 的 Y 是「这条路径里所有非斜杠字符」的集合，而要从右侧裁掉的
+> 恰好是最后一段（它的字符全都属于 Y）⇒ 它**必然停在最后一个 `/` 处**；
+> 没有 `/` 时全部裁掉，正好得到根目录的空串。
+
+### 1.2 ⚠️ 必须把 `RTRIM` / `REPLACE` 登记进 `queryCommon._SQL_FUNCTIONS`
+
+不登记则 `checkColumns()` 把 `rtrim` / `replace` 判成「未知标识符」并抛 `QuerySqlError`，
+**整条查询当场报错**，而报错原文只说「未知标识符 RTRIM」—— 与本业务毫无字面关联。
+这与 R4b 补 `NULLIF`（同文件 L142-148 留了注释）**是同一个坑**，照那个写法补两项 + 一行注释。
+⚠️ `queryCommon.py` 是**手写的只读出口**（不是 `auto_generated/` 产物），改它合规；
+但**这是本步唯一要动的非本功能文件**，改前先确认没有别处依赖同名函数。
+
+### 1.3 **严禁** `LIKE 'dir/%'`
+① 会把子目录照片一并捞出（违反"仅直属"口径）；② 目录名里的 `%` / `_` 在 LIKE 下是**通配符**，
+用户目录名带下划线（实测有 `2016_05_01_三亚` 这类）会**静默多报**。
+一律用 `dirKeySql(p) = %s` 等值比较。
+
+## 二、后端
+
+### 2.1 新增 `code/src/api/album.py`（`GET /api/albums/path`）
+- 一次聚合：`SELECT <dirKey> AS dirKey, COUNT(*) AS cnt FROM pb_photo WHERE delFlag = %s GROUP BY dirKey`
+  （`delFlag` 走参数绑定）。⚠️ `GROUP BY` 用**别名**是可行的（`checkColumns` 先抽别名再放行，
+  `browse.py` 的 `_yearMonthIndex` 是既有先例）；若被拦下，改为在 `GROUP BY` 写表达式本身。
+- 在 Python 里一次性组装树：为每个目录键补齐**各级祖先**，逐层累计；请求内部**不再二次查库**。
+- 返回：`{ok, path, breadcrumb:[{name,path,count}], dirs:[{name,path,count,hasChildren}],
+  directCount, photoTotal, note?}`。
+- ⚠️ `dirs[].count` 是**直属**张数（不是递归），界面上要写清。
+- ⚠️ 面包屑首段用**中性词**（「照片库」之类），**不要把磁盘绝对路径写进契约**。
+- ⚠️ 端点**只读**：不写业务表、不落 `pb_review_log`、不触发 `rebuildPlaces`。
+
+### 2.2 `browse.py` 的 `listPhotos` 增加 `dirPath`（**只加一个入参 + 一个 WHERE 片段**）
+```python
+if dirPath is not None:                       # ⚠️ 判 `is not None`，不是真值判断
+    where.append(dirKeySql("p") + " = %s")
+    values.append("" if dirPath == ALBUM_ROOT_TOKEN else str(dirPath))
+```
+- 语义与 `placeName` 同为**精确匹配**。
+- 筛选条件会被 `anchorOffsetOf(cond, values, …)` 自动带上 ⇒ **后端锚点代码零改动**
+  （「排序键为 NULL 时照样定位」已在 `browse.py` L613-648 处理好）。
+- ⚠️ **不要顺手重构这个文件的其它查询**。
+
+### 2.3 `main/app.py` 加 import + 一行 `include_router(albumApi.router, prefix="/api")`
+
+## 三、前端
+
+### 3.1 四处接线（缺一处就是静默少东西）
+| 文件 | 改什么 |
+|---|---|
+| `router/index.js` | `NAV_ITEMS` 在「地点」**之后**插 `{name:'folders', path:'/folders', label:'文件夹', icon:'FolderTree', **无 badge**}`；`routes` 加 `/folders`（`meta.crumbs` **只写 `['文件夹']`**） |
+| `AppSidebar.vue` | `ICONS`（L34）补 `FolderTree` + import。⚠️ **键名必须与 `NAV_ITEMS[].icon` 逐字一致**，写错时页面**什么都不报、只是少一个图标** |
+| `views/FoldersView.vue` | **新建**：单页双侧栏（左树 260px + 右网格）；网格复用 `PhotoThumb`，断点复用 `grid-cols-2 md:grid-cols-4 lg:grid-cols-5` |
+| `components/common/FolderTree.vue` | **新建**：节点 = 按钮语义（可聚焦、回车展开/进入），当前项用「底纹 + 加粗 + 图标」多重编码 |
+
+### 3.2 `api/album.js`
+`listAlbumPath(params)` 薄封装 + **导出保留 token 常量** + 目录名**数字感知排序**函数（**只此一处**）。
+排序口径：名称切成「数字段 / 非数字段」序列逐段比较，数字段按数值、其余按字符串；
+无数字前缀时**退化为普通字符串比较**。（本项目目录名大量以日期开头，纯字符串比较会把 `2013.10.01`
+排在 `2013.7.1` 前面。）
+
+### 3.3 状态与失败态（照既有做法，不发明新口径）
+- 树端点失败：右区给**可重试**说明，**不允许**静默变成「空目录」
+  （对照 `PhotoDetailView.scopeFailed` 的既有做法）
+- 目录无直属但有子目录：「这个目录没有直属图片，左侧有 **N** 个子目录」（**给出 N**）
+- 全库无照片：「先去『扫描任务』页开始扫描」+ 给入口
+- 缩略图 404 / 422：由 `PhotoThumb` 自带占位处理，本页不重复兜
+
+## 四、目录内左右翻页（**复用既有 scope，不另造机制**）
+
+### 4.1 ⚠️ 根目录**必须**用保留 token，不能靠"不传参数"
+两个会**静默丢作用域**的地方（都会让用户「进了根目录、翻页却翻到全库」且不报错）：
+- `api/request.js` L47-56 的 `paramsSerializer` **丢弃空串** ⇒ `dirPath=''` **参数不会发出**
+  ⇒ 后端收到 `None` ⇒ 变成"不筛选" ⇒ **返回全库照片**
+- `photoReturn.js` 的 `scopeParam()`（L106-112）在 `code` 为空时**返回空串**、
+  `parseScope()`（L125）在 `!code` 时**返回 null** ⇒ 作用域消失 ⇒ 沿全库翻页
+
+⇒ 三处（`/api/albums/path` 的 `path`、`/api/photos` 的 `dirPath`、scope 载荷）
+**共用同一个保留 token 常量**（建议 `__root__`，由 `dirPath.py` 导出、前端写在 `api/album.js`），
+**不得**同时存在 `""` 与 `"/"` 两种写法，也不许在两处各写一遍字面量。
+
+### 4.2 scope 载荷用 **base64url**
+```
+scope=dir:<base64url(相对照片库根的目录路径)>     根目录用保留 token
+```
+理由：目录名可能含 `:` 与 `@`（本约定的分隔符），且**百分号编码会被 vue-router 再解码一次**
+从而破坏分隔。base64url 字符集 `A-Za-z0-9-_` 两者都不含。
+
+### 4.3 只改这两个文件
+| 文件 | 改什么 |
+|---|---|
+| `utils/photoReturn.js` | `SCOPE_TYPES`（L53）补 `'dir'`；补一对 base64url 编解码函数 |
+| `views/PhotoDetailView.vue` | `loadScopePage`（L884-886）现在是 `spec.type === 'person' ? … : listPlacePhotos(…)` 的**二选一三元**，加第三种类型**必须改成三分支**（`if`/`switch`），新增分支 `listPhotos({...params, dirPath: token})` |
+
+**已经不用改的部分**（这是复用既有机制的收益，**不要**多此一举）：
+首屏锚点 `params.anchorPhotoCode`、`watch(scopeKey, …, {immediate:true})`、
+`gotoOffset` 的 `query` 原样透传、`ensureScopeWindow`、后端 `anchorOffsetOf`、返回链路
+（`goBackOr` / `photoReturnTarget`）—— 全部对新类型天然生效。
+
+## 五、验收清单（逐条实际运行，不要只写代码就宣称通过）
+
+**A. 口径**
+1. `dirKeySql` 与 `dirKeyOf` 对同一批真实 `relPath` **逐字相同**（含根目录 / 多级 /
+   含空格中文 / 含下划线 / 无扩展名）
+2. 取 5 个目录核对：树里的张数 == `/api/photos?dirPath=…` 的 `total`
+3. **反例**：目录名含 `_` 与 `%` 时，网格里**不出现**子目录照片、**不多报**任何一张
+4. **根目录**：返回的全部是**无斜杠**的 `relPath`，条数 == 直接放在 `photo/` 下的文件数
+
+**B. 端点**
+5. 不传 `path` = 根；传中间层 → 面包屑逐级正确、`dirs` 只有直接子目录、`directCount` 正确
+6. 软删照片（`delFlag='1'`）**不进**任何一层计数
+7. 空状态**两种都测**：库空 vs 某目录 0 张直属但有子目录
+8. OpenAPI 里没有 `export`、没有 `DELETE`（`test_api_smoke.test_openapiHasNoExportOrDelete` 绿）
+
+**C. 前端**
+9. 侧栏「文件夹」**在「地点」之后**、**无角标**；收窄到 72px 时**图标仍在**
+10. 逐级下钻 3 层、再逐级返回根；URL 与内容始终一致；**刷新后停在同一目录**
+11. 点开某多页目录的第 30 张 → 两个箭头可用、「第 N / 共 M」的分母是**该目录**张数、
+    首尾**置灰不循环**、键盘 `←/→` 生效
+12. **⭐ 锚点回归**：点开该目录里**排在第 2 页之后**的一张（例如日期很老的）→
+    两个箭头**都不禁用**（这是 `anchorPhotoCode` 在"目录筛选 + `takenAt DESC` + NULL 排序键"
+    下仍然定位成功的证据；漏了 `dirPath` 传参时这一条会立刻变红）
+13. 照片详情页「识别这张照片人脸」行为与照片流入口**完全一致**；识别中**翻页禁用**
+14. 返回回到**原来那个目录**；刷新详情页后 `scope` 仍在
+15. 空状态四种（见 3.3）逐条走一遍，**不留白屏、不静默**
+16. 浅色 / 深色两套主题都可用；当前项不只靠颜色区分
+17. `npm run build` + `check-style-order` + `check:avatar` 全绿
+
+**D. 只读与回归**
+18. 浏览一轮后：`pb_photo` / `pb_face` / `pb_photo_person` / `pb_person_centroid` /
+    `pb_review_log` 的**行数与指纹逐字不变**；`photo/` 的文件数与总字节数不变
+19. `pytest code/src/test -q` 全绿（含新增 `test_api_album.py`）
+20. 树端点耗时**实测**并写进 `plan/文件夹浏览规划.md` 第七节的表
+    （3.5 万行量级 / 10 万行量级两行，**不许留空、不许写"应该很快"**）
+
+## 六、硬约束
+- **纯派生视图**：不新增表 / 列、不迁移、不 rebuild、不落 `pb_review_log`（DR-60）
+- **`photo/` 零访问**：既不 `listdir` 也不 `stat`（DR-60/61）
+- **目录键只写一份**：树、网格、面包屑三处都调 `dirPath.py` 的两个函数，
+  **不许**各写一遍 `rtrim(...)` 或 `split('/')`
+- 不裸 SQL（只读走 `queryCommon`，等值走生成层 `sqliteCommon.query_pb_*`）
+- 不新增 `/export`、不暴露 `DELETE`
+- 一级导航项**不加 badge**
+- **不改 `AppTopbar`**、不改既有页面布局、不改 `pb_*.txt`、不改 `auto_generated/`
+
+## 七、完成后必须输出
+1. **改动文件清单**（新增 / 修改，逐个列路径）
+2. **验收结果**：上面 20 条逐条给"执行了什么 + 实际输出/数值"，
+   其中**第 1 / 3 / 12 / 20 条必须有具体数值或原样输出**
+3. **两条实测结论**：树端点耗时（3.5 万 / 10 万两行）、`GROUP BY` 别名是否被 `checkColumns` 拦下
+   （拦了就改写法并说明）
+4. **遗留问题**：尤其"磁盘上新增目录要扫描后才出现"这条是否需要更明显的界面提示
+````
 
 # 第二部分 · 主线 12 步（2026-10-07 全部完成）
 
@@ -4454,12 +4684,14 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 | --- | --- | --- | --- |
 | **R5** | **地点界面**（**地点 → 照片流** + 人物「去过的地方」区块 · DR-37/38） | — | ✅ 已完成（`api/place.py` 48KB / `PlacesView` / `PlaceDetailView` / `PersonPlaces` / `test_api_person_places.py`；路由 `/places` + `/places/:placeCode`、侧栏 `MapPin`、`PersonDetailView` L684「↓↓↓ R5：去过的地方 ↓↓↓」均已接线） |
 | **R9** | **照片旋转**（左右转 90° · 显示层 CSS + `rotateDeg` 字段 · DR-43） | — | ✅ 已完成（`processor/photoRotate.py` + `test_photo_rotate.py` + `pb_photo.rotateDeg` + `photoAction.rotate`） |
-| **R10** | **打包分发**（`--onedir` + Inno Setup；模型随包 / 配置外置 / 卸载不碰照片库 · DR-44） | — | ⬜ **待做（提示语已写）** |
+| **R10** | **打包分发**（`--onedir` + Inno Setup；模型随包 / 配置外置 / 卸载不碰照片库 · DR-44） | — | ✅ **已完成**（2026-10-13：`dist\PhotoBrowser-Setup-0.1.0.exe`（381 MB）+ `dist\photo-browser\` 均已产出；`build\{photo-browser.spec, installer.iss, package.ps1, README.md}`。⚠️ **本版本起版本号定为 `0.2.0`** —— `code/webserver/package.json` / `build/package.ps1` 的 `-Version` 默认值 / `build/installer.iss` 的 `PbVer` 默认值 三处同步） |
 | **R11** | **年代抽样**（每年抽一张 · DR-45~DR-51，拆 R11a/b/c） | — | ✅ 已完成（`engine/sample/eraSampler.py` / `api/eraSample.py` / `processor/media/eraPack.py` / `EraSamplePanel.vue`；库内 **9 个批次**，为第 11/12 张表） |
 | **R12** | **地点修正**（单张照片 `placeNameOverride` + 地点显示名 `nameZh`/`nameSource` · 改完自动 rebuild · DR-52/53） | — | ✅ **已完成**（2026-10-11：`pb_photo.placeNameOverride` + `pb_place.nameSource` + 聚合键三段优先 + `processor/place/placeFix.py` + `PlaceFixDialog.vue` / `PlaceRenameDialog.vue` + `test_place_fix.py`；`pytest code/src/test -q` = **1521 passed / 2 skipped / 1 xfailed**，`npm run build` + 双门禁通过）。⚠️ 未做：批量改地点（用户明确不做）；`nameSource` 严格版见 R12 一节末尾的「✅ 落地补记（R12-D）」 |
 | **R13** | **从行政区选地名**（候选三段：已有地点 / 行政区规范名 / 自由输入 · DR-54） | — | ✅ **已完成**（2026-10-12：`placeNameZh.datasetItems/canonicalDatasetName` + `GET /api/places/districts` + `placeStore.nameGroupKeys` + `placeFix` 的**项级**预览 + `components/common/PlaceNamePicker.vue`（A/B 共用）；`pytest code/src/test -q` = **1534 passed / 2 skipped / 1 xfailed**）。⚠️ 未做：拼音首字母过滤、地级市层级（数据源只有两级） |
 | **R14** | **识别这张照片人脸**（P-03「操作」面板的单张识别：`POST /api/facerec/extract-one` + 只判这一张 + 重提取三件连带 · DR-55） | — | ✅ **已完成**（2026-10-13：`api/face.py` 的单张端点与状态轮询 + `queue.loadPendingRows(photoCode=)` + `faceScheduler.engineKwargs()` + `PhotoDetailView.vue` 的四态弹窗；新建 `test/test_api_extract_one.py` **10 条**（引擎打桩）+ 相邻回归 **124 条**全绿；全量 `pytest src/test` = **1508 passed**，另 5 failed + 27 errors 全为地点命名相关（本机缺 `shapely`，与本步无关）；`npm run build` + 双门禁通过）。⚠️ 未做：在真实照片库上真跑一次识别（会改写 `pb_face`） |
+| **R16** | **文件夹浏览**（侧栏「文件夹」+ 单页双侧栏：按目录逐级浏览 + 目录内左右翻页 + 就地识别 · DR-59~63） | **M5** | ✅ **已完成**（2026-10-16：`processor/album/dirPath.py`（目录键唯一口径）+ `api/album.py`（`GET /api/albums/path` 整棵树）+ `api/browse.py` 的 `dirPath` 精确筛选 + `queryCommon`（**两道闸**：`_SQL_FUNCTIONS` 补 `RTRIM`/`REPLACE` + `assertSelect` 按形态放行 `REPLACE`）+ `FoldersView.vue` / `FolderTree.vue` / `api/album.js` + `photoReturn.js` 的 `dir` 作用域与 base64url + `loadScopePage` 三分支；`test_api_album.py` **26 条**。**实测**：正式库只读副本 37089 行 / 488 目录 → 聚合 **67.2 ms** + 组装 **2.1 ms**，口径逐行对照 **0 不一致**；`pytest` = **1595 passed**；前端双门禁通过；Playwright 实测「下钻 → 点图 → 目录内翻页」`scope=dir:…` 全程不丢。⚠️ 不新增表/列、不需要迁移、`photo/` 零访问（154 GB 目录全过程零访问）；**本版本起打包版本号 = 0.2.0** |
 | **R6** | **照片详情左右翻页**（DR-31，A 档，后端零改动） | — | ✅ 已完成（`components/photo/PhotoPager.vue`） |
+| **R15** | **年代档打包**（人物详情 Tab1 每档一个 zip；只读、不抢写闩、不提供 DELETE · DR-56~58） | — | ✅ **已完成**（2026-10-13：`engine/sample/bucketPool.py` + `processor/media/eraPack.py` 扩展 + `api/eraZip.py` 四端点 + `api/eraZip.js` / `store/eraZip.js` / `BucketTimeline.vue`；`test_era_bucket_pack.py` 26 例 + 前端双门禁通过）。⚠️ 本节**没有**它的提示语正文（规划见 `plan/年代档打包规划.md` 与 `plan/开发计划.md` §五） |
 | **R7** | **人物头像**（卡片显示照片 + 人脸样本设默认 · DR-40/41） | — | ✅ 已完成（2026-10-08：`personCoversOf` + `AvatarPicker` + 16 条用例；**正式库副本实测 24/24 卡片有封面脸**，改前 0/2030 有 `avatarFaceCode`） |
 | **R8** | **照片年代修正**（人工修正拍摄年 + 编辑入口 · DR-42） | — | ✅ 已完成（2026-10-08：`pb_photo.shotYearOverride` + `comGD.sqlEffectiveShotYear` + `processor/photoTimeFix.py` + `ShotYearFixDialog.vue` + `test_photo_time_fix.py` 12 条用例全绿）；⚠️ 拖拽（P1）与 `takenAt` 修正到日（P2）未做 |
 | **R3** | **修 `(0,0)` 占位坐标**（DR-23） | — | ✅ 已完成（`tools/fix_placeholder_geo.py`） |
@@ -4499,22 +4731,36 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 
 > 提醒：新对话里请**只粘贴当前步骤的提示语**，不要把多步一起粘过去，否则上下文会过长导致遗漏约束。
 >
-> **待做 1 项：R10（打包分发）**。
-> R9（照片旋转）、R11（年代抽样）、R12（地点修正）、R13（从行政区选地名）、R14（单张人脸识别）均已完成。
-> 12 步主线于 2026-10-07 全部完成；R2 / R3 / R4 / R4a / R4b / R5 / R6 / R7 / R8 / R9 / R11 / R12 / R13 / R14 均已完成。
+> **待做 0 项**：R16（文件夹浏览）**已于 2026-10-16 完成** —— 侧栏「文件夹」可用、
+> 20 条验收逐条实测（含 Playwright 真实浏览器走通「下钻 → 点图 → 目录内翻页」）、
+> 正式库只读副本 3.7 万行实测 **69 ms**、`pytest` **1595 passed**、前端双门禁通过。
+> 规划与落地结果见 `plan/文件夹浏览规划.md`（§十一 是逐条验收结果）。
+> R10（打包分发）**已完成**（2026-10-13 产物已产出）；R9（照片旋转）、R11（年代抽样）、
+> R12（地点修正）、R13（从行政区选地名）、R14（单张人脸识别）、R15（年代档打包）均已完成。
+> 12 步主线于 2026-10-07 全部完成；**R2 ~ R16 全部完成**。
 >
 > ⚠️ **编号提醒**：`R7` = 人物头像（DR-40/41）、`R8` = 照片年代修正（DR-42）、
 > `R9` = 照片旋转（DR-43）、`R10` = 打包分发（DR-44）、
 > `R11` = **年代抽样**（DR-45~DR-51，拆 R11a/b/c，规划见 `plan/年代抽样规划.md`）、
 > `R12` = **地点修正**（DR-52/53，单张照片地点 + 地点显示名 + `nameSource` 严格版）、
 > `R13` = **从行政区选地名**（DR-54，候选三段：已有地点 / 行政区规范名 / 自由输入）、
-> `R14` = **单张人脸识别**（DR-55，照片详情「操作」面板 → 只认这一张 + 只判这一张）。
+> `R14` = **单张人脸识别**（DR-55，照片详情「操作」面板 → 只认这一张 + 只判这一张）、
+> `R15` = **年代档打包**（DR-56~58，人物详情 Tab1 每档一个 zip，规划见 `plan/年代档打包规划.md`）、
+> `R16` = **文件夹浏览**（DR-59~63，侧栏「文件夹」按目录逐级浏览，规划见 `plan/文件夹浏览规划.md`）。
 > 别互相叫错 —— `R12` 是"改这张照片的地点"，`R13` 是"**从哪选**这个地名"，
-> `R14` 是"**只认这一张照片**的人脸"（不是 R10 的打包、也不是主线的识别链路本身）。
+> `R14` 是"**只认这一张照片**的人脸"，`R15` 是"**按年代档打包**"，
+> `R16` 是"**按磁盘目录浏览**"（与 `photo/` 只读、与打包都无关）。
 >
-> **R10 完成后（按优先级）**
+> ⚠️ **版本口径（2026-10-16 用户确认）**：**本版本起打包版本号定为 `0.2.0`** ——
+> `build\package.ps1 -Version 0.2.0`（默认值已改）、`build\installer.iss` 的 `PbVer`（默认值已改）、
+> `code\webserver\package.json`（已改）。R10 的产物 `PhotoBrowser-Setup-0.1.0.exe` 保留留档，**不要删**。
+>
+> **下一步（按优先级）**
 > 1. **M4 一周自测**（最重要，不是写代码）：按 `开发计划.md` §八 的建议用法真用一周，
 >    第 7 天自问「还会想去资源管理器看照片吗」。
+>    ⚠️ R16 就是对着这句话做的（"按磁盘目录浏览"）—— 如果一周下来还是想去资源管理器，
+>    那说明 R16 还差东西，回到 `plan/文件夹浏览规划.md` 看已知取舍。
+> → **没有待做的开发步骤了**，下面都是"用了之后才会知道要不要做"的事：
 > 2. **清待确认队列**（当前最大的功能缺口，见 C-2）：**20015 张脸**没归属。
 >    R5 的「在场的人」、R11 的年代抽样质量，都取决于这个队列被清掉多少。
 > 3. **R2 的验收证据**（唯一还欠的技术报告）：`auditBuckets()` 改前/改后完整对照、
@@ -4524,6 +4770,9 @@ Vue 3 + Vite + Pinia + Vue Router + Tailwind CSS + Element Plus + axios
 > 4. 可选：**批量旋转**（R9 只做单张，见该步「完成后必须输出」第 8 条）。
 > 5. 可选：地图视图（R5 明确未做，前提是解决「地点无坐标」问题 —— 181 个有效地点里
 >    目录名地点没有 `lat/lon`）。
+> 6. 可选：**人脸漏识别的三条真缺陷**（见 `plan/人脸漏识别研判.md` 第九节）——
+>    原因码拆分（`decode_fail` 把"检测异常"也吞了）、质量过滤明细不可观测、
+>    HEIC/AVIF/JXL 支持或从白名单移出。**各自单独开一步**，不要与 R16 混在一起。
 
 ---
 

@@ -30,6 +30,10 @@
  *     · `person:<personCode>`         —— 该人物的照片（/api/photos?personCode=）
  *     · `place:<placeCode>[@<codes>]` —— 该地点的照片（/places/{code}/photos）；
  *       `@` 后面是「同组归并 / 下钻」的 placeCodes（可省略）
+ *     · `dir:<base64url(目录键)>`      —— 该目录**直属**的照片
+ *       （/api/photos?dirPath=）；根目录用保留 token `__root__`。
+ *       ⚠️ 目录部分必须 base64url：目录名可能含 `:` 与 `@`，而它们正是本约定的
+ *          分隔符（`encodeDirPayload` 的注释里有完整理由）。
  *   ⚠️ 没有 `scope` 时行为**一字不变**（全库列表 + 原提示文案）——
  *      待确认、概览、重复对比这些入口本来就不该改变翻页范围。
  *
@@ -50,7 +54,70 @@
 const PHOTO_FALLBACK = '/photos'
 
 /** scope 允许的类型（白名单：值来自 URL，不能直接拼进请求） */
-const SCOPE_TYPES = ['person', 'place']
+const SCOPE_TYPES = ['person', 'place', 'dir']
+
+/**
+ * 根目录的**保留 token** —— **必须与后端 `basicSettings.ALBUM_ROOT_TOKEN` 一致**。
+ *
+ * ⚠️ 为什么根目录不能直接用空串（本常量存在的唯一理由）
+ * --------------------------------------------------
+ *   两个地方都会**静默把空值丢掉**：
+ *     ① `api/request.js` 的 `paramsSerializer` 会丢弃 `undefined` / `null` / `''`
+ *        ⇒ 目录筛选参数根本不会发出 ⇒ 后端理解成"不筛选" ⇒ **返回全库照片**；
+ *     ② 本文件的 `scopeParam()`（`code` 为空返回空串）与 `parseScope()`（`!code`
+ *        返回 null）⇒ 作用域整个消失 ⇒ 详情页退化成"沿全库翻页"。
+ *   两处的共同后果是「进了根目录，翻页却翻到全库」，而且**不报任何错**。
+ *   ⇒ 三处（树端点的 `path`、照片列表的 `dirPath`、`scope=dir:` 的载荷）
+ *     共用这一个 token，**不许再写第二份字面量**。
+ */
+export const ALBUM_ROOT_TOKEN = '__root__'
+
+/**
+ * 目录键 -> scope 载荷（base64url）。
+ *
+ * ⚠️ 为什么必须编码而不是直接把路径塞进 scope
+ * ------------------------------------------
+ *   scope 的格式是 `dir:<载荷>`，而载荷里可能出现 `:`（类型分隔符）与 `@`
+ *   （extra 分隔符）—— 目录名完全可能包含它们（Windows 只禁 `< > : " / \ | ? *`，
+ *   `@` 与中文都合法）。用百分号编码也不行：vue-router 会**再解码一次**，
+ *   分隔符照样被还原出来。
+ *   base64url 的字符集是 `A-Za-z0-9-_`，既不含分隔符，也不含会被 vue-router
+ *   改写的内容 —— 这是唯一稳的选择。
+ */
+export function encodeDirPayload(dirKey) {
+  const text = String(dirKey ?? '')
+  if (!text) return ALBUM_ROOT_TOKEN
+  const bytes = new TextEncoder().encode(text)
+  let binary = ''
+  bytes.forEach((one) => { binary += String.fromCharCode(one) })
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+/** scope 载荷 -> 目录键。解不出来一律当**根目录**（不抛错，免得整页白屏） */
+export function decodeDirPayload(payload) {
+  const text = String(payload ?? '')
+  if (!text || text === ALBUM_ROOT_TOKEN) return ''
+  try {
+    const padded = text.replace(/-/g, '+').replace(/_/g, '/')
+    const binary = atob(padded + '='.repeat((4 - (padded.length % 4)) % 4))
+    const bytes = Uint8Array.from(binary, (one) => one.charCodeAt(0))
+    return new TextDecoder().decode(bytes)
+  } catch (err) {
+    console.error('目录作用域载荷解析失败（手改过 URL？）', payload, err)
+    return ''
+  }
+}
+
+/**
+ * 入口用：目录作用域（`dir:<base64url>`）。
+ *
+ * ⚠️ 不要自己写 `scopeParam('dir', dirKey)`：根目录的 `dirKey` 是空串，
+ *   `scopeParam` 会因为 `code` 为空而返回**空串** ⇒ 作用域静默消失。
+ *   必须经 `encodeDirPayload` 换成保留 token（那才是非空的）。
+ */
+export function dirScopeParam(dirKey) {
+  return scopeParam('dir', encodeDirPayload(dirKey))
+}
 
 /**
  * 站点内路径的宽松校验：必须单个 `/` 开头。

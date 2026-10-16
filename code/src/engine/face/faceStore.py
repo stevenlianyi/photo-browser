@@ -22,16 +22,29 @@
 #      （S0 的 FR 32.75%->19% 等于一直在跑对照组）。
 #
 #   现在的口径（**唯一正确的一份**，与 engine/match/rebucket.py 文件头一致）：
-#     · 提取落库（这里）        -> 等宽 5 年占位桶
+#     · 提取落库（这里）        -> 等宽 5 年占位桶（按 **有效拍摄年**，见 DR-61）
 #     · 归属那一刻             -> assigner._setBelong按**新主人的生日**重刷
 #                                 （assigner.fix('unknown'/'stranger') 刷回等宽）
 #     · 合并 / 撤销            -> merger 按**目标人**的生日重刷
 #     · 拆成新建档案           -> 经 assigner.setBelong，生日为空则刷成等宽
 #     · 联系人导入后           -> 对本次新建/更新的人重刷 + 重算质心
+#     · 任务收尾兜底           -> schedule.faceScheduler.sealBuckets：对本次
+#                                 提取动过的照片按当前口径再对一遍（DR-61）
 #     · 存量一次性刷干净       -> python code\src\tools\rebucket_cli.py --all
 #   换句话说：**归属变更的那一刻生日才确定，桶键在那时才刷**。
 #   本模块保持占位不动是有意的：重提取（replace模式）会把这些脸重写成新行，
 #   而它们此刻大多仍未归属，刷成自适应桶反而是无源之水。
+#
+# 两条 DR-61 纪律（2026-10：用户报「年代 2012 / 年代桶 1975–1979」之后补的）
+# -------------------------------------------------------------------------
+#   ① **占位桶按有效拍摄年算**（`effectiveShotYear`），不是裸 `shotYear`：
+#      人工修正过年代的照片被重提取时，用裸 shotYear 会把它的人脸放回
+#      EXIF 那一年的桶里 —— 而界面上那张照片的年代显示的是修正值。
+#   ② **老行的 shotBucket 一律不覆盖**（FACE_INSERT_ONLY_COLUMNS）：
+#      增量补漏/重跑是按 faceCode upsert 的，命中冲突行时只刷新
+#      embedding/bbox/分数；桶键属于 rebucket（它按"有效年 + 主人生日"算）。
+#      覆盖它的后果是「一张已归属、桶键正确的脸被打回占位桶」，
+#      而人工确认一个都没丢 —— 库里没有任何报错，只在时间轴上多出一个档位。
 #
 # 写库口径
 # --------
@@ -67,21 +80,42 @@ from common import paths as paths                                 # noqa: E402
 from config import basicSettings as basicSettings                 # noqa: E402
 from database.auto_generated import sqliteCommon                  # noqa: E402
 from engine.face import engine as faceEngine                      # noqa: E402
+# ⚠️ engine.match.bucket 是**纯函数模块**（不碰数据库、不 import numpy），
+#    所以 engine/face 依赖它是安全的；反方向（bucket -> faceStore）被
+#    engine/match/__init__.py 的反向依赖禁令挡着，不会成环。
+from engine.match import bucket as bucket                         # noqa: E402
 from processor.media import faceCropper as faceCropper            # noqa: E402
 from processor.media import thumbStore as thumbStore              # noqa: E402
 
-_VERSION = "20261004"
+_VERSION = "20261016"
 
 _LOG = misc.setLogNew("faceStore", "facestore.log")
 
 #: 临时年代桶的等宽步长（年）
 SHOT_BUCKET_WIDTH: int = 5
 
-#: pb_face 的 upsert 会刷新的列（刻意不含人工确认相关的三列，见文件头说明）
+#: pb_face 的 upsert 会**刷新**的列（刻意不含人工确认相关的三列，见文件头说明）。
+#: ⚠️ 也**不含 shotBucket** —— 它是 FACE_INSERT_ONLY_COLUMNS 里的东西，理由见那里。
 FACE_UPSERT_COLUMNS: tuple = (
     "photoCode", "bbox", "detScore", "poseYaw", "posePitch",
-    "quality", "embedding", "shotBucket",
+    "quality", "embedding",
 )
+
+#: **只在插入新行时写、老行绝不覆盖**的列。目前只有 shotBucket（DR-61）。
+#: ---------------------------------------------------------------------
+#:   为什么必须切开（2026-10 实测的用户现象）
+#:     「年代显示 2012（人工修正），年代桶却是 1975–1979」——
+#:     那张照片的 raw shotYear 是 1979（EXIF 折算差 1 年），而 shotBucket
+#:     是**按未归属口径算的等宽占位桶**。成因是重提取/增量补漏的 upsert
+#:     把 shotBucket 也算进了"刷新列"：旧脸按 faceCode 命中冲突行，
+#:     DO UPDATE 把一张**已归属、已有自适应桶**的脸（如 2007-2016）
+#:     打回了占位桶。于是它的主人时间轴上凭空多出一个年代档位，
+#:     而人工确认一张都没丢 —— 界面上看不出任何异常，只"觉得哪里不对"。
+#:   口径上这也说不通：提取那一刻不知道这张脸属于谁，所以只能给占位桶；
+#:     而**老行的桶键已经由 rebucket 按（有效拍摄年, 该人出生年）算好了**，
+#:     提取无权覆盖它（它改的是 embedding / bbox / 分数，不是年代档）。
+#:   新脸照旧写占位桶（INSERT 分支），这才是"提取阶段唯一能给出的东西"。
+FACE_INSERT_ONLY_COLUMNS: tuple = ("shotBucket",)
 
 #: pb_photo 补丁行必须带齐的 NOT NULL 身份列（走 upsert 是 INSERT 语义，缺列会撞约束）
 PHOTO_IDENTITY_COLUMNS: tuple = ("photoCode", "relPath", "relPathHash", "fileHash",
@@ -91,6 +125,22 @@ PHOTO_IDENTITY_COLUMNS: tuple = ("photoCode", "relPath", "relPathHash", "fileHas
 # ============================================================
 # 一、年代桶
 # ============================================================
+
+def effectiveShotYear(photoRow) -> object:
+    """pb_photo 行 -> **有效拍摄年** = COALESCE(shotYearOverride, shotYear)（DR-42）。
+
+    ⚠️ 实现不在本模块：转发 `engine.match.bucket.effectiveShotYear()`（纯函数），
+       全项目只有那一份。这里包一层只为让本模块的调用点读起来是"本层的口径"。
+
+    为什么占位桶也必须是**有效**年（而不是 `photoRow["shotYear"]`）
+    ------------------------------------------------------------
+      人工修正过年代的老照片（翻拍件/扫描件，raw shotYear 是"翻拍那一刻"）
+      一旦被重提取或增量补漏，就会用**修正前**的年份算出一个占位桶 ——
+      而那张照片上已归属的人脸本该是 2012 年口径的自适应桶。
+      两者混在一起，用户看到的就是「年代 2012 / 年代桶 1975-1979」。
+    """
+    return bucket.effectiveShotYear(photoRow)
+
 
 def makeShotBucket(shotYear) -> str:
     """pb_photo.shotYear -> pb_face.shotBucket 的**占位**桶（如 "1995-1999"）。
@@ -143,9 +193,13 @@ def buildFaceRow(photoRow: dict, faceData: dict, shotBucket: str = None) -> dict
        pose 为 None 时（裸 ONNX 降级且均值形状缺失）这一列留空，
        normalizeDataSet 会把空值整条丢掉 —— 也就是**不写这一列**，
        而不是写 0（写 0 会被读成"绝对正视"，比"没测到"更糟）。
+
+    ⚠️ 占位桶按**有效拍摄年**算（DR-42/DR-61），不是裸 `shotYear` ——
+       见 effectiveShotYear() 的说明：用裸 shotYear 会让"人工修正过年代的照片"
+       在重提取后落回 EXIF 那一年的桶里。
     """
-    bucket = (makeShotBucket((photoRow or {}).get("shotYear"))
-              if shotBucket is None else str(shotBucket or ""))
+    bucketKey = (makeShotBucket(effectiveShotYear(photoRow))
+                 if shotBucket is None else str(shotBucket or ""))
     return {
         "faceCode": str(faceData.get("faceCode") or ""),
         "photoCode": str((photoRow or {}).get("photoCode")
@@ -158,7 +212,7 @@ def buildFaceRow(photoRow: dict, faceData: dict, shotBucket: str = None) -> dict
         "posePitch": _round2(faceData.get("posePitch")),
         "quality": round(float(faceData.get("quality") or 0.0), 4),
         "embedding": faceData.get("embedding"),
-        "shotBucket": bucket or None,
+        "shotBucket": bucketKey or None,
         "isConfirmed": 0,              # 人工确认前一律 0
     }
 
@@ -265,6 +319,11 @@ class FaceStore(object):
         self.ownerID = ownerID
         self._faceRows = []
         self._photoRows = {}
+        #: 本实例写过 pb_face/pb_photo 的 photoCode（**drainTouched 取走并清空**）。
+        #: 用途只有一个：任务收尾时对"我动过的照片"做一次桶口径兜底
+        #: （schedule.faceScheduler.sealBuckets，DR-61）—— 提取阶段按未归属
+        #: 口径写占位桶，收尾按"当前口径（有效年 + 各人出生年）"再对一遍。
+        self._touchedPhotos = set()
         self.counters = {"photos": 0, "faces": 0, "deleted": 0,
                          "cropCreated": 0, "cropCached": 0, "cropFailed": 0,
                          "flushes": 0, "faceRows": 0, "photoRows": 0}
@@ -278,6 +337,7 @@ class FaceStore(object):
         if not photoCode:
             return 0
         self.counters["photos"] += 1
+        self._touchedPhotos.add(photoCode)      # 任务收尾兜底用（见 __init__）
         cropStat = writeFaceCrops(faces, (result or {}).get("absPath", ""),
                                   thumbRoot=self.thumbRoot,
                                   photoRoot=self.photoRoot)
@@ -305,6 +365,18 @@ class FaceStore(object):
     def pending(self) -> int:
         return len(self._faceRows)
 
+    def drainTouched(self) -> list:
+        """取走「自上次取走以来写过的 photoCode」并清空（升序）。
+
+        给任务收尾的桶口径兜底用（schedule.faceScheduler.sealBuckets，DR-61）：
+        提取只写占位桶，而"照片是哪一年 + 这个人生日"才是年代档的真口径。
+        ⚠️ 是 **drain**（取走即清空）而不是只读：批次循环里每批各兜一次底，
+           不清空的话批次越往后兜底的照片越多（第 10 批会重刷前 9 批的全部）。
+        """
+        out = sorted(code for code in self._touchedPhotos if code)
+        self._touchedPhotos = set()
+        return out
+
     # ---- 落库 ----
 
     def flush(self) -> dict:
@@ -322,12 +394,17 @@ class FaceStore(object):
                 if self.replaceFaces and photoItems:
                     deleted = self._dropOldFaces(sorted(photoItems.keys()))
                 if faceRows:
+                    # updateColumns 不含 shotBucket（FACE_INSERT_ONLY_COLUMNS）：
+                    # 冲突命中的老行**保留**它已有的桶键（那是 rebucket 按
+                    # 有效年 + 主人生日算好的），只有 INSERT 分支写占位桶。
+                    # 详见 FACE_INSERT_ONLY_COLUMNS 的说明（DR-61）。
                     rtn, _cols = sqliteCommon.insertManyTableGeneral(
                         "pb_face", faceRows,
                         conflictColumns=("faceCode",),
                         updateColumns=list(FACE_UPSERT_COLUMNS),
                         fillStandard=True,
-                        forceColumns=list(FACE_UPSERT_COLUMNS))
+                        forceColumns=list(FACE_UPSERT_COLUMNS)
+                                    + list(FACE_INSERT_ONLY_COLUMNS))
                     if rtn == -2:                 # sqliteHandle.RET_ERROR
                         raise FaceStoreError("pb_face 批量写失败（已回滚）: %s"
                                              % db.lastErrMsg)
@@ -391,10 +468,28 @@ class FaceStore(object):
 def loadPhotoRows(dbFile: str = None, limit: int = 0, offset: int = 0,
                   onlyPending: bool = True, photoRoot: str = None,
                   orderBy: str = "recID", descFlag: bool = False,
-                  minRecID: int = 0) -> list:
+                  minRecID: int = 0, onlyEmptyFace: bool = False,
+                  maxShortEdge: int = 0, refreshSmall: bool = False) -> list:
     """取待做特征提取的 pb_photo 行（**分页**，与步骤 3 的 SCAN_INDEX_PAGE 同理）。
 
     onlyPending=True -> 只要 scanState=0（步骤 3 刚入库、或内容变更后被归零的行）。
+    onlyEmptyFace=True -> 只要 `faceCount=0` 且 `isMissing=0` 的照片（**R17 重跑入口**）。
+      它与 onlyPending 的判据**互斥**：这类照片的 scanState 通常是 1（早就扫过、
+      当年被判成"没人脸"），所以它**不看 scanState**，而是分页扫全表在 Python 侧筛。
+    refreshSmall=True -> **增量补漏**：取「短边 < maxShortEdge **且 faceCount>0**」的照片
+      （= 已经有脸、但可能还有漏检配角脸的那些），用于门槛放松之后把漏掉的脸补进来
+      （典型：1280x960 老照片里 43~47px 的脸曾被 48px 门槛拦掉，见
+      plan/人脸漏识别研判.md 12.10）。
+      ⚠️ 与 onlyEmptyFace **互不重叠**：faceCount=0 的照片归那一批 —— 两者都跑一遍
+         才是完整的"短边<maxShortEdge 的全部照片"，且没有重复劳动。
+      ⚠️ 必须配 `replaceFaces=False` 使用：旧脸按 faceCode upsert（embedding 逐位相同、
+         `isConfirmed` 不被刷），新脸插入 —— 人工确认一张都不会丢。
+      ⚠️ maxShortEdge=0 时它会扫**全库** 3.7 万张（合法但慢），一般配 1600 用。
+    maxShortEdge>0 -> 只取短边 < 该值的照片（0 = 不限）。
+      专给 R17 用：门槛放宽只发生在**短边 < 1280**（= MIN_FACE_EDGE / RATIO）的图上，
+      短边 >=1280 的大图门槛仍是 64px，重跑它们纯属浪费
+      （实测 faceCount=0 里 11296 张是 >=2048 的大图）。
+      尺寸缺失（NULL/0）的行**保守放行**（宁可多跑一张，也不要漏掉元数据缺失的老照片）。
     ⚠️ 一次全取 10 万行峰值 150MB（步骤 3 实测），所以给 limit/offset 分页。
        顺手剔掉磁盘上已经没有的（拔盘 / 挪走），否则白跑一遍模型才发现。
     minRecID : 只取 recID > 该值的行（**断点续跑的游标**，见 faceScheduler）
@@ -413,6 +508,80 @@ def loadPhotoRows(dbFile: str = None, limit: int = 0, offset: int = 0,
     """
     if dbFile:
         sqliteCommon.dbHandle(dbFile)
+    root = os.path.abspath(photoRoot or paths.photo_dir())
+    floor = int(minRecID or 0)
+    out = []
+
+    # ---- 专路：只取「库里还没有人脸」的照片（R17）----
+    #
+    # 为什么需要它
+    # ----------
+    #   `faceCount=0` 的照片几乎都是 `scanState=1`（早就扫过、当年被固定 64px
+    #   门槛判成"这张没人脸"）。**它们永远进不了 onlyPending 队列** ——
+    #   门槛放宽（R17）之后要重跑它们，唯一的入口就是这里。
+    #
+    # 为什么不能只靠 SQL（生成层不支持，也不许改）
+    # -----------------------------------------
+    #   query_pb_photo 的等值过滤只有 recID / photoCode / relPathHash / fileHash /
+    #   dupOfPhotoCode / scanState 六列（auto_generated 白名单），faceCount 不在里面；
+    #   nullFields 也只认 NULLABLE_FIELDS 白名单（NOT NULL 列写进去会被**静默跳过**）。
+    #   ⇒ 只能分页扫全表 + Python 侧筛：SCAN_INDEX_PAGE=2000 一页，
+    #     3.7 万行 = 19 次查询、亚秒级，比动生成层便宜得多。
+    #
+    # offset 的语义在这里是「**筛完之后的**结果偏移」：顺序仍然是 orderBy 的库序。
+    if onlyEmptyFace or refreshSmall:
+        page = int(basicSettings.SCAN_INDEX_PAGE)
+        at = 0
+        skip = max(0, int(offset or 0))
+        scanned = 0
+        while True:
+            rows = sqliteCommon.query_pb_photo(
+                "pb_photo", scanState="", orderBy=orderBy, descFlag=descFlag,
+                limitNum=page, offsetNum=at)
+            if not rows:
+                break
+            at += len(rows)
+            for row in rows:
+                scanned += 1
+                # 两批**互不重叠**（省掉一轮纯浪费的检测）：
+                #   onlyEmptyFace = 只要「还没有人脸」的照片（第一次放宽门槛后跑的那批）
+                #   refreshSmall  = 只要「已经有脸」的照片（增量补漏：把漏掉的配角脸补上）
+                # 没有脸的那些照片本来就不该由补漏这轮负责。
+                faceCount = int(row.get("faceCount") or 0)
+                if onlyEmptyFace and faceCount != 0:
+                    continue
+                if refreshSmall and faceCount <= 0:
+                    continue
+                # isMissing=1 的照片**再也不参与提取**（见本模块的缺失判定），
+                # 这里显式挡住，免得白跑一遍模型才发现文件不在
+                if int(row.get("isMissing") or 0) != 0:
+                    continue
+                if maxShortEdge > 0:
+                    w = int(row.get("width") or 0)
+                    h = int(row.get("height") or 0)
+                    if w and h and min(w, h) >= int(maxShortEdge):
+                        continue
+                if floor > 0 and int(row.get("recID") or 0) <= floor:
+                    continue
+                relPath = str(row.get("relPath") or "")
+                if not relPath:
+                    continue
+                if not os.path.isfile(os.path.join(root, relPath.replace("/", os.sep))):
+                    continue
+                if skip > 0:
+                    skip -= 1
+                    continue
+                out.append(row)
+                if limit and len(out) >= int(limit):
+                    _LOG.info("loadPhotoRows(onlyEmptyFace): 扫过 %d 行，命中 %d 张",
+                              scanned, len(out))
+                    return out
+            if len(rows) < page:
+                break
+        _LOG.info("loadPhotoRows(onlyEmptyFace): 扫过 %d 行，命中 %d 张",
+                  scanned, len(out))
+        return out
+
     # 多取一些再按 recID 游标切：limit 之内可能有磁盘已缺失的行，
     # 逐个剔掉之后仍要凑够 limit 才是"这一批真能处理的张数"。
     overFetch = int(limit or 0) * 2 + 50 if (limit and minRecID > 0) else int(limit or 0)
@@ -420,9 +589,6 @@ def loadPhotoRows(dbFile: str = None, limit: int = 0, offset: int = 0,
         "pb_photo", scanState=(0 if onlyPending else ""),
         orderBy=orderBy, descFlag=descFlag,
         limitNum=overFetch, offsetNum=int(offset or 0))
-    root = os.path.abspath(photoRoot or paths.photo_dir())
-    floor = int(minRecID or 0)
-    out = []
     for row in rows:
         if floor > 0 and int(row.get("recID") or 0) <= floor:
             # 游标之后必须单调：orderBy=recID 时直接 break，
@@ -500,6 +666,9 @@ def extractAndStore(photoRows: list, workers: int = None, dbFile: str = None,
     store.flush()
     timing = facePool.timingStats(summary["elapsedList"])
     return {"pool": summary, "store": store.summary(), "timing": timing,
+            # 本次真正写过的照片（**drain 后仍是全量**：这里只在最后取一次）。
+            # 收尾兜底用它（sealBuckets），调用方不必自己拼 photoCodes。
+            "touchedPhotos": store.drainTouched(),
             "photos": len(tasks)}
 
 
@@ -513,6 +682,7 @@ def commitOne(photoRow: dict, result: dict, dbFile: str = None,
     store.flush()
     out = store.summary()
     out["kept"] = kept
+    out["touchedPhotos"] = store.drainTouched()
     return out
 
 
@@ -548,7 +718,10 @@ if __name__ == "__main__":
     for year in (1994, 1995, 1999, 2000, 2013, None, -1, 0, 2200):
         print("   shotYear=%-6r -> %r" % (year, makeShotBucket(year)))
     print("upsert 刷新列:", FACE_UPSERT_COLUMNS)
-    print("刻意不刷的列  : ('personCode', 'clusterCode', 'isConfirmed')")
+    print("刻意不刷的列  : ('personCode', 'clusterCode', 'isConfirmed',"
+          " *FACE_INSERT_ONLY_COLUMNS)")
+    print("只插不覆盖列  :", FACE_INSERT_ONLY_COLUMNS,
+          "（老行的桶键属于 rebucket，提取无权覆盖）")
     print("embedding 字节:", faceEngine.EMBEDDING_BYTES)
     print("scanState: 0(%d) -> 1(%d)"
           % (comGD.SCAN_STATE_PENDING, comGD.SCAN_STATE_FACED))

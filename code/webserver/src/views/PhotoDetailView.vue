@@ -18,11 +18,13 @@
   ⑤ `←` `→` 与两侧浮动箭头，**默认**翻的是 `store.photos.items` 里相邻的那一张 ——
      入口仍然只有 `/photos/:photoCode`（可分享、可刷新）。
      分母用**已加载条数**而不是后端 `total`；到头**不循环**。
-     ⚠️ 从人物 / 地点详情进来时，入口会带 `?scope=`，翻的是**那一批照片**
+     ⚠️ 从人物 / 地点 / 文件夹进来时，入口会带 `?scope=`，翻的是**那一批照片**
      （按需分页，往下翻自动续下一页），而不是全库 —— 否则在「白瑞琴的照片」里
      翻两张就翻到陌生人的照片上，界面上没有任何东西提示这件事发生了。
-     约定见 `utils/photoReturn.js` 顶部；没有 `scope` 的入口（待确认 / 概览 /
-     重复对比）行为一字不变，那几种情况仍走「不在列表里就禁用 + 给说明」。
+     约定见 `utils/photoReturn.js` 顶部（`person:` / `place:` / **`dir:`** ——
+     最后一个是 R16 的「文件夹」作用域，载荷是 base64url 的目录键）；
+     没有 `scope` 的入口（待确认 / 概览 / 重复对比）行为一字不变，
+     那几种情况仍走「不在列表里就禁用 + 给说明」。
      ⚠️ **首屏带锚点**（服务端唯一为此新增的入参 `anchorPhotoCode`）：这一批按
      `takenAt DESC` 分页，而点进来的常常是一张**老照片**（某个人的 2000 多张里
      排在第 40 页往后）。只拉第 1 页的话它不在列表里 ⇒ 两个箭头全禁用、键盘也
@@ -75,6 +77,20 @@
   ⑪ 并发 = **直接拒绝**（409），不排队：与扫描 / 认脸 / 匹配共用单写入者门闩。
      排队会让按钮看起来"点了没反应"，而静默排队几十秒后突然开始写库更难解释。
 
+  「操作」里的「全部确认」（这张照片的所有机器认脸）
+  ----------------------------------------
+  ⑫ 为什么不是"逐人确认"的重复实现：逐人确认在合影上要点 N 次（照片里有几个人点几下），
+     而用户看完一张合影后的判断是**整张图**的「这些认得都对」。
+     它把 disputed 脸**按人分组、逐人依次**调同一个 `/review/fix` 的 assign
+     （**不新增后端入口**：另写一条"按照片批量确认"必然要把写 linkKey / 刷桶 /
+      重算质心 / 落 pb_review_log 再抄一遍，那是第二实现的漂移来源）。
+     ⚠️ 只在还有 disputed 脸时出现（全确认完时它点了不会有变化 —— 假入口）。
+     ⚠️ 二次确认复述「几人几张」：确认**立即参与质心重算**，认错了就是把质心往偏里带。
+     ⚠️ **部分失败如实报**（"已确认 X 人的 M 张；Y 人失败"）——把半套结果报成成功
+        比报错更坏（用户以为整张图都确认过了）。
+     ⚠️ **串行 await + 计入 busy**：并发会同时改同一张照片的 pb_photo_person 与
+        多个人的质心；翻页则会读到"确认了一半"的状态。
+
   关于 Range
   ---------
   /api/original 支持 Range（206 + Content-Range）。本页会先发一个
@@ -116,6 +132,9 @@ import { usePhotosStore } from '@/store/photos'
 import { useReviewStore } from '@/store/review'
 import { useSettingsStore } from '@/store/settings'
 import { listPhotos } from '@/api/browse'
+// 「文件夹」作用域（R16）的取数参数：`dirPath` 必须是非空的目录键或保留 token ——
+// 空串会被 request.js 的 paramsSerializer 丢掉，见 loadScopePage 里的说明。
+import { dirPathParam } from '@/api/album'
 // ⚠️ 地点显示名的**唯一入口**（契约：nameZh ?? placeName）。各页自己写一遍
 //    `placeZh || placeName` 的后果是「GPS 地点在某页是中文、在某页是英文」,
 //    而两处都"看起来正常"，谁也不会发现。
@@ -135,6 +154,7 @@ import { extractOneFace, getExtractOneStatus } from '@/api/face'
 import { fixFace } from '@/api/review'
 // 「返回」与「翻页范围」的约定（入口声明来源 / 详情页回退）——见文件顶部说明
 import {
+  decodeDirPayload,
   goBackOr,
   inheritSource,
   parseScope,
@@ -466,6 +486,85 @@ async function confirmPersonFaces(person) {
   }
 }
 
+/**
+ * 本照片里**所有**机器认的、还没人工确认的脸，按人分组（「全部确认」的输入）。
+ *
+ * 为什么需要这个聚合入口
+ * --------------------
+ *   逐人点「确认」在合影上要重复 N 次（照片里有几个人就点几下），
+ *   而用户看完一张合影后心里的判断是**整张图**的：「这些认得都对」。
+ * ⚠️ 分组是必须的：`/review/fix` 的 assign 要求**一次只给一个人**的 faceCodes
+ *    （服务端要按 personCode 写 linkKey + 只重算那个人的质心），
+ *    把多个人的脸混在一次请求里，服务端无从判定归属人。
+ */
+const disputedGroups = computed(() =>
+  (photo.value?.persons || [])
+    .map((person) => ({ person, faces: autoFacesOf(person) }))
+    .filter((one) => one.faces.length),
+)
+
+const disputedFaceCount = computed(() =>
+  disputedGroups.value.reduce((sum, one) => sum + one.faces.length, 0),
+)
+
+/** 「全部确认」在飞（挡翻页，见 busy） */
+const confirmingAll = ref(false)
+
+/**
+ * 「全部确认」= 把这张照片里**所有**机器认的脸一次确认为人工归属。
+ *
+ * 与逐人「确认」的关系
+ * ------------------
+ *   同一个端点（`/review/fix` 的 `assign`）、同一套重算，只是把「按人点 N 次」
+ *   变成「按人依次发 N 次」—— **不新增后端入口**：另写一条"按照片批量确认"
+ *   必然要把「写 linkKey + 刷桶 + 重算质心 + 落 pb_review_log」再抄一遍，
+ *   而那正是本项目反复删掉的那类第二实现（两套口径早晚漂移）。
+ *
+ * ⚠️ 必须**串行 await**：并发发出去会让多个人同时改同一张照片的
+ *    pb_photo_person 与各自质心，失败时也无法如实汇报"确认了几人"。
+ * ⚠️ **部分失败必须如实说**：确认会立即参与质心重算，默默只做一半还报成功
+ *    比报错更坏（用户以为整张图都确认过了）。
+ * ⚠️ 与逐人确认同序：**先 reloadPhoto() 刷当前图，再在 finally 里解禁**。
+ */
+async function confirmAllFaces() {
+  const groups = disputedGroups.value
+  if (!groups.length) return
+  confirmingAll.value = true
+  let donePersons = 0
+  let doneFaces = 0
+  const failed = []
+  try {
+    for (const one of groups) {
+      const faceCodes = one.faces.map((face) => face.faceCode)
+      try {
+        const data = await fixFace({
+          faceCodes,
+          action: 'assign',
+          personCode: one.person.personCode,
+        })
+        review.applyCounts(data)
+        donePersons += 1
+        doneFaces += faceCodes.length
+      } catch (error) {
+        failed.push(`${one.person.displayName}（${error?.message || '未知错误'}）`)
+      }
+    }
+    await reloadPhoto()
+    if (failed.length) {
+      ElMessage.warning(
+        `已确认 ${donePersons} 人的 ${doneFaces} 张脸；${failed.length} 人失败：`
+          + failed.join('、'),
+      )
+    } else {
+      ElMessage.success(
+        `已人工确认这张照片里 ${donePersons} 人的 ${doneFaces} 张机器认的脸`,
+      )
+    }
+  } finally {
+    confirmingAll.value = false
+  }
+}
+
 async function submitFix({ action, faceCodes, personCode }) {
   fixLoading.value = true
   try {
@@ -767,6 +866,10 @@ const shotYearVisible = ref(false)
  * ⚠️ `warnings` 非空表示「修正本身成功了，但那个人的**其它**照片还有旧口径年代档键」
  *    （DR-22 前置检查挡下的）。这时必须说出来：静默吞掉它，
  *    用户会在几天后发现"某个人怎么认不准了"而毫无线索。
+ * ⚠️ `bucketVerify.staleCount` > 0 = **这张照片**的人脸桶在写完之后又被别的写入者
+ *    改回去了（人脸补漏任务 / 重提取 / 单张识别，DR-61）。这类必须单说一句 ——
+ *    它正是「年代显示 2012、年代桶却是 1975–1979」的那个现象：不提示的话
+ *    用户只能看见一个自相矛盾的界面，而库里没有任何报错。
  */
 async function onShotYearFixed(data) {
   await reloadPhoto()
@@ -776,6 +879,14 @@ async function onShotYearFixed(data) {
     ElMessage.warning(
       `年代已修正；但有 ${warnings.length} 个人的历史年代档口径待重算，`
         + '请按其提示跑一次刷新年代档（否则那个人的匹配会静默失准）。',
+    )
+  }
+  const stale = Number(data?.bucketVerify?.staleCount || 0)
+  if (stale > 0) {
+    ElMessage.warning(
+      `年代已修正；但这张照片里还有 ${stale} 张脸的年代档没落到位`
+        + '（可能被同时进行的人脸任务改写了）——人物时间轴上的档位会与这里对不上，'
+        + '请按上一条提示再刷新一次年代档。',
     )
   }
 }
@@ -881,9 +992,29 @@ async function loadScopePage(page, mode = 'append') {
     const params = { page, size: SCOPE_PAGE_SIZE, orderBy: 'takenAt', desc: 1 }
     // ⚠️ 锚点只用于**首屏**：翻页时列表里已经有它了，再传是白算一次
     if (mode === 'anchor') params.anchorPhotoCode = photoCode.value
-    const data = spec.type === 'person'
-      ? await listPhotos({ ...params, personCode: spec.code })
-      : await listPlacePhotos(spec.code, { ...params, placeCodes: spec.extra || undefined })
+    // ⚠️ 三种作用域**必须逐个列全**（R16 加了 `dir`）。
+    //    这里原来是 `spec.type === 'person' ? A : B` 的**二选一三元** —— 再加第三种
+    //    类型时 `dir` 会**静默落进 else 分支**，按「地点」去取数
+    //    （`/places/{code}/photos`，而载荷是个 base64url 串）⇒ 空列表或 404，
+    //    而症状只是「从文件夹点进来之后左右翻页坏了」，不报任何错。
+    //    ⇒ 改成 if / else if / else，新增类型时这里必然要动一次（看得见）。
+    let data
+    if (spec.type === 'person') {
+      data = await listPhotos({ ...params, personCode: spec.code })
+    } else if (spec.type === 'dir') {
+      // 载荷是 base64url（目录名可能含 `:` 与 `@`，见 photoReturn.js 的约定）。
+      // ⚠️ 解不出来时 `decodeDirPayload` 退回空串 = **根目录**，不抛错 ——
+      //    手改过 URL 的人最多看到"翻的是根目录那一批"，而不是整页白屏。
+      // ⚠️ 必须经 `dirPathParam` 换成非空值：`dirPath: ''` 的参数会被
+      //    `request.js` 的 `paramsSerializer` **整个丢掉**，后端理解成"不筛选"
+      //    ⇒ 翻页翻到**全库**（用户以为在目录内，实际跨了整个库）。
+      data = await listPhotos({
+        ...params,
+        dirPath: dirPathParam(decodeDirPayload(spec.code)),
+      })
+    } else {
+      data = await listPlacePhotos(spec.code, { ...params, placeCodes: spec.extra || undefined })
+    }
     const list = data?.items ?? []
     // 服务端算出来的页（锚点定位时由它给出；不适用时就是入参 page）
     const got = Number(data?.page) || page
@@ -1061,6 +1192,8 @@ const busy = computed(
     // 「确认」（人工确认）与改判一样会改掉人脸框的三态与侧栏「出现的人」：
     // 请求没回来就翻走，回来看到的是陈旧状态而且不报错
     Boolean(confirmingPerson.value) ||
+    // 「全部确认」同上；它还要**串行发多条**请求，期间翻页会读到"确认了一半"的状态
+    confirmingAll.value ||
     dupSaving.value ||
     delLoading.value ||
     // 单张识别在飞时也禁翻：结果（新脸框 + 自动归属）属于**这张**照片，
@@ -1661,6 +1794,27 @@ watch(photoCode, (code) => {
                 <ScanFace v-if="!faceExtracting" class="mr-1 h-4 w-4" aria-hidden="true" />
                 {{ faceExtracting ? '正在识别人脸…' : '识别这张照片人脸' }}
               </el-button>
+              <!--
+                全部确认：把**这张照片**里机器认的（state=disputed）脸一次确认为人工归属。
+                ⚠️ 只在还有机器认的脸时出现：全确认完时它点了不会有任何变化，那是假入口。
+                ⚠️ 二次确认（与逐人「确认」同一理由）：确认会**立即参与质心重算**，
+                   认错了就是把质心往偏里带，所以先把「几人几张」复述清楚。
+              -->
+              <el-popconfirm
+                v-if="disputedFaceCount"
+                width="320"
+                :title="`确认这张照片里 ${disputedGroups.length} 人的 ${disputedFaceCount} 张机器认的脸？确认后立即参与质心重算。`"
+                confirm-button-text="全部确认"
+                cancel-button-text="取消"
+                @confirm="confirmAllFaces"
+              >
+                <template #reference>
+                  <el-button type="primary" plain :loading="confirmingAll">
+                    <Check v-if="!confirmingAll" class="mr-1 h-4 w-4" aria-hidden="true" />
+                    {{ confirmingAll ? '正在确认…' : `全部确认（${disputedFaceCount}）` }}
+                  </el-button>
+                </template>
+              </el-popconfirm>
               <el-button
                 v-if="Number(photo.duplicates?.isDuplicate) === 1"
                 :loading="dupSaving"

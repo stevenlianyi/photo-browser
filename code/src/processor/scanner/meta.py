@@ -53,7 +53,7 @@ if _SRC_DIR not in sys.path:
 from common import miscCommon as misc                                            # noqa: E402
 from config import basicSettings as basicSettings                          # noqa: E402
 
-_VERSION = "20261007"
+_VERSION = "20261016"
 
 _LOG = misc.setLogNew("scannerMeta", "scannermeta.log")
 
@@ -98,15 +98,11 @@ SHOT_YEAR_SRC_NONE = "NONE"
 # 二、拍摄时间
 # ============================================================
 
-def exifTimeToUTC(text) -> str:
-    """EXIF 的 "2023:05:01 12:00:00" -> UTC ISO8601 "2023-05-01T04:00:00Z"。
+def parseExifLocalTime(text):
+    """EXIF 时间串 -> **本地（无时区）datetime**；非法/占位返回 None。
 
-    EXIF 规范里DateTimeOriginal **没有时区字段**，只能按本地时间理解，
-    再用 basicSettings.EXIF_LOCAL_UTC_OFFSET_HOURS 换算成 UTC 落库
-    （takenAt 字段的口径是 UTC，统一了将来跨时区排序才不会错）。
-
-    非法/占位值（"0000:00:00 00:00:00"、空、长度不对）一律返回 None，
-    由调用方退到文件名 / mtime 兜底。
+    这是 EXIF 时间解析的**唯一一份**：exifTimeToUTC（落库口径）与
+    exifTimeLocalYear（分桶口径）都走它，免得"长度校验/占位判定"两处分叉。
     """
     if not text:
         return None
@@ -127,9 +123,44 @@ def exifTimeToUTC(text) -> str:
         return None
     if naive.year <= 1:            # 0000:00:00 之类的占位
         return None
+    return naive
+
+
+def exifTimeToUTC(text) -> str:
+    """EXIF 的 "2023:05:01 12:00:00" -> UTC ISO8601 "2023-05-01T04:00:00Z"。
+
+    EXIF 规范里DateTimeOriginal **没有时区字段**，只能按本地时间理解，
+    再用 basicSettings.EXIF_LOCAL_UTC_OFFSET_HOURS 换算成 UTC 落库
+    （takenAt 字段的口径是 UTC，统一了将来跨时区排序才不会错）。
+
+    非法/占位值（"0000:00:00 00:00:00"、空、长度不对）一律返回 None，
+    由调用方退到文件名 / mtime 兜底。
+
+    ⚠️ **takenAt（UTC）不能拿去取"哪一年"** —— 见 exifTimeLocalYear。
+    """
+    naive = parseExifLocalTime(text)
+    if naive is None:
+        return None
     offset = datetime.timedelta(hours=basicSettings.EXIF_LOCAL_UTC_OFFSET_HOURS)
     aware = naive.replace(tzinfo=datetime.timezone(offset))
     return aware.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def exifTimeLocalYear(text) -> int:
+    """EXIF 时间串 -> **拍摄那一刻当地是哪一年**（"1980:01:01 00:04:05" -> 1980）。
+
+    为什么不能用 takenAt 取年份（2026-10 实测的那个现象）
+    --------------------------------------------------
+      takenAt 是**换算成 UTC 之后**的串：东八区 1980-01-01 00:04 拍的照片，
+      UTC 是 1979-12-31T16:04Z —— 从它取前 4 位得到 **1979**。
+      于是界面上「时间 1980-01-01 00:04」与「年代 1979 / 年代桶 1975–1979」
+      互相矛盾（用户报的就是这一条，见 DR-61）。
+      拍摄年份要的是**当地时间**的年份，所以一律从 EXIF 原文取。
+    """
+    naive = parseExifLocalTime(text)
+    if naive is None:
+        return None
+    return naive.year if _yearInRange(naive.year) else None
 
 
 def yearOfUTC(utcText) -> int:
@@ -278,7 +309,8 @@ def shotYearFromMTime(mtime) -> int:
     return year if _yearInRange(year) else None
 
 
-def resolveShotYear(exifTakenAt: str, fileName: str, mtime) -> dict:
+def resolveShotYear(exifTakenAt: str, fileName: str, mtime,
+                    exifLocalYear=None) -> dict:
     """定 shotYear：EXIF -> 文件名 -> mtime；截图类在没有 EXIF 时落 NULL。
 
     返回 {"shotYear": int|None, "source": "EXIF"/"NAME"/"MTIME"/"SCREENSHOT"/"NONE"}
@@ -288,6 +320,11 @@ def resolveShotYear(exifTakenAt: str, fileName: str, mtime) -> dict:
       **EXIF 最高**（DateTimeOriginal 是相机写的真实拍摄时间）；
       截图名的短路只发生在「EXIF 也没有」的情况下 —— 见
       basicSettings.SCREENSHOT_OVERRIDES_EXIF（默认 False = EXIF 优先）。
+
+    exifLocalYear 是 EXIF 里那串时间**本地**的年份（parseExifObject 给）。
+    ⚠️ 有它就用它，**不要**退回 `yearOfUTC(exifTakenAt)`：takenAt 是 UTC，
+      跨年时差 1（本地 1980-01-01 00:04 -> UTC 1979-12-31T16:04Z）。
+      只在调用方没给（老调用方 / 单测）时才用 UTC 年份兜底。
 
     为什么截图名要短路文件名推断
     --------------------------
@@ -299,9 +336,16 @@ def resolveShotYear(exifTakenAt: str, fileName: str, mtime) -> dict:
     if screenshot and basicSettings.SCREENSHOT_OVERRIDES_EXIF:
         return {"shotYear": None, "source": SHOT_YEAR_SRC_SCREENSHOT}
 
-    year = yearOfUTC(exifTakenAt)
+    year = None
+    if exifLocalYear is not None:
+        try:
+            year = int(exifLocalYear)
+        except (TypeError, ValueError):
+            year = None
+    if year is None:
+        year = yearOfUTC(exifTakenAt)
     if year and _yearInRange(year):
-        return {"shotYear": year, "source": SHOT_YEAR_SRC_EXIF}
+        return {"shotYear": int(year), "source": SHOT_YEAR_SRC_EXIF}
 
     if screenshot:
         return {"shotYear": None, "source": SHOT_YEAR_SRC_SCREENSHOT}
@@ -484,11 +528,14 @@ def _subIfd(exif, ifdTag: int) -> dict:
 def parseExifObject(exif) -> dict:
     """从 Pillow 的 Image.Exif 对象抽出入库需要的字段（**纯函数，不碰磁盘**）。
 
-    返回 {"orientation","cameraModel","takenAt","lat","lon"}，取不到就是 None。
-    单测直接new 一个 Image.Exif 塞标签即可，无需造图。
+    返回 {"orientation","cameraModel","takenAt","exifLocalYear","lat","lon"}，
+    取不到就是 None。单测直接new 一个 Image.Exif 塞标签即可，无需造图。
+
+    `exifLocalYear` 是**拍摄那一刻当地的年份**（不是 takenAt 的 UTC 年份）——
+    shotYear 取年份要用它，理由见 exifTimeLocalYear()。
     """
     result = {"orientation": None, "cameraModel": None, "takenAt": None,
-              "lat": None, "lon": None}
+              "exifLocalYear": None, "lat": None, "lon": None}
     if exif is None:
         return result
 
@@ -518,14 +565,21 @@ def parseExifObject(exif) -> dict:
         result["cameraModel"] = modelText[:128] or None
 
     # 拍摄时间：DateTimeOriginal > DateTimeDigitized > IFD0 DateTime
+    # ⚠️ 两个量都要取，且**必须来自同一个标签**：takenAt（UTC 落库口径）与
+    #    exifLocalYear（分桶口径，本地年）。只给 takenAt 的话跨年照片会差 1 年。
     takenAt = None
+    localYear = None
     for tag in (TAG_DATETIME_ORIGINAL, TAG_DATETIME_DIGITIZED):
         takenAt = exifTimeToUTC(exifIfd.get(tag))
         if takenAt:
+            localYear = exifTimeLocalYear(exifIfd.get(tag))
             break
     if not takenAt:
         takenAt = exifTimeToUTC(exif.get(TAG_DATETIME))
+        if takenAt:
+            localYear = exifTimeLocalYear(exif.get(TAG_DATETIME))
     result["takenAt"] = takenAt
+    result["exifLocalYear"] = localYear
 
     # GPS
     lat = _rationalToFloat(gpsIfd.get(TAG_GPS_LAT))
@@ -572,6 +626,7 @@ def emptyMeta(absPath: str = "") -> dict:
     """一张「什么都没读到」的图也必须能入库 —— 给出全 None 的骨架"""
     return {"mimeType": mimeOfFormat(None, absPath), "width": None, "height": None,
             "orientation": None, "cameraModel": None, "takenAt": None,
+            "exifLocalYear": None,
             "lat": None, "lon": None, "placeName": None,
             "shotYear": None, "shotYearSource": SHOT_YEAR_SRC_NONE}
 
@@ -626,7 +681,10 @@ def readMeta(absPath: str, fileSize: int = None, mtime: float = None) -> dict:
             meta = emptyMeta(absPath)
 
     # ---- 拍摄年份：EXIF -> 文件名 -> mtime ----
-    shot = resolveShotYear(meta.get("takenAt"), fileName, mtime)
+    # ⚠️ 必须把 EXIF 的**本地**年份一起传进去：只给 takenAt（UTC）的话，
+    #    本地 1 月 1 日 0~8 点拍的照片会被算成前一年（见 exifTimeLocalYear）。
+    shot = resolveShotYear(meta.get("takenAt"), fileName, mtime,
+                           exifLocalYear=meta.get("exifLocalYear"))
     meta["shotYear"] = shot["shotYear"]
     meta["shotYearSource"] = shot["source"]
 
@@ -653,6 +711,10 @@ if __name__ == "__main__":
     print("meta _VERSION   :", _VERSION)
     print("时区偏移        :", basicSettings.EXIF_LOCAL_UTC_OFFSET_HOURS, "小时")
     print("截图覆盖 EXIF   :", basicSettings.SCREENSHOT_OVERRIDES_EXIF)
+    print("跨年边界自检    : 本地 1980:01:01 00:04 ->",
+          exifTimeToUTC("1980:01:01 00:04:05"),
+          "| 本地年 =", exifTimeLocalYear("1980:01:01 00:04:05"),
+          "（takenAt 的 UTC 年是 1979，分桶必须用本地年）")
     for name in ("mmexport_1682908800000.jpg", "IMG_20240501_120000.jpg",
                  "2021-11-11 合影.jpg", "Screenshot_20240501_120000.png",
                  "截图 2024.png", "DSC00001.JPG"):

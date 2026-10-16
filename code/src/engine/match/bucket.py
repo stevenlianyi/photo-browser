@@ -12,6 +12,12 @@
 #   birthYear 未知 -> 降级等宽 5 年（方案 A，零前置条件）
 #   shotYear  未知 -> 返回空串（落库为 NULL），**不参与跨桶比对**
 #
+# 另有一个「有效拍摄年」的口径也在本模块：effectiveShotYear(photoRow)
+# --------------------------------------------------------------------
+#   it = COALESCE(pb_photo.shotYearOverride, pb_photo.shotYear)（DR-42）。
+#   它的调用方是 faceStore（占位桶）/ rebucket（年代档）/ 展示层，
+#   放在这里是为了让"照片是哪一年"只有一处实现 —— 详见该函数自己的说明。
+#
 # 三条边界纪律
 # ------------
 #   1. **shotYear 无效一律返回空串，绝不猜**。截图类（步骤 3 已把 shotYear 置 NULL）
@@ -123,6 +129,36 @@ def validShotYear(value):
     if year is None or year < _SHOT_YEAR_MIN or year > _SHOT_YEAR_MAX:
         return None
     return year
+
+
+def effectiveShotYear(photoRow) -> object:
+    """pb_photo 行 -> **有效拍摄年** = COALESCE(shotYearOverride, shotYear)（DR-42）。
+
+    这是「这张照片是哪一年拍的」在 Python 侧的**唯一口径**，与 SQL 侧的
+    `comGD.sqlEffectiveShotYear()` 逐字等价（那边给筛选/聚合用，这边给分桶用）：
+      · `shotYearOverride` 有值就用它（人工修正优先）；
+      · 空串与 None 一样当"未修正"（SQLite 该列应为 NULL，但手工改过库的行
+        可能是 ''）。
+
+    ⚠️ 为什么它必须住在**纯函数**模块里（而不是 engine/face 或 processor 里）：
+       人脸提取（faceStore）要拿它算占位桶、重刷（rebucket）要拿它算年代档、
+       展示层要拿它显示年份 —— 三处各写一遍 `COALESCE` 看着无害，
+       但只要**任何一处**漏了 override，
+       症状就是「界面显示 2012、年代档却按 EXIF 的 1979 算」这种自相矛盾，
+       而且库里不报错（2026-10 实测：4981 张脸的年代档与它主人的生日本该
+       是自适应桶，却停在等宽占位桶上）。bucket.py 无数据库/无 numpy 依赖，
+       三层都能安全 import。
+
+    ⚠️ **不做区间校验**：override 写库时已过 `validShotYear`
+       （processor/photoTimeFix.validateYear 与批量回填工具同一道闸）。
+       这里再卡一次只会让"库里有一条越界值"这件事从分桶结果里消失 ——
+       越界值继续走 bucketKeyAdaptive -> 空桶键（不进跨桶比对）是**可见**的。
+    """
+    row = photoRow or {}
+    override = row.get("shotYearOverride")
+    if override is None or str(override).strip() == "":
+        return row.get("shotYear")
+    return override
 
 
 def validBirthYear(value) -> int:

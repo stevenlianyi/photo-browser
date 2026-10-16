@@ -26,6 +26,12 @@ export const NAV_ITEMS = [
   { name: 'photos', path: '/photos', label: '照片流', icon: 'Images' },
   { name: 'people', path: '/people', label: '人物库', icon: 'Users' },
   { name: 'places', path: '/places', label: '地点', icon: 'MapPin' },
+  // R16（DR-59~63）：按磁盘目录逐级浏览图片。
+  // ⚠️ 名字叫「文件夹」而不是「相册」：品牌名就是「相认相册」，侧栏里
+  //    两个"相册"并排会让人分不清哪个是产品、哪个是某一类视图；
+  //    而且它与「照片流」语义重叠。同层的「人物库 / 地点 / 文件夹」才是同一维度名。
+  // ⚠️ **不加 badge**（与「地点」同一个理由）：角标 = 「有 N 件事等着你处理」。
+  { name: 'folders', path: '/folders', label: '文件夹', icon: 'FolderTree' },
   { name: 'review', path: '/review', label: '待确认', icon: 'ClipboardCheck', badge: true },
   { name: 'scanJobs', path: '/scan-jobs', label: '扫描任务', icon: 'ScanLine' },
   { name: 'settings', path: '/settings', label: '设置', icon: 'Settings', divider: true },
@@ -76,6 +82,16 @@ const routes = [
     name: 'placeDetail',
     component: () => import('@/views/PlaceDetailView.vue'),
     meta: { title: '地点详情', crumbs: ['地点', '地点详情'], icon: 'MapPin' },
+  },
+  {
+    // R16：层级路径（照片库 / 一级 / 二级）由 FoldersView 自己渲染 ——
+    // ⚠️ `meta.crumbs` 是**静态数组**，表达不了「当前在多层目录里的哪一层」，
+    //    所以这里只写一项；顶栏面包屑（AppTopbar 直接读 meta.crumbs）保持简单，
+    //    真正的层级路径在文件夹页页头（每一段可点击跳回）。
+    path: '/folders',
+    name: 'folders',
+    component: () => import('@/views/FoldersView.vue'),
+    meta: { title: '文件夹', crumbs: ['文件夹'], icon: 'FolderTree' },
   },
   {
     path: '/review',

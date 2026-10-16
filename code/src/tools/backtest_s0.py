@@ -242,6 +242,10 @@ def _run(args) -> int:
     engineKwargs = {"modelPack": args.model,
                     "detSize": (args.det_size, args.det_size),
                     "minDetScore": args.min_det, "minFaceEdge": args.min_edge,
+                    # ⚠️ 必须显式关掉短边自适应：本脚本的**唯一职责**是复现 S0 的
+                    #    统计口径（固定 64px），一旦跟着图片尺寸浮动，
+                    #    老照片会被多收进来，样本数与 S0 对不上，阈值推荐随之漂移。
+                    "adaptiveMinEdge": False,
                     "maxYaw": args.max_yaw}
     t0 = time.time()
     embeddings, stats, timing, summary = collectEmbeddings(

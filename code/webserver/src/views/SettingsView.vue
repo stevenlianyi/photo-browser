@@ -328,6 +328,21 @@ async function copy(text) {
         这些年代档取不到任何质心，属于 DR-22 说的静默失配。跑一次「重新生成质心」即可。
       </p>
 
+      <!--
+        DR-61：**该刷没刷**。这里必须说清「和你看到的照片年代对不上」这件事 ——
+        用户报的现象是「年代显示 2012、年代桶却是 1975–1979」，而库里不报任何错。
+      -->
+      <p
+        v-if="centroids?.staleDegradedFaces"
+        class="mt-3 rounded-btn bg-warning-soft px-3 py-2 text-caption text-warning-ink"
+      >
+        <TriangleAlert class="mr-1 inline h-3.5 w-3.5" aria-hidden="true" />
+        有 <b>{{ formatCount(centroids.staleDegradedFaces) }}</b> 张脸「已归属且主人有生日」，
+        但仍挂在<b>等宽 5 年降级桶</b>上 —— 按口径它们应当是自适应桶（童年 3 年 / 成年 10 年）。
+        表现为人物时间轴里多出不属于任何人的年代档，且与照片上的人工修正年代对不上。
+        跑一次下面的「重新生成质心」（它会先重刷年代档）即可刷回。
+      </p>
+
       <div class="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3">
         <p class="max-w-xl text-body text-ink-sub">
           <b>重新生成质心</b>：默认先<b>重刷年代档</b>（按当前分年代档策略与生日重算
@@ -414,7 +429,10 @@ async function copy(text) {
                 <template v-if="one.createdYMDHMS"> · {{ one.createdYMDHMS }}</template>
                 <template v-if="one.label"> · {{ one.label }}</template>
               </span>
-              <span v-if="!one.hasDb || !one.hasThumb" class="ml-2 text-danger-ink">
+              <span v-if="one.broken" class="ml-2 text-danger-ink">
+                （中途失败：<b>缺 manifest</b>，里面的缩略图只拷了一部分，恢复会被拒绝 —— 直接删掉这个目录）
+              </span>
+              <span v-else-if="!one.hasDb || !one.hasThumb" class="ml-2 text-danger-ink">
                 （不完整，恢复会被拒绝）
               </span>
             </li>

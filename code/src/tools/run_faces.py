@@ -14,6 +14,15 @@
 #   # 全量重提取（先删旧人脸行再插；换检测模型或修 bug 后用）
 #   python code\src\tools\run_faces.py --replace
 #
+#   # R17：短边门槛放宽后重跑「库里还没有人脸」的老照片（**增量补充，不删旧行**）
+#   #   短边>=1280 的大图门槛没变，所以用 --max-short-edge 1280 只打受益的那批
+#   #   （实测 faceCount=0 里 7137 张短边<1280、11296 张 >=2048 无收益）
+#   python code\src\tools\run_faces.py --only-empty-face --max-short-edge 1280 --limit 200
+#
+#   # R17 第二批：**增量补漏** —— 门槛放松后把「已经有脸的」老照片里漏掉的配角脸补上
+#   #   （不删旧行、保留人工确认；这批占大头，短边<1600 的有 1.3 万张）
+#   python code\src\tools\run_faces.py --refresh-small --max-short-edge 1600 --limit 500
+#
 #   # 指到临时库做实验（绝不动正式库）
 #   python code\src\tools\run_faces.py --db d:\tmp\test.db --root d:\tmp\photos
 #
@@ -142,21 +151,51 @@ def _run(args) -> int:
     photoRoot = os.path.abspath(args.root or paths.photo_dir())
     thumbRoot = os.path.abspath(args.thumb or paths.thumb_dir())
 
-    onlyPending = not args.all
+    onlyPending = ((not args.all) and not args.only_empty_face
+                   and not args.refresh_small)
+    if args.only_empty_face or args.refresh_small:
+        scope = ("faceCount=0 且 isMissing=0（R17 重跑老照片；**不看 scanState**）"
+                 if args.only_empty_face else
+                 "短边<%dpx 的**所有**照片（增量补漏，含已有脸的；不看 scanState）"
+                 % (args.max_short_edge or 0))
+        if args.max_short_edge:
+            scope += " 且 短边<%dpx" % args.max_short_edge
+    elif onlyPending:
+        scope = "scanState=0（待扫描）"
+    else:
+        scope = "全部照片"
     print("=" * 68)
     print("人脸特征提取  |  库 %s" % dbFile)
     print("  photo=%s  thumb=%s" % (photoRoot, thumbRoot))
     print("  取数范围: %s   workers=%s   replace=%s"
-          % ("scanState=0（待扫描）" if onlyPending else "全部照片",
-             args.workers or "auto", bool(args.replace)))
-    print("  质量阈值: detScore>=%s  短边>=%spx  |yaw|<=%s"
-          % (args.min_det, args.min_edge, args.max_yaw))
+          % (scope, args.workers or "auto", bool(args.replace)))
+    if args.only_empty_face or args.refresh_small:
+        # 这几句必须在**开跑之前**说：写正式库是不可逆的，而"和界面任务抢写锁"
+        # 恰恰是这类批处理最容易踩的坑（现象是跑到一半 database is locked）
+        print("  ⚠️ 本批会写库（插入/更新人脸行 + 更新 faceCount/scanState）：")
+        print("     建议先停掉正在运行的服务，避免与界面上的扫描/认脸任务抢写锁。")
+    if args.only_empty_face:
+        print("     这些照片本来就没有人脸行，--replace 对它们没有实际影响。")
+    elif args.refresh_small:
+        print("     ⚠️ 增量补漏**不要加 --replace**：那会先删掉这张照片上已人工确认的"
+              "脸；不带它时旧脸按 faceCode 原样 upsert（isConfirmed 不动）。")
+    print("  质量阈值: detScore>=%s  短边>=%s  |yaw|<=%s"
+          % (args.min_det,
+             ("%spx（固定）" % args.min_edge) if args.min_edge
+             else ("%spx + 小图按比例自适应" % basicSettings.MIN_FACE_EDGE
+                   if not args.no_adaptive_edge else "%spx（固定）"
+                   % basicSettings.MIN_FACE_EDGE),
+             args.max_yaw))
     print("=" * 68)
 
     rows = faceStore.loadPhotoRows(dbFile=dbFile, limit=args.limit,
                                    offset=args.offset, onlyPending=onlyPending,
                                    photoRoot=photoRoot,
-                                   orderBy="recID", descFlag=args.reverse)
+                                   orderBy="recID", descFlag=args.reverse,
+                                   onlyEmptyFace=args.only_empty_face,
+                                   maxShortEdge=args.max_short_edge,
+                                   minRecID=args.min_rec_id,
+                                   refreshSmall=args.refresh_small)
     print("待处理照片: %d 张" % len(rows))
     if not rows:
         print("没有待处理照片（换个 --all 或 --offset 试试）")
@@ -178,16 +217,24 @@ def _run(args) -> int:
         print("   进度 %d/%d  %.1f 张/秒  剩余约 %.0f 秒"
               % (done, total, rate, (total - done) / max(rate, 1e-6)))
 
+    engineKwargs = {"minDetScore": args.min_det, "maxYaw": args.max_yaw,
+                    "modelPack": args.model,
+                    "detSize": (args.det_size, args.det_size),
+                    # 小图的短边门槛按比例放宽（1280x960 -> 48px），大图不变；
+                    # --no-adaptive-edge 时退回"固定 64px"的老口径
+                    "adaptiveMinEdge": (False if args.no_adaptive_edge else None),
+                    "wantCrop": not args.no_crop,
+                    # 被丢弃的人脸明细默认回传（pool.DEFAULT_ENGINE_KWARGS 已为 True），
+                    # 这里不覆盖：收集是常开的，开关只控制"要不要打印"
+                    "reportRejected": True}
+    # ⚠️ 只在用户**显式**给了 --min-edge 时才传：传了就是固定门槛、
+    #    自适应失效（见 engine.effectiveMinFaceEdge 的①）。缺省必须不传。
+    if args.min_edge:
+        engineKwargs["minFaceEdge"] = int(args.min_edge)
     out = faceStore.extractAndStore(
         rows, workers=args.workers, dbFile=dbFile,
         photoRoot=photoRoot, thumbRoot=thumbRoot,
-        engineKwargs={"minDetScore": args.min_det, "minFaceEdge": args.min_edge,
-                      "maxYaw": args.max_yaw, "modelPack": args.model,
-                      "detSize": (args.det_size, args.det_size),
-                      "wantCrop": not args.no_crop,
-                      # 被丢弃的人脸明细默认回传（pool.DEFAULT_ENGINE_KWARGS 已为 True），
-                      # 这里不覆盖：收集是常开的，开关只控制"要不要打印"
-                      "reportRejected": True},
+        engineKwargs=engineKwargs,
         replaceFaces=args.replace, onProgress=_progress)
 
     pool = out["pool"]
@@ -264,6 +311,21 @@ def buildParser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=0, help="最多处理多少张（0=不限）")
     parser.add_argument("--offset", type=int, default=0, help="跳过前 N 张（分页）")
     parser.add_argument("--all", action="store_true", help="连已提取过的一起重跑（不删旧行）")
+    parser.add_argument("--only-empty-face", action="store_true",
+                        help="只跑 faceCount=0 的照片（门槛放宽后重跑老照片用；"
+                             "判据不看 scanState，故能捞到早就扫过的那些）")
+    parser.add_argument("--refresh-small", action="store_true",
+                        help="**增量补漏**：对短边<--max-short-edge **且已经有脸**的照片"
+                             "重跑提取，把门槛放松后漏掉的配角脸补进来"
+                             "（faceCount=0 的那些归 --only-empty-face，两批不重叠）。"
+                             "⚠️ 不要与 --replace 同用（那会删掉已人工确认的脸）")
+    parser.add_argument("--max-short-edge", type=int, default=0,
+                        help="只处理短边 < Npx 的照片（0=不限）。配 --only-empty-face 用："
+                             "短边门槛放宽只发生在短边 < 1280 的图上，大图重跑没有收益")
+    parser.add_argument("--min-rec-id", type=int, default=0,
+                        help="只处理 recID > N 的照片（**分批重跑的游标**）。"
+                             "配 --only-empty-face 时**必须**用它推进：断点续跑靠它，"
+                             "因为没检出人脸的照 faceCount 仍是 0、会永远留在候选集里")
     parser.add_argument("--replace", action="store_true",
                         help="重提取：先按 photoCode 删旧人脸行再插（换模型/修 bug 用）")
     parser.add_argument("--reverse", action="store_true", help="从最新的照片开始")
@@ -271,8 +333,12 @@ def buildParser() -> argparse.ArgumentParser:
     parser.add_argument("--det-size", type=int, default=640, help="检测边长")
     parser.add_argument("--min-det", type=float, default=basicSettings.MIN_DET_SCORE,
                         help="detScore 下限")
-    parser.add_argument("--min-edge", type=int, default=basicSettings.MIN_FACE_EDGE,
-                        help="人脸框短边下限(px)")
+    parser.add_argument("--min-edge", type=int, default=None,
+                        help="人脸框短边下限(px)。缺省不传 = %spx 且小图按比例自适应；"
+                             "显式给出即固定值、自适应失效" % basicSettings.MIN_FACE_EDGE)
+    parser.add_argument("--no-adaptive-edge", action="store_true",
+                        help="关闭短边按图自适应：结果恒等于 %spx（老口径 / S0 对照）"
+                             % basicSettings.MIN_FACE_EDGE)
     parser.add_argument("--max-yaw", type=float, default=basicSettings.MAX_YAW,
                         help="侧脸 |yaw| 上限(度)")
     parser.add_argument("--no-crop", action="store_true", help="不裁人脸图（只入库特征）")

@@ -85,6 +85,29 @@ def knownColumns(tableName: str = "") -> frozenset:
     return frozenset(col["name"] for col in sqliteCommon.TABLE_COLUMNS[tableName])
 
 
+#: 只读黑名单里的**写语句**关键词（命中即拒）。
+#:
+#: ⚠️ `REPLACE` **不在这里** —— 它要按形态区别对待（见 `_NOT_FUNCTION_REPLACE`）：
+#:    · `replace(X, Y, Z)` 是 SQLite 的**标量函数**。R16「文件夹浏览」的目录键
+#:      就是 `rtrim(rtrim(relPath, replace(relPath,'/','')), '/')`，少了它整个
+#:      功能（目录树 + 目录筛选）都写不出来；
+#:    · `REPLACE INTO t ...` / `INSERT OR REPLACE INTO t ...` 是**写语句**。
+#:   两者的区分点是「`REPLACE` 后面紧跟的是不是**左括号**」——
+#:   写语句后面永远是 `INTO`，标量函数后面永远是 `(`。这个判据是语法级的，
+#:   不是启发式：SQLite 里不存在「`REPLACE ( ... )` 作为语句」的写法。
+#:   ⚠️ 另一条写路径 `INSERT OR REPLACE` 由 `INSERT` 那一条直接兜住，
+#:      所以本项不会给它开后门（见 `test_assertSelectStillBlocksWriteForms`）。
+_READ_ONLY_STATEMENT_WORDS: tuple = ("INSERT", "UPDATE", "DELETE", "DROP",
+                                     "ALTER", "CREATE", "ATTACH", "PRAGMA",
+                                     "VACUUM")
+
+#: 命中即拒的整体模式：写语句关键词，**或**「非函数调用形态的 REPLACE」。
+#: `(?!\s*\()` 是那个语法级判据（允许 `replace (` 这种带空格的写法）。
+_READ_ONLY_VIOLATION = re.compile(
+    r"\b(?:%s)\b|\bREPLACE\b(?!\s*\()"
+    % "|".join(_READ_ONLY_STATEMENT_WORDS), flags=re.IGNORECASE)
+
+
 def assertSelect(sqlstr: str) -> str:
     """校验一条 SQL 文本是「只读 SELECT」，返回去掉首尾空白的原文。
 
@@ -95,6 +118,14 @@ def assertSelect(sqlstr: str) -> str:
       这条纪律就有了一个绕过口 —— 而那个白名单正是为了防「update_* 写不进 NULL
       却返回成功」这类静默空操作（见 assigner._patchFace 的注释）。
       所以这里**结构性地**只留读。
+
+    ⚠️ 关于 `REPLACE`（R16 细化）
+    ----------------------------
+      原来这一条是「出现 `\\bREPLACE\\b` 就拒」，把**标量函数** `replace(x,y,z)`
+      也一起拦了 —— 目录键的表达式当场报错，而报错只说「SQL 里出现 REPLACE」，
+      与"我只想裁掉文件名"这个意图看起来毫无关系。
+      现在只拦**非函数调用形态**的 `REPLACE`（判据见 `_READ_ONLY_VIOLATION`），
+      写语句（`REPLACE INTO` / `INSERT OR REPLACE`）照旧全拦。
     """
     text = str(sqlstr or "").strip()
     if not text:
@@ -102,11 +133,10 @@ def assertSelect(sqlstr: str) -> str:
     head = re.sub(r"\s+", " ", text[:64]).strip()
     if not re.match(r"^(SELECT|WITH)\b", head, flags=re.IGNORECASE):
         raise QuerySqlError("本模块只允许 SELECT / WITH，收到: %s..." % text[:48])
-    for word in ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE",
-                 "REPLACE", "ATTACH", "PRAGMA", "VACUUM"):
-        if re.search(r"\b%s\b" % word, text, flags=re.IGNORECASE):
-            raise QuerySqlError("本模块是只读出口，SQL 里出现 %s: %s..."
-                                % (word, text[:48]))
+    hit = _READ_ONLY_VIOLATION.search(text)
+    if hit:
+        raise QuerySqlError("本模块是只读出口，SQL 里出现 %s: %s..."
+                            % (hit.group(0).strip().upper(), text[:48]))
     return text
 
 
@@ -146,6 +176,17 @@ _SQL_FUNCTIONS = frozenset({
     #    整条查询会当场报错（地点列表与 rebuild 全挂），而报错信息
     #    只会说「未知标识符 NULLIF」—— 与地点这个业务毫无字面关联。
     "NULLIF",
+    # ⚠️ 同理 `RTRIM` / `REPLACE`（R16 · DR-60）—— **同一个坑的第二次**。
+    #    「文件夹」浏览要从 `pb_photo.relPath` 现推目录键：
+    #        rtrim(rtrim(relPath, replace(relPath,'/','')), '/')
+    #    两个函数都不在上面的枚举里 ⇒ `checkColumns` 把 `RTRIM` / `REPLACE`
+    #    判成「未知标识符」，**目录树与目录筛选整条链路口报错**，
+    #    而报错原文是「SQL 里出现未知标识符 ['REPLACE', 'RTRIM']（不在生成层
+    #    列白名单内，schema 加了列请重跑生成器）」—— 让人去重跑生成器，
+    #    与真实病因（少登记两个函数名）毫无关系。
+    #    ⚠️ 三个消费点（`api/album.py` 的聚合、`api/browse.py` 的筛选、
+    #      `processor/album/dirPath.py` 的表达式出口）都依赖这两项。
+    "RTRIM", "REPLACE",
 })
 
 

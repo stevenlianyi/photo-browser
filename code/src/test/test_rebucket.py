@@ -638,3 +638,228 @@ class TestAuditBuckets:
         report = rebucket.auditBuckets()
         assert report["mismatchedFaces"], "必须报出失配脸"
         assert report["clean"] is False
+
+
+# ============================================================
+# 五、DR-61：有效拍摄年 / 批量刷桶 / 占位桶两处口径缺陷 / 「该刷没刷」巡检
+# ============================================================
+#
+# 这一组盯的是 2026-10 实测的用户现象：
+#   「照片的年代显示 2012（人工修正），人物时间轴里的年代桶却是 1975–1979」
+# 三个可证伪的口径缺陷各有一条用例：
+#   ① 占位桶按**裸 shotYear** 算（应用有效年）；
+#   ② 重提取/补漏的 upsert 把**已刷好的** shotBucket 覆盖回占位桶（不该覆盖）；
+#   ③ 跨年照片的 shotYear 差 1 年（EXIF 本地 1980-01-01 00:04 -> UTC 1979）——
+#      它属于 processor/scanner/meta.py，用例在 test_scanner_meta.py。
+
+class TestEffectiveShotYear:
+    """`bucket.effectiveShotYear` —— 「照片是哪一年」在 Python 侧的唯一口径。"""
+
+    def test_override_wins(self):
+        assert bucket.effectiveShotYear(
+            {"shotYear": 1979, "shotYearOverride": 2012}) == 2012
+
+    def test_no_override_falls_back(self):
+        assert bucket.effectiveShotYear({"shotYear": 1979}) == 1979
+        # 空串 = 未修正（手工改过库的行可能是 ''，SQLite 口径应为 NULL）
+        assert bucket.effectiveShotYear(
+            {"shotYear": 1979, "shotYearOverride": ""}) == 1979
+        assert bucket.effectiveShotYear({"shotYear": 1979,
+                                         "shotYearOverride": None}) == 1979
+
+    def test_row_without_the_column(self):
+        """某条 SQL 没选这一列时 -> 视作未修正，**不能算成 None**（否则整张脸失去桶）"""
+        assert bucket.effectiveShotYear({"shotYear": 1979}) == 1979
+        assert bucket.effectiveShotYear(None) is None
+
+    def test_rebucket_forwards_to_bucket_module(self):
+        """rebucket 的入口只是转发（实现只有一处，免得两处迟早分叉）"""
+        row = {"shotYear": 1979, "shotYearOverride": 2012}
+        assert rebucket.effectiveShotYear(row) == bucket.effectiveShotYear(row)
+        assert rebucket.shotBucketFor(2012, BIRTH_ADULT) == \
+            bucket.bucketKeyOf(2012, BIRTH_ADULT)
+
+
+def addPhotoWithOverride(code, shotYear, override):
+    """带人工修正年的照片行（身份列齐全，供 faceStore 的 pb_photo 补丁 upsert 用）。"""
+    sqliteCommon.insertManyTableGeneral(
+        "pb_photo", [{"photoCode": code, "relPath": "%s.jpg" % code,
+                      "relPathHash": code.ljust(64, "0")[:64],
+                      "fileHash": code.ljust(64, "1")[:64],
+                      "fileSize": 1024, "shotYear": shotYear,
+                      "shotYearOverride": override}],
+        conflictColumns=("photoCode",), fillStandard=True)
+
+
+def faceData(faceCode, photoCode, vec):
+    """一张「子进程回传」形状的人脸（字段名与 FaceHit.toDict() 一致）。"""
+    return {"faceCode": faceCode, "photoCode": photoCode,
+            "bbox": (0.1, 0.1, 0.2, 0.2), "detScore": 0.9, "quality": 0.8,
+            "poseYaw": 0.0, "posePitch": 0.0,
+            "embedding": faceEngine.encodeEmbedding(vec)}
+
+
+class TestRebucketPhotos:
+    """`rebucketPhotos` —— 批量刷桶（人脸任务收尾兜底用它）。"""
+
+    def test_fixesBatchAndReportsOwners(self, lib):
+        addPerson("P01", "小明", BIRTH_ADULT)
+        addPhotoWithOverride("PH_a", 1979, 2012)
+        addPhotoWithOverride("PH_b", 1979, 2012)
+        # 两张照片的脸都停在「未归属时期」的等宽占位桶上（这就是用户看到的那一档）
+        for code in ("fc_a", "fc_b"):
+            addFace(code, "PH_a" if code == "fc_a" else "PH_b", unit(400),
+                    "P01", 1, bucketKey=bucket.bucketKeyEqual(1979))
+
+        info = rebucket.rebucketPhotos(["PH_a", "PH_b", "PH_b"])
+        want = rebucket.shotBucketFor(2012, BIRTH_ADULT)
+        assert info["photos"] == 2, "photoCodes 去重后应只剩 2 张"
+        assert info["faces"] == 2 and info["changed"] == 2
+        assert info["personCodes"] == ["P01"]
+        assert bucketOf("fc_a") == want and bucketOf("fc_b") == want
+        assert bucket.bucketWidth(want) == bucket.ADULT_WIDTH, "应当是自适应成年桶"
+
+    def test_noChangeWritesNothing(self, lib):
+        addPerson("P01", "小明", BIRTH_ADULT)
+        addPhoto("PH_a", SHOT_ADULT)
+        addFace("fc_a", "PH_a", unit(401), "P01", 1)      # 桶已按当前口径算好
+        info = rebucket.rebucketPhotos(["PH_a"])
+        assert info["changed"] == 0 and info["written"] == 0
+        assert info["personCodes"] == []
+
+    def test_emptyInput(self):
+        info = rebucket.rebucketPhotos([])
+        assert info == {"photos": 0, "faces": 0, "changed": 0, "written": 0,
+                        "personCodes": [], "samples": [], "dryRun": False}
+
+
+class TestAuditStaleDegraded:
+    """⑤ 该刷没刷：已归属 + 主人有生日 + 桶键却是等宽降级桶。"""
+
+    def test_detectedAndCleaned(self, lib):
+        addPerson("P01", "小明", BIRTH_ADULT)
+        addPhotoWithOverride("PH_a", 1979, 2012)
+        addFace("fc_a", "PH_a", unit(410), "P01", 1,
+                bucketKey=bucket.bucketKeyEqual(1979))     # 占位桶（按原始年）
+
+        report = rebucket.auditBuckets()
+        assert report["staleDegraded"]["count"] == 1
+        assert report["staleDegraded"]["samples"][0]["faceCode"] == "fc_a"
+        assert report["clean"] is False, "该刷没刷必须让巡检判脏"
+        assert any("该刷" in text or "等宽" in text for text in report["warnings"])
+
+        rebucket.rebucketPhotos(["PH_a"])
+        after = rebucket.auditBuckets()
+        assert after["staleDegraded"]["count"] == 0
+        assert after["clean"] is True
+
+    def test_unassignedEqualWidthIsLegal(self, lib):
+        """**未归属**脸的等宽桶是合法状态（不是"该刷没刷"），别把它算进来"""
+        addPhoto("PH_a", SHOT_ADULT)
+        addFace("fc_a", "PH_a", unit(411), None, 0,
+                bucketKey=bucket.bucketKeyEqual(SHOT_ADULT))
+        report = rebucket.auditBuckets()
+        assert report["staleDegraded"]["count"] == 0
+        assert report["clean"] is True
+
+
+class TestSealBucketsHook:
+    """任务收尾的桶口径兜底（schedule.faceScheduler.sealBuckets，DR-61）。"""
+
+    def test_sealFixesAndRecomputesCentroid(self, lib):
+        from schedule import faceScheduler as faceSched
+
+        addPerson("P01", "小明", BIRTH_ADULT)
+        addPhotoWithOverride("PH_a", 1979, 2012)
+        addFace("fc_a", "PH_a", unit(430), "P01", 1,
+                bucketKey=bucket.bucketKeyEqual(1979))
+
+        stat = faceSched.sealBuckets(["PH_a"])
+        assert stat["changed"] == 1 and stat["written"] == 1
+        assert stat["persons"] == 1, "桶键变了就必须跟着重算那个人的质心"
+        assert bucketOf("fc_a") == rebucket.shotBucketFor(2012, BIRTH_ADULT)
+
+    def test_sealNeverRaisesEvenIfRebucketFails(self, lib, monkeypatch):
+        """刷桶失败**不能**把整批任务变成 FAILED（那是错误归因），只记 errMsg"""
+        from engine.match import rebucket as rb
+        from schedule import faceScheduler as faceSched
+
+        def _boom(codes, dryRun=False):
+            raise RuntimeError("模拟：库被锁住了")
+
+        monkeypatch.setattr(rb, "rebucketPhotos", _boom)
+        stat = faceSched.sealBuckets(["PH_a"])
+        assert stat["changed"] == 0
+        assert "模拟" in stat["errMsg"]
+
+    def test_sealEmptyInputIsNoop(self):
+        from schedule import faceScheduler as faceSched
+
+        stat = faceSched.sealBuckets([])
+        assert stat["photos"] == 0 and stat["changed"] == 0
+
+
+class TestFaceStoreBucketDr61:
+    """faceStore 的两条口径纪律（占位桶按有效年 / 老行桶键不覆盖）。"""
+
+    def _store(self, lib):
+        from engine.face import faceStore as faceStore
+        return faceStore.FaceStore(dbFile=lib, replaceFaces=False)
+
+    def test_placeholderUsesEffectiveYear(self, lib):
+        """新脸的占位桶必须按**有效拍摄年**算，不是裸 shotYear。"""
+        from engine.face import faceStore as faceStore
+        row = {"photoCode": "PH_a", "shotYear": 1979, "shotYearOverride": 2012}
+        built = faceStore.buildFaceRow(row, faceData("fc_a", "PH_a", unit(420)))
+        assert built["shotBucket"] == bucket.bucketKeyEqual(2012)
+        assert built["shotBucket"] != bucket.bucketKeyEqual(1979), \
+            "按裸 shotYear 算就会落回 EXIF 那一年的桶（用户报的现象）"
+
+    def test_upsertKeepsBucketAndOwnership(self, lib):
+        """重提取/增量补漏 upsert 命中老行时：桶键与归属都**一个字都不许改**。"""
+        from engine.face import faceStore as faceStore
+
+        addPerson("P01", "小明", BIRTH_ADULT)
+        addPhotoWithOverride("PH_a", 1979, 2012)
+        photoRow = sqliteCommon.query_pb_photo(
+            "pb_photo", photoCode="PH_a", mode="light")[0]
+
+        store = self._store(lib)
+        store.submit(photoRow, {"faces": [faceData("fc_a", "PH_a", unit(421))]})
+        store.flush()
+        # ① 新脸 -> 等宽占位桶（按有效年 2012 -> 2010-2014）
+        assert bucketOf("fc_a") == bucket.bucketKeyEqual(2012)
+        assert "PH_a" in store.drainTouched(), "动过的照片要能取出来（收尾兜底用）"
+        assert store.drainTouched() == [], "drain 必须取走即清空"
+
+        # ② 人工确认 -> 归属 + 自适应桶
+        assigner.confirm("fc_a", "P01")
+        assigned = bucketOf("fc_a")
+        assert assigned == rebucket.shotBucketFor(2012, BIRTH_ADULT)
+        assert bucket.bucketWidth(assigned) == bucket.ADULT_WIDTH
+
+        # ③ 再跑一次提取（同一 faceCode -> upsert 命中）：桶键 / 归属 / 确认标记都不许变
+        store2 = faceStore.FaceStore(dbFile=lib, replaceFaces=False)
+        store2.submit(photoRow, {"faces": [faceData("fc_a", "PH_a", unit(421))]})
+        store2.flush()
+        assert bucketOf("fc_a") == assigned, \
+            "提取无权改桶键（它按未归属口径只能给出占位桶，那是错的）"
+        row = faceRow("fc_a")
+        assert str(row.get("personCode") or "") == "P01"
+        assert int(row.get("isConfirmed") or 0) == 1
+
+    def test_replaceModeWritesPlaceholderForNewFaces(self, lib):
+        """replace 模式（先删后插）落的是**新脸** -> 占位桶照旧写（按有效年）"""
+        from engine.face import faceStore as faceStore
+
+        addPhotoWithOverride("PH_a", 1979, 2012)
+        addFace("fc_old", "PH_a", unit(422))              # 旧脸（未归属）
+        photoRow = sqliteCommon.query_pb_photo(
+            "pb_photo", photoCode="PH_a", mode="light")[0]
+
+        store = faceStore.FaceStore(dbFile=lib, replaceFaces=True)
+        store.submit(photoRow, {"faces": [faceData("fc_new", "PH_a", unit(423))]})
+        store.flush()
+        assert sqliteCommon.query_pb_face("pb_face", faceCode="fc_old") == [], \
+            "replace 模式应当把旧脸硬删掉"
+        assert bucketOf("fc_new") == bucket.bucketKeyEqual(2012)

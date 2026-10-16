@@ -81,6 +81,9 @@ EXPECTED_PATHS: dict = {
     # 步骤 9 新增：地点字典重建
     "/api/places": ["get"],
     "/api/places/rebuild": ["post"],
+    # R16（DR-59~63）：文件夹浏览的目录树（只读）。⚠️ **只有 get** ——
+    # 它不落表、不写任何业务表，也没有 export / DELETE（见 test_api_album）。
+    "/api/albums/path": ["get"],
 }
 
 

@@ -421,6 +421,43 @@ def test_extractFailureIsReported(api_env, api_rows, make_photo, monkeypatch):
 # 三、重提取的连带后果：幽灵关联 + 质心（这是最容易漏的一环）
 # ============================================================
 
+def test_sealFixesStaleBucketAfterExtract(primed, api_rows, make_photo, monkeypatch):
+    """收尾兜底：单张识别结束时把「口径不对的桶」刷回来（DR-61）。
+
+    复刻用户报的那个现象的最小版本：
+      ① 这张照片的**有效拍摄年**被人工改成 1999（override）；
+      ② 它的人脸桶键却是按 EXIF 那些年算的**占位桶**（等宽 5 年）；
+      => 收尾兜底必须按"有效年 + 是否归属"重算，把它刷成 1995-1999。
+    改前这段兜底不存在：桶键一直停在旧值上，界面上的年代档与照片年代对不上，
+    而接口 200、人脸一条不少 —— 看不出任何异常。
+    """
+    from database.auto_generated import sqliteCommon
+    from engine.match import bucket as bucketModule
+
+    client = primed["client"]
+    _installPreflightOk(monkeypatch)
+    _installEngine(monkeypatch, _FakeEngine([], rawCount=0))    # 不产出新脸
+    _makePhotoFile(primed, make_photo, "PH_2024_06")
+
+    sqliteCommon.updateTableGeneral("pb_photo", "photoCode = %s", ("PH_2024_06",),
+                                    {"shotYearOverride": 1999})
+    stale = bucketModule.bucketKeyEqual(2024)                   # 按 EXIF 年算的占位桶
+    want = bucketModule.bucketKeyEqual(1999)                    # 按有效年算的占位桶
+    assert stale != want
+    for code in ("FC_PH_2024_06_0", "FC_PH_2024_06_1"):
+        row = api_rows.face(code)
+        assert sqliteCommon.update_pb_face("pb_face", int(row["recID"]),
+                                          {"shotBucket": stale}) == 1
+
+    resp = _post(client, "PH_2024_06", replaceFaces=False, match=False)
+    assert resp.status_code == 200, resp.text
+    snap = _waitOne(client)
+    assert snap["phase"] == "done", snap
+    assert snap["bucketsFixed"] == 2, "收尾兜底没有按有效年重刷"
+    for code in ("FC_PH_2024_06_0", "FC_PH_2024_06_1"):
+        assert str(api_rows.face(code).get("shotBucket")) == want
+
+
 def test_replaceClearsOwnershipAndOrphanLink(primed, api_rows, make_photo, monkeypatch):
     """重提取清掉已有的归属 -> **关联行不能留成幽灵**。
 
