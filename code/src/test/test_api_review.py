@@ -725,6 +725,41 @@ def test_pendingExcludeCodesTruncatesSilently(api_env):
     assert len(got.json()["items"]) == 5
 
 
+def test_pendingSkippedAffectsRemainingNotTotal(api_env):
+    """「总数」含跳过、「剩余」不含 —— 而且只有**跳过**才扣剩余。
+
+    ⚠️ 这条是"进度条永远点不完 / 提前报喜"的守门员：
+       前端把「手里的缓冲」也一并发去排除（否则会重复取到同一条脸），
+       如果后端拿整个排除集去减剩余，用户会看到"剩余 3 条"却还能一直点。
+    """
+    client = api_env["client"]
+    codes = [one["faceCode"]
+             for one in client.get("/api/review/pending", params={"size": 100}).json()["items"]]
+    assert len(codes) == 10
+    skipped = codes[:3]
+
+    # ① 真跳过：总数不动，剩余减 3
+    body = client.get("/api/review/pending", params={
+        "size": 5,
+        "excludeFaceCodes": ",".join(skipped),
+        "skippedFaceCodes": ",".join(skipped),
+    }).json()
+    assert body["total"] == 10                 # 跳过的脸仍在待确认里
+    assert body["skippedCount"] == 3
+    assert body["excludedPending"] == 3
+    assert body["remaining"] == 7
+
+    # ② 只是"手里已有"：排除生效，但**不**扣剩余
+    body2 = client.get("/api/review/pending", params={
+        "size": 5,
+        "excludeFaceCodes": ",".join(codes[:8]),
+    }).json()
+    assert body2["total"] == 10
+    assert body2["excludedPending"] == 0
+    assert body2["remaining"] == 10
+    assert len(body2["items"]) == 2            # 8 条被排除，只剩 2 条可返回
+
+
 def test_personCardsCacheInvalidatedByRename(api_env):
     """改名后人物卡**立刻**反映新名字（缓存要成对失效，不能等 TTL）。
 

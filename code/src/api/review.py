@@ -94,11 +94,12 @@ def _clampFaceCodes(codes) -> list:
 def _counts() -> dict:
     """两个队列的当前计数（写操作后一并回给前端，省一次请求）。
 
-    ⚠️ 只算**前端真正会显示的两个数**（pending / disputed），不再调 countStates()：
-       countStates 把 confirmed / stranger 也算一遍，而这两个 count 都是全表扫
-       （实测正式库：各 ~110ms，而 pending 走覆盖索引只要 ~1ms）。
-       前端从不读那两个数（侧栏只有"待确认 / 我不同意"两个角标），
-       于是每次点一次「忽略」就白付 220ms —— 这正是本次要消掉的等待之一。
+    ⚠️ 只算**前端真正会显示的两个数**（pending / disputed），不调 countStates()。
+       代价也不是"省 220ms"了 —— R17b 给四态计数补了覆盖索引
+       （idx_pb_face_isConfirmed_isStranger_delFlag_personCode），四个数合计 2.8ms。
+       留着"只算两个"的理由变成**语义**：写接口回带的就该是前端要用的那两个数，
+       把 confirmed / stranger 也塞进来等于给响应加两个没人读的字段，
+       以后谁想用还得先确认它是否被维护着。
        四态计数的权威出口仍是 `/review/pending/count`（那边保持四个数不变，
        有测试与验收依赖它）。
     """
@@ -152,10 +153,16 @@ def getPending(page: int = Query(default=1, ge=1),
                                                     "确认掉成员后编码会变）"),
                excludeFaceCodes: str = Query(
                    default=None,
-                   description="要跳过的 faceCode（逗号分隔，最多 %d 个）。"
-                               "前端把「本会话跳过」的脸放进来，服务端一次排除 —— "
+                   description="**不要返回**的 faceCode（逗号分隔，最多 %d 个）。"
+                               "前端把「跳过的 + 手里已有的」都放进来，服务端一次排除 —— "
                                "取代旧做法「取回整页后前端重排、再串行补页」"
-                               % _REVIEW_BATCH_MAX)):
+                               % _REVIEW_BATCH_MAX),
+               skippedFaceCodes: str = Query(
+                   default=None,
+                   description="上面那批里**真正属于「跳过」**的 faceCode（逗号分隔）。"
+                               "只为算 `remaining`/`excludedPending` 用："
+                               "「手里已有的」也是排除，但那些脸还没被处理，"
+                               "不能从「还要处理多少条」里扣掉")):
     """待确认队列 = `personCode IS NULL AND isStranger=0`。
 
     ⚠️ **分页键是 quality DESC**（queue.pendingQueue 里那条设计约束）：
@@ -183,6 +190,7 @@ def getPending(page: int = Query(default=1, ge=1),
     at = dto.offsetOf(p, s)
     total = reviewQueue.countPending()
     excluded = _excludeCodesOf(excludeFaceCodes)
+    skipped = _excludeCodesOf(skippedFaceCodes)
 
     if clusterCode:
         members = reviewQueue.clusterMembers(str(clusterCode))
@@ -192,7 +200,8 @@ def getPending(page: int = Query(default=1, ge=1),
         items = [one for one in items if one["faceCode"] in set(codes)]
         _attachRotateDeg(items)      # DR-43：大图与人脸框一起转，见该函数注释
         body = dto.pageBody(items, p, s, min(len(codes), total))
-        body.update(exhausted=True, scanCapped=False, excludeCount=len(excluded))
+        body.update(exhausted=True, scanCapped=False, excludeCount=len(excluded),
+                    skippedCount=len(skipped), excludedPending=0, remaining=int(total))
         return body
 
     if sortFirst:
@@ -212,9 +221,22 @@ def getPending(page: int = Query(default=1, ge=1),
             key=lambda c: (-float(c.get("similarity") or 0.0), c.get("personCode") or ""))
     _attachRotateDeg(items)          # DR-43：大图与人脸框一起转，见该函数注释
     body = dto.pageBody(items, p, s, total)
+    # 「还剩多少条要处理」必须与「总数」分开给（R17b）：
+    #   total     = 队列总数，**含**跳过的（它就是 countPending，角标那个数）
+    #   remaining = total - 「跳过」里**仍然待确认**的条数
+    # 两者在"没跳过"时相等，跳过之后就必须分道扬镳；拿其中一个冒充另一个，
+    # 进度条会变成"还剩 N 条"却永远点不完（或反过来提前归零）。
+    #
+    # ⚠️ 只能拿 `skippedFaceCodes` 去算，**不能**拿整个排除集：
+    #    前端把手里的缓冲也一并发过来排除（否则会重复取到同一条脸），
+    #    但那些脸还没被处理，从"还要处理多少条"里扣掉就成了提前报喜。
+    excludedPending = reviewQueue.countExcludedPending(skipped)
     body.update(exhausted=bool(window.get("exhausted")),
                 scanCapped=bool(window.get("scanCapped")),
                 excludeCount=int(window.get("excludeCount") or len(excluded)),
+                skippedCount=len(skipped),
+                excludedPending=int(excludedPending),
+                remaining=max(0, int(total) - int(excludedPending)),
                 scanned=int(window.get("scanned") or 0))
     return body
 

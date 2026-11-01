@@ -15,17 +15,23 @@ import request from './request'
 /**
  * 待确认队列（含 Top-5 候选，按相似度降序）。
  *
- * `excludeFaceCodes` 可以传数组，这里转成逗号串（axios 会把数组序列化成
- * `a[]=1&a[]=2`，FastAPI 那侧收不到）。
+ * 两个"不要返回"的参数都是 faceCode 列表，这里统一转成逗号串
+ * （axios 会把数组序列化成 `a[]=1&a[]=2`，FastAPI 那侧收不到）：
+ *   · `excludeFaceCodes`  —— 别返回这些脸（跳过的 + 手里已有的）；
+ *   · `skippedFaceCodes`  —— 其中真正算"跳过"的，服务端用它算 `remaining`。
  * 响应里的 `exhausted` 才是"还有没有下一页"的判据（见 store/review.js）。
  */
+const CODE_LIST_PARAMS = ['excludeFaceCodes', 'skippedFaceCodes']
+
 export function getPending(params = {}) {
   const query = { ...params }
-  if (Array.isArray(query.excludeFaceCodes)) {
-    query.excludeFaceCodes = query.excludeFaceCodes.filter(Boolean).join(',')
+  for (const key of CODE_LIST_PARAMS) {
+    if (Array.isArray(query[key])) {
+      query[key] = query[key].filter(Boolean).join(',')
+    }
+    // 空串会被后端当作"空集合"，这里干脆不发，省一个参数
+    if (!query[key]) delete query[key]
   }
-  // 空串会被后端当作"没有排除集"，这里干脆不发，省一个参数
-  if (!query.excludeFaceCodes) delete query.excludeFaceCodes
   return request.get('/review/pending', { params: query })
 }
 

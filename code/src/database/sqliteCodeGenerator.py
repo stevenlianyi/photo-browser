@@ -196,6 +196,28 @@ INDEX_SPEC = {
         #    （放进**列**里当等值约束则可以：绑参的等值查询照样能走索引。）
         ("idx_pb_face_isStranger_delFlag_quality",
          ("isStranger", "delFlag", "quality"), False, "personCode IS NULL"),
+        # 四态计数的**覆盖索引**（R17b 补，`/review/pending/count` 与侧栏角标用）
+        # ------------------------------------------------------------------
+        #   角标要四个数：pending / disputed / confirmed / stranger。
+        #   pending 已经被上面那条覆盖索引接住（0.9ms），另外三个原来是：
+        #     · confirmed：`isConfirmed=1 AND isStranger=0 AND delFlag='0'` -> **全表扫**
+        #     · stranger ：`isStranger=1 AND delFlag='0'`                 -> **全表扫**
+        #     · disputed ：走部分索引，但 personCode 不在索引里 -> 逐行回表
+        #   实测正式库（44k 脸）：110ms / 109ms / 7ms。
+        #
+        #   一条 `(isConfirmed, isStranger, delFlag, personCode)` 就把三个都接住：
+        #     · confirmed：三列等值 -> 直接定位（0.2ms）
+        #     · stranger ：前两列等值可跳（isConfirmed 不约束也能在索引上扫，1.0ms）
+        #     · disputed ：三列等值 + personCode 在索引里判 IS NOT NULL（7ms -> 0.5ms）
+        #   实测四态合计 281ms -> **2.6ms**。
+        #
+        # ⚠️ 为什么 personCode 要排在第 4 位、且不能做成部分索引：
+        #    部分索引的谓词只能写常量（见下面那段说明），而这人肉判的是
+        #    `personCode IS NOT NULL` —— 写成谓词里的常量其实可以，但那样
+        #    stranger/confirmed 两条（不关心 personCode）就用不上同一条索引了。
+        #    放在**列**里当附加列，三种计数共用一条索引，写维护也只有一份。
+        ("idx_pb_face_isConfirmed_isStranger_delFlag_personCode",
+         ("isConfirmed", "isStranger", "delFlag", "personCode"), False, None),
         # 「我不同意」列表（DR-16）：自动归属但未经人工确认 = 纠错入口
         ("idx_pb_face_personCode_isConfirmed", ("personCode", "isConfirmed"), False,
          "isConfirmed=0 AND isStranger=0"),
@@ -253,8 +275,10 @@ EXPECTED_INDEX_NAMES = {
     "pb_face": ("idx_pb_face_faceCode", "idx_pb_face_photoCode",
                 "idx_pb_face_personCode", "idx_pb_face_personCode_isnull",
                 "idx_pb_face_isStranger_delFlag_quality",
+                "idx_pb_face_isConfirmed_isStranger_delFlag_personCode",
                 "idx_pb_face_personCode_isConfirmed"),
     #  （idx_pb_face_isStranger_delFlag_quality 的取舍见 INDEX_SPEC 里那段说明）
+    #  （idx_pb_face_isConfirmed_isStranger_delFlag_personCode 是四态计数用的，同上）
     "pb_person": ("idx_pb_person_personCode", "idx_pb_person_displayName"),
     "pb_person_category": (),
     "pb_family": ("idx_pb_family_familyCode",),

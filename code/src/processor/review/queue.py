@@ -189,6 +189,39 @@ def countDisputed() -> int:
                                           (0, 0, comGD.DEL_FLAG_NO))
 
 
+#: `countExcludedPending` 一次 SQL 最多塞多少个 faceCode。
+#: 500（服务端排除集上限）一次就能塞完，留点余量给"以后放宽上限"；
+#: 再大就必须分批 —— SQLite 的绑定变量上限（老版本 999）不是无限的。
+_EXCLUDE_COUNT_CHUNK: int = 400
+
+
+def countExcludedPending(codes) -> int:
+    """排除集里**此刻仍然待确认**的条数。
+
+    为什么不能直接拿 `len(codes)` 充数
+    ----------------------------------
+      前端把「本会话跳过的脸」当排除集发过来，但那是**会变的**：
+        · 跳过之后，同一张脸可能在别处被确认/标陌生人（多标签页、自动匹配）；
+        · 跨会话持久化之后（R17b 二阶段），里面还会留着已经处理掉的历史项。
+      拿列表长度当"还剩多少要处理"，进度数字就会虚高 —— 而进度数字是用户
+      判断"还要点多久"的唯一依据。所以这里按**队列口径**再数一遍。
+
+    代价：排除集 <=500 条、`faceCode` 是 UNIQUE 索引，逐条点是 O(500) 次索引查找，
+    实测亚毫秒；比"全表扫一遍"便宜得多。
+    """
+    codes = [str(one) for one in (codes or []) if one]
+    if not codes:
+        return 0
+    total = 0
+    for start in range(0, len(codes), _EXCLUDE_COUNT_CHUNK):
+        chunk = codes[start:start + _EXCLUDE_COUNT_CHUNK]
+        marks = ",".join(["%s"] * len(chunk))
+        sql = ("SELECT COUNT(*) AS n FROM pb_face WHERE " + WHERE_PENDING
+               + " AND faceCode IN (" + marks + ")")
+        total += int(query.selectValue(sql, (0, comGD.DEL_FLAG_NO, *chunk)) or 0)
+    return total
+
+
 def countStates() -> dict:
     """四态计数（互斥）。侧栏角标要**两个数**：待确认 / 我不同意。"""
     return {

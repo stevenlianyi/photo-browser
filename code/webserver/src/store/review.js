@@ -45,6 +45,47 @@ const PENDING_PAGE_SIZE = 20
  */
 const PENDING_LOW_WATER = 5
 
+/**
+ * 「已跳过」的持久化位置与容量。
+ * -------------------------------
+ * 跳过**不写库**（永久排除是「陌生人」），但用户的意思通常是"这一轮先放一放"，
+ * 关掉页面再回来不该又被同一批脸挡住 —— 所以存 localStorage，跨会话保留。
+ *
+ * ⚠️ 上限 500 是与服务端 `excludeFaceCodes` 的上限**对齐**的：
+ *    超了服务端会静默截断，那"最老的跳过"就会悄悄失效（最先放回去）。
+ *    与其让它被动失效，不如本地就按 FIFO 截断 —— 行为可预期、可解释。
+ * ⚠️ 键名带 `.v1`：结构将来若要变（比如加过期时间），换键名等于自然作废旧数据，
+ *    不会读到半新半旧的结构。
+ */
+const DEFERRED_STORAGE_KEY = 'pb.review.deferred.v1'
+const DEFERRED_MAX = 500
+
+/** localStorage 在 Node（校验脚本）/ 隐私模式下可能不存在或抛异常，全部兜住 */
+function readDeferredCodes() {
+  try {
+    if (typeof localStorage === 'undefined') return []
+    const raw = localStorage.getItem(DEFERRED_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((one) => typeof one === 'string' && one).slice(-DEFERRED_MAX)
+  } catch (e) {
+    // 存的东西坏了就当没有：跳过集失效最多"多问一次"，不该让页面起不来
+    console.warn('[review] 读取本机跳过记录失败，按空处理：', e?.message || e)
+    return []
+  }
+}
+
+function writeDeferredCodes(codes) {
+  try {
+    if (typeof localStorage === 'undefined') return
+    localStorage.setItem(DEFERRED_STORAGE_KEY, JSON.stringify((codes || []).slice(-DEFERRED_MAX)))
+  } catch (e) {
+    // 配额满 / 隐私模式：不影响本次会话的跳过（内存里仍然有效）
+    console.warn('[review] 保存本机跳过记录失败（仅影响下次打开）：', e?.message || e)
+  }
+}
+
 export const useReviewStore = defineStore('review', () => {
   /** 侧栏角标（两个独立计数） */
   const pendingCount = ref(0)
@@ -54,7 +95,10 @@ export const useReviewStore = defineStore('review', () => {
 
   // ---- Tab1 待确认 ----
   const pendingItems = ref([])
+  /** 队列总数（**含**本会话/本机跳过的脸）—— 与侧栏 pendingCount 同一个数 */
   const pendingTotal = ref(0)
+  /** 还要人处理多少条（**不含**跳过）—— 进度文案里的"剩余"用它 */
+  const pendingRemaining = ref(0)
   /**
    * 取页用的页码。**恒为 1**（保留导出只为兼容）：新的取页方式是
    * 「page=1 + 把手上已有的脸作为排除集发过去」，不靠 offset 往后翻，
@@ -72,21 +116,23 @@ export const useReviewStore = defineStore('review', () => {
   const busyFaceCode = ref('')
 
   /**
-   * 本会话「跳过」过的 faceCode —— **跳过 = 排到队列最后**，不是"不再看"。
+   * 「跳过」过的 faceCode —— **跳过 = 排到队列最后**，不是"不再看"。
    * ---------------------------------------------------------------
-   * 跳过**不写库**（永久排除是「陌生人」，那是另一件事），只在本次会话里
-   * 让这些脸排到所有没跳过的之后。
+   * 跳过**不写库**（永久排除是「陌生人」，那是另一件事），只是让这些脸
+   * 排到所有没跳过的之后。这份集合直接作为 `excludeFaceCodes` 发给服务端，
+   * 由它一次扫描就排除掉（旧实现是"取回来再本地重排 + 串行补页"，实测一次
+   * 点击 11 页 = 3 秒多）。
    *
-   * 与旧实现的差别：旧的是"取回来之后再本地重排到数组末尾"，于是只要队首
-   * 恰好全是被跳过的脸，就得**串行再拉一页**，一路拉下去（实测一次点击
-   * 11 页 = 3 秒多）；现在这份集合直接作为 `excludeFaceCodes` 发给服务端，
-   * 由它一次扫描就排除掉，本地永远只拿"干净"的 20 条。
-   * ⚠️ 会话级（不写库、不进 localStorage）：刷新页面即恢复原序 ——
-   *    这是有意的，跳过是"这一轮先放一放"，不是永久决定（永久排除是陌生人）。
+   * 跨会话：存 localStorage（见 DEFERRED_STORAGE_KEY 的注释）。刷新/重开浏览器
+   * 之后跳过的脸仍然排到最后，直到用户点「重新显示已跳过的 N 条」。
+   * ⚠️ 它**不是**"永久排除"：那件事必须写库（陌生人 / 未知），入口在改判浮层。
    */
-  const deferredCodes = ref([])
+  const deferredCodes = ref(readDeferredCodes())
   const deferredSet = computed(() => new Set(deferredCodes.value))
+  /** 本地记录条数（含已经不在队列里的历史项）—— 决定"要不要显示重看入口" */
   const deferredCount = computed(() => deferredCodes.value.length)
+  /** 其中**此刻仍然待确认**的条数（服务端算的，进度文案与按钮数用它） */
+  const deferredPending = ref(0)
 
   // ---- Tab2 我不同意 ----
   const disputedGroups = ref([])
@@ -114,13 +160,17 @@ export const useReviewStore = defineStore('review', () => {
 
   const current = computed(() => pendingItems.value[cursor.value] || null)
   /**
-   * 队列里还剩多少条待确认。
-   * ⚠️ 直接等于服务端计数，**不再减 doneCount**：旧写法
-   *    `pendingTotal - doneCount` 里 pendingTotal 是"上次取页时的总数"，
-   *    而现在每次写操作响应都带回**新总数**（`_counts()`），再减一次就是
-   *    双重扣减（用户会看到剩余数一次掉 2）。doneCount 只用于「本次已处理」文案。
+   * 还要人处理多少条（= 总数 - 跳过里仍待确认的）。
+   *
+   * ⚠️ 三个数**各有各的用途，不能互相顶替**（R17b 明确分家）：
+   *    `pendingTotal`    队列总数，含跳过的 —— 与侧栏「待确认」角标同一个数；
+   *    `remaining`（本处）不含跳过的 —— 进度文案"剩余 N 条"，
+   *                      它必须能真的被点到 0，否则进度是个谎；
+   *    `doneCount`       本次会话已处理条数，只用于"本次已处理 N 条"文案。
+   *    旧写法 `pendingTotal - doneCount` 是错的：pendingTotal 已经是服务端
+   *    的**最新**总数（写接口回带），再减一次就是双重扣减（一次掉 2）。
    */
-  const remaining = computed(() => Math.max(0, pendingTotal.value))
+  const remaining = computed(() => Math.max(0, pendingRemaining.value))
 
   /** 角标取值（接口还没接上时为 0，侧栏显示「0」而不是隐藏按钮） */
   function badgeOf(tabName) {
@@ -173,10 +223,17 @@ export const useReviewStore = defineStore('review', () => {
         topN: 5,
         // reset 时旧缓冲已作废，不能把它算进排除集（否则会把要取的都排除掉）
         excludeFaceCodes: reset ? [...deferredCodes.value] : exclusionCodes(),
+        // 只把"跳过的"报给服务端算剩余 —— "手里已有的"也是排除，
+        // 但那些脸还没处理，不能从"还要处理多少条"里扣掉
+        skippedFaceCodes: [...deferredCodes.value],
       })
       const list = data?.items ?? []
       pendingItems.value = reset ? list : [...pendingItems.value, ...list]
       pendingTotal.value = Number(data?.total ?? pendingTotal.value) || 0
+      // 「剩余」由服务端给（总数 - 跳过里仍待确认的）：
+      // 前端自己算的话得知道"我发过去的哪些其实已经不在队列里"，那是瞎猜。
+      pendingRemaining.value = Number(data?.remaining ?? pendingTotal.value) || 0
+      deferredPending.value = Number(data?.excludedPending ?? 0) || 0
       pendingExhausted.value = Boolean(data?.exhausted || data?.scanCapped)
       return data
     } finally {
@@ -230,11 +287,17 @@ export const useReviewStore = defineStore('review', () => {
     if (cursor.value > pendingItems.value.length) cursor.value = pendingItems.value.length
   }
 
-  /** 写接口回带的 pendingCount 就是队列的最新总数，顺手同步给进度文案 */
+  /**
+   * 写接口回带的 pendingCount 就是队列的最新总数，顺手同步两个进度数。
+   *
+   * 「剩余」这里只能**推定**：总数减掉上次取页时得知的"跳过里仍待确认"的条数。
+   * 严格说那批数字在写操作之后可能又变了（跳过的脸也可能被别处处理掉），
+   * 但差一条的进度不会误导用户 —— 下一次取页（低水位补页）就会拿到准确值。
+   */
   function syncPendingTotal(data) {
-    if (data?.pendingCount !== undefined) {
-      pendingTotal.value = Math.max(0, Number(data.pendingCount) || 0)
-    }
+    if (data?.pendingCount === undefined) return
+    pendingTotal.value = Math.max(0, Number(data.pendingCount) || 0)
+    pendingRemaining.value = Math.max(0, pendingTotal.value - Math.max(0, deferredPending.value))
   }
 
   async function fetchDisputed({ reset = true } = {}) {
@@ -374,16 +437,28 @@ export const useReviewStore = defineStore('review', () => {
   async function skip() {
     const face = current.value
     if (face?.faceCode) {
-      if (!deferredSet.value.has(face.faceCode)) deferredCodes.value.push(face.faceCode)
+      if (!deferredSet.value.has(face.faceCode)) {
+        deferredCodes.value.push(face.faceCode)
+        // 超出上限时由 writeDeferredCodes 从头部截断（FIFO）：
+        // 最先跳过的先回来，与"这一轮先放一放"的语义一致
+        writeDeferredCodes(deferredCodes.value)
+      }
+      deferredPending.value = Math.min(deferredCodes.value.length, deferredPending.value + 1)
+      pendingRemaining.value = Math.max(0, pendingRemaining.value - 1)
       dropLocal([face.faceCode], { countAsDone: false })
     }
     await ensureBuffer()
     return null
   }
 
-  /** 「重新显示已跳过的 N 条」：清空本会话的跳过记录，回到队首重来。 */
+  /**
+   * 「重新显示已跳过的 N 条」：清空跳过记录（内存 + 本机存储），回到队首重来。
+   * ⚠️ 清的是**本机**记录，服务端没存过这份东西，所以不存在"清不干净"。
+   */
   async function showDeferred() {
     deferredCodes.value = []
+    deferredPending.value = 0
+    writeDeferredCodes([])
     await fetchPending({ reset: true })
   }
 
@@ -615,6 +690,7 @@ export const useReviewStore = defineStore('review', () => {
     activeTab,
     pendingItems,
     pendingTotal,
+    pendingRemaining,
     pendingPage,
     cursor,
     pendingLoading,
@@ -622,6 +698,7 @@ export const useReviewStore = defineStore('review', () => {
     busyFaceCode,
     deferredCodes,
     deferredCount,
+    deferredPending,
     disputedGroups,
     disputedTotal,
     disputedPhotoTotal,

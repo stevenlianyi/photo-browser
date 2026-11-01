@@ -151,14 +151,18 @@ const rotateInnerStyle = computed(() => {
 })
 
 /**
- * 进度：「剩余 N · 共 M 条」。
- * 两个数都来自服务端：`remaining` 是**最新**的待确认条数（写接口回带的
- * pendingCount），跳过的脸仍在待确认里，所以计入剩余 —— 只是排到最后。
+ * 进度：「剩余 N · 共 M 条 · 已跳过 K 条」。
+ *
+ * 三个数口径不同（都由服务端算，前端别自己减）：
+ *   · 剩余 N  = 还要你处理的（不含跳过）—— 它必须能点到 0；
+ *   · 共 M    = 队列总数（含跳过），与侧栏「待确认」角标同一个数；
+ *   · 已跳过 K = 跳过里**此刻仍然待确认**的条数（历史跳过若已被别处处理，不计入）。
+ * 以前"剩余"直接等于总数，跳过的脸被算成"还要处理"，于是进度条永远点不完。
  */
 const progressText = computed(() => {
   const base = `剩余 ${formatCount(review.remaining)} 条 · 共 ${formatCount(review.pendingTotal)} 条待确认`
-  return review.deferredCount
-    ? `${base} · 已跳过 ${formatCount(review.deferredCount)} 条（排到最后）`
+  return review.deferredPending
+    ? `${base} · 已跳过 ${formatCount(review.deferredPending)} 条（排到最后）`
     : base
 })
 
@@ -709,7 +713,9 @@ watch(activeTab, (tab) => {
           </p>
           <template v-if="review.deferredCount">
             <p class="pb-hint mt-2">
-              另有 <b class="tabular-nums">{{ formatCount(review.deferredCount) }}</b>
+              另有 <b class="tabular-nums">{{
+                formatCount(review.deferredPending || review.deferredCount)
+              }}</b>
               条是你<b>跳过</b>的，已按「排到最后」放在队列末尾。
             </p>
             <el-button size="small" class="mt-3" @click="review.showDeferred()">
