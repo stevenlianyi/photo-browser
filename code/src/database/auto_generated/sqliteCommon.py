@@ -7,10 +7,10 @@
 #   改表 = 改 pb_*.txt + 重跑生成器；直接改这里会在下次生成时被覆盖，
 #   且 .txt 与本文件会静默不一致（字段/索引/长度全部对不上）。
 #
-#   生成时间 : 2026-10-11 21:06:41
+#   生成时间 : 2026-11-01 10:47:58
 #   生成器   : database/sqliteCodeGenerator.py v20261005
 #   数据源   : pb_family.txt, pb_person.txt, pb_person_category.txt, pb_place.txt, pb_photo.txt, pb_face.txt, pb_person_centroid.txt, pb_photo_person.txt, pb_scan_job.txt, pb_review_log.txt, pb_era_sample.txt, pb_era_sample_item.txt
-#   表数量   : 12 张，字段 241 个，索引 32 个
+#   表数量   : 12 张，字段 241 个，索引 33 个
 #
 #   上层：processor / engine / api —— **业务层禁止裸 SQL，一律调本文件**（数据库设计.md §1.2）
 #   下层：common/sqliteHandle.py（读写双连接 + PRAGMA + %s->? 占位符转换）
@@ -1113,6 +1113,7 @@ TABLE_INDEXES = {
         {"name": 'idx_pb_face_photoCode', "columns": ('photoCode',), "unique": False, "where": None},
         {"name": 'idx_pb_face_personCode', "columns": ('personCode',), "unique": False, "where": None},
         {"name": 'idx_pb_face_personCode_isnull', "columns": ('personCode',), "unique": False, "where": 'personCode IS NULL'},
+        {"name": 'idx_pb_face_isStranger_delFlag_quality', "columns": ('isStranger', 'delFlag', 'quality'), "unique": False, "where": 'personCode IS NULL'},
         {"name": 'idx_pb_face_personCode_isConfirmed', "columns": ('personCode', 'isConfirmed'), "unique": False, "where": 'isConfirmed=0 AND isStranger=0'},
     ),
     'pb_person_centroid': (
@@ -2984,6 +2985,7 @@ def indexSqlList_pb_face():
         'CREATE INDEX IF NOT EXISTS idx_pb_face_photoCode ON pb_face(photoCode);',   # INDEX_SPEC
         'CREATE INDEX IF NOT EXISTS idx_pb_face_personCode ON pb_face(personCode);',   # INDEX_SPEC
         'CREATE INDEX IF NOT EXISTS idx_pb_face_personCode_isnull ON pb_face(personCode) WHERE personCode IS NULL;',   # INDEX_SPEC
+        'CREATE INDEX IF NOT EXISTS idx_pb_face_isStranger_delFlag_quality ON pb_face(isStranger, delFlag, quality) WHERE personCode IS NULL;',   # INDEX_SPEC
         'CREATE INDEX IF NOT EXISTS idx_pb_face_personCode_isConfirmed ON pb_face(personCode, isConfirmed) WHERE isConfirmed=0 AND isStranger=0;',   # INDEX_SPEC
     ]
     return sqlList

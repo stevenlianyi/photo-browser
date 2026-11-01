@@ -40,6 +40,8 @@
 
 import os
 import sys
+import threading
+import time
 
 _HERE_DIR = os.path.dirname(os.path.abspath(__file__))          # .../processor/review
 _SRC_DIR = os.path.dirname(os.path.dirname(_HERE_DIR))          # .../src
@@ -55,7 +57,7 @@ from engine.match import bucket as bucket                        # noqa: E402
 from engine.match import centroid as centroid                     # noqa: E402
 from engine.match import matcher as matcher                       # noqa: E402
 
-_VERSION = "20261013"
+_VERSION = "20261101"
 
 _LOG = misc.setLogNew("reviewQueue", "reviewqueue.log")
 
@@ -72,6 +74,100 @@ WHERE_DISPUTED: str = ("personCode IS NOT NULL AND isConfirmed = %s"
                        " AND isStranger = %s AND delFlag = %s")
 WHERE_CONFIRMED: str = "isConfirmed = %s AND isStranger = %s AND delFlag = %s"
 WHERE_STRANGER: str = "isStranger = %s AND delFlag = %s"
+
+#: 待确认队列**一次补页最多扫多少行**（排除集过滤之后仍不够 limit 时的兜底）。
+#: 为什么需要它：前端会把「本会话跳过的脸」作为排除集发过来，若队列前段
+#: 恰好全是被跳过的脸，不放上限就会一路扫到集合末尾（10 万张时是秒级）。
+#: 4000 行的依据：一页 20 条，跳过集是"这一轮先放一放"（几十~几百条），
+#: 4000 行足够跨过去；跨不过去就返回「本次扫不完」，让前端下次再试，
+#: 而不是让一次点击卡住。
+PENDING_SCAN_ROWS_MAX: int = 4000
+
+#: 进程内缓存的有效期（秒）。**只是兜底**：正常路径由写接口显式
+#: `invalidateCaches()` 失效（见 api/review.py / api/contacts.py），
+#: TTL 只兜住「别处写了库但没通知到」的情况。
+CACHE_TTL_SECONDS: float = 30.0
+
+
+# ============================================================
+# 零、进程内缓存（人物卡 / 质心索引）
+# ============================================================
+# 为什么这两样值得缓存
+# -------------------
+#   一次「忽略/改判」之后前端会重新取队列页（实测连取 11 页）。而每一页请求
+#   都要重新做两件**与这一页无关**的事：
+#     · `personCards()`：全库 2068 个人逐个算头像兜底（实测 87ms）；
+#     · `centroid.loadAllCentroids()`：两遍全表扫描质心 + 解 2048B BLOB（37ms）。
+#   它们的数据只在「有人被确认/改判/改名/停用」时才变，与翻到第几页无关，
+#   所以按「进程内一份 + 写后失效」缓起来。
+#
+# ⚠️ 刻意**不缓存** countPending / countStates：
+#   它们是「此刻库里有多少」的**事实**，而 api/photoAction.py、api/contacts.py、
+#   api/browse.py 会拿写前后的两次计数做差值判断（"这张照片软删后待确认涨了 N 条"）。
+#   缓存会让差值恒为 0，而那类错不会报错 —— 只会让统计悄悄失真。
+_CACHE_LOCK = threading.RLock()
+_CACHE: dict = {}
+
+
+def invalidateCaches() -> None:
+    """让「人物卡 / 质心索引」缓存立即作废（任何写人脸或人物的接口都要调）。
+
+    ⚠️ 成对纪律：新增的写入端点（改判/确认/合并/拆分/撤销/建档/改名/停用/
+       软删照片…）都要在**成功之后**调它，否则界面会继续用旧质心与旧姓名
+       算出候选，表现为「改了但没生效」。
+    """
+    with _CACHE_LOCK:
+        _CACHE.clear()
+    _LOG.debug("invalidateCaches: 队列缓存已清空")
+
+
+def _cacheKeyOf(key: str) -> str:
+    """缓存键必须带上**库文件路径**。
+
+    ⚠️ 这是被测试打出来的教训（也是 DR-10 的同一条）：`sqliteCommon.dbHandle(path)`
+       可以**切库**，而本缓存是进程级的。只按 "cards" 存一份的话，
+       切到另一个库（单测每个用例一个临时库、或运维用 --db 指别的库）后
+       会把上一个库的人物卡/质心原样返回 —— 查询本身完全"成功"，
+       只是答案是另一个库的。这类错只有对着具体用例才看得出来。
+       按路径分键，切库即天然隔离；`invalidateCaches()` 仍然全清。
+    """
+    try:
+        dbFile = str(sqliteCommon.dbFilePath() or "")
+    except Exception:
+        dbFile = ""
+    return "%s|%s" % (dbFile.lower(), key)
+
+
+def _cacheGet(key: str):
+    """取缓存；过期/不存在返回 None。过期即删，避免内存里留着死数据。"""
+    fullKey = _cacheKeyOf(key)
+    with _CACHE_LOCK:
+        entry = _CACHE.get(fullKey)
+        if not entry:
+            return None
+        if (time.time() - float(entry["stamp"])) > CACHE_TTL_SECONDS:
+            _CACHE.pop(fullKey, None)
+            return None
+        return entry["value"]
+
+
+def _cacheSet(key: str, value):
+    with _CACHE_LOCK:
+        _CACHE[_cacheKeyOf(key)] = {"value": value, "stamp": time.time()}
+    return value
+
+
+def centroidIndex() -> tuple:
+    """缓存的 **(matrix, index)**（质心全量装载结果）。
+
+    ⚠️ 返回的 `matrix` 是**共享的 numpy 数组**，调用方只许读、不许原地改
+       （matcher 里所有运算都是新建数组，安全）。要改就先 `.copy()`。
+    """
+    got = _cacheGet("centroids")
+    if got is not None:
+        return got
+    matrix, index = centroid.loadAllCentroids()
+    return _cacheSet("centroids", (matrix, index))
 
 
 # ============================================================
@@ -131,7 +227,7 @@ def faceCountByState() -> dict:
 # ============================================================
 
 def personCards(needAvatarFallback: bool = True) -> dict:
-    """{personCode: {displayName, avatarFaceCode}}。
+    """{personCode: {displayName, avatarFaceCode}}（**进程内缓存，只读**）。
 
     avatarFaceCode 的**兜底**：pb_person.avatarFaceCode 可能为空
     （人刚导入、一张脸都还没确认）。空头像在待确认队列里等于「一排灰块」，
@@ -139,10 +235,24 @@ def personCards(needAvatarFallback: bool = True) -> dict:
     刻意**不用自动样本**兜底：自动样本正是「机器认的、可能认错了」的那些，
     拿它当头像等于把可疑结果摆在最显眼的位置（DR-16③ 防污染的同一条思路）。
 
-    ⚠️ 兜底是**按人逐个查**（query_pb_face(personCode=...) 走
-       idx_pb_face_personCode），不是全表扫一遍再在 Python 里分：
-       缺头像的只是刚导入的人（个位数），全表扫在 10 万行时是白跑一趟。
+    ⚠️ 兜底改成**一条 SQL 扫全部已确认样本**，不再逐人查
+    --------------------------------------------------
+      旧实现按人 `query_pb_face(personCode=...)`，注释里的假设是「缺头像的只是
+      刚导入的个位数」。实测正式库 **2068 个人、几乎没人手工设过 avatarFaceCode**
+      ⇒ 每取一页队列就发 2068 条查询（实测 87ms/页），而一页只有 20 张脸。
+      现在换成一次扫「人工确认且非陌生人」的样本行（几百~几千行，走
+      idx_pb_face_personCode），在 Python 里按人取 detScore 最大的一张。
+      同分时的取舍与旧实现保持"先到先得"的确定行为：按 (detScore DESC, faceCode ASC)
+      排序后取第一条 —— 否则同分的人在界面上**头像会自己换**。
+
+    ⚠️ 返回的是**缓存对象本身**：调用方只许读，不许改（`_candidateDict` 等
+       都只读）。要改就先 `dict(...)` 拷一份。
     """
+    key = "cards" if needAvatarFallback else "cardsNoAvatar"
+    cached = _cacheGet(key)
+    if cached is not None:
+        return cached
+
     out = {}
     for row in sqliteCommon.query_pb_person("pb_person", mode="light"):
         code = str(row.get("personCode") or "")
@@ -151,29 +261,53 @@ def personCards(needAvatarFallback: bool = True) -> dict:
         out[code] = {"displayName": str(row.get("displayName") or ""),
                      "avatarFaceCode": str(row.get("avatarFaceCode") or "")}
     if not needAvatarFallback:
-        return out
-    for code, card in out.items():
-        if card["avatarFaceCode"]:
+        return _cacheSet(key, out)
+
+    lacking = [code for code, card in out.items() if not card["avatarFaceCode"]]
+    best = _bestConfirmedFaceOf(lacking)
+    for code in lacking:
+        out[code]["avatarFaceCode"] = best.get(code) or ""
+    return _cacheSet(key, out)
+
+
+def _bestConfirmedFaceOf(personCodes) -> dict:
+    """{personCode: faceCode} —— 这些人的「已确认样本里 detScore 最高」的那张脸。
+
+    ⚠️ 必须**一次查完**（IN 列表 + 一条 SQL），逐人查在 2068 人的库上是
+       2068 次往返 —— 这正是本次要消掉的那笔开销。
+    ⚠️ `personCode IN (...)` 的占位符用**拼接个数**而不是 `%` 格式化：
+       SQL 里还有别的 `%s`（delFlag 等），用 `%` 会把它们一起吃掉的坑在
+       api/browse.py 的 personStatsOf 里已经踩过一次。
+    ⚠️ 只认 `isConfirmed=1`：自动样本是「机器认的、可能认错的」，
+       拿它当头像等于把可疑结果摆到最显眼的位置（DR-16③）。
+    """
+    codes = sorted({str(code) for code in (personCodes or ()) if str(code)})
+    if not codes:
+        return {}
+    marks = ", ".join(["%s"] * len(codes))
+    rows = query.selectList(
+        "SELECT personCode AS personCode, faceCode AS faceCode, detScore AS detScore"
+        " FROM pb_face"
+        " WHERE personCode IN (" + marks + ")"
+        " AND isConfirmed = 1 AND isStranger = 0 AND delFlag = '0'",
+        tuple(codes))
+    picked = {}
+    for row in rows:
+        code = str(row.get("personCode") or "")
+        faceCode = str(row.get("faceCode") or "")
+        if not code or not faceCode:
             continue
-        bestScore = -1.0
-        bestFace = ""
-        for face in sqliteCommon.query_pb_face("pb_face", personCode=code,
-                                                mode="light"):
-            if not int(face.get("isConfirmed") or 0):
-                continue
-            if int(face.get("isStranger") or 0):
-                continue
-            faceCode = str(face.get("faceCode") or "")
-            if not faceCode:
-                continue
-            try:
-                score = float(face.get("detScore") or 0.0)
-            except (TypeError, ValueError):
-                score = 0.0
-            if score > bestScore:
-                bestScore, bestFace = score, faceCode
-        card["avatarFaceCode"] = bestFace
-    return out
+        try:
+            score = float(row.get("detScore") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        current = picked.get(code)
+        # 同分按 faceCode 升序取第一条：结果必须**确定**，否则同一批脸每次
+        # 取一页都可能换一张头像（用户会当成"数据在乱跳"）。
+        if current is None or score > current[0] or (
+                score == current[0] and faceCode < current[1]):
+            picked[code] = (score, faceCode)
+    return {code: faceCode for code, (_score, faceCode) in picked.items()}
 
 
 def _candidateDict(one: matcher.Candidate, cards: dict) -> dict:
@@ -201,7 +335,8 @@ def _candidateDict(one: matcher.Candidate, cards: dict) -> dict:
 
 def iterPendingRows(pageRows: int = None, offset: int = 0,
                     orderBy: str = None, descFlag: bool = False,
-                    photoCode: str = ""):
+                    photoCode: str = "", excludeCodes=None,
+                    scanRowsMax: int = None, stats: dict = None):
     """**逐页吐出**待确认队列的原始行（mode=full：要带 embedding 给 matcher 用）。
 
     orderBy 缺省 recID —— 但那只是"稳定"，不是"有��先级"（见 pendingQueue 的说明）。
@@ -218,24 +353,142 @@ def iterPendingRows(pageRows: int = None, offset: int = 0,
       为什么不放在调用方自己筛：待确认口径只有本模块一处
       （PENDING_NULL_FIELDS + isStranger），api 层再写一遍 WHERE 必然漂移。
       走生成层的等值过滤 —— 与全量队列是同一条 SQL 的两个参数。
+
+    excludeCodes / scanRowsMax / stats（补页用，全部可选）
+    ----------------------------------------------------
+      excludeCodes : 要**跳过**的 faceCode 集合（前端本会话"跳过"的那些脸）。
+                     过滤发生在 yield 环节、**不占 limit/offset** ——
+                     否则被排除的条目会吃掉 offset，翻页就会漏条（与
+                     disputedPhotoCodes 头顶那个「多页返回同一批数据」同类）。
+      scanRowsMax  : 本次最多扫多少行（含被排除的），缺省 PENDING_SCAN_ROWS_MAX。
+                     防"队列前段全是被跳过的脸"时一路扫到集合末尾。
+      stats        : 可选 dict，就地回填 {"scanned", "exhausted", "scanCapped"}，
+                     让调用方知道「结果流到底了」还是「扫到上限先停」。
+                     ⚠️ 用传入的 dict 而不是返回值：本函数是生成器，
+                        返回值拿不到（生成器里 return X 只会变成 StopIteration.value）。
+
+    ⚠️ 取行是**两段式**（R17b）：先按顺序取一批 recID（瘦查询、走覆盖索引），
+       再按 recID 回表取整行。理由见 `_pendingRecIds`。
+       顺便把过滤条件换成 **WHERE_PENDING**（与 countPending 逐字同一句）——
+       口径只有一处定义，不再"SQL 过滤 personCode + Python 过滤 isStranger"
+       两套规则拼起来的。
     """
     step = int(pageRows or basicSettings.QUEUE_PAGE_ROWS)
     at = int(offset or 0)
+    excluded = excludeCodes if isinstance(excludeCodes, (set, frozenset)) else set(
+        str(code) for code in (excludeCodes or ()) if str(code))
+    maxScan = int(scanRowsMax if scanRowsMax is not None else PENDING_SCAN_ROWS_MAX)
+    scanned = 0
     while True:
-        rows = sqliteCommon.query_pb_face(
-            "pb_face", mode="full", orderBy=orderBy or "recID",
-            descFlag=bool(descFlag), nullFields=PENDING_NULL_FIELDS,
-            photoCode=str(photoCode or ""),
-            limitNum=step, offsetNum=at)
-        if not rows:
+        recIds = _pendingRecIds(pageRows=step, offset=at, orderBy=orderBy,
+                                descFlag=descFlag, photoCode=photoCode)
+        if not recIds:
+            if stats is not None:
+                stats["exhausted"] = True
             return
-        for row in rows:
-            if int(row.get("isStranger") or 0):
-                continue
-            yield row
-        if len(rows) < step:
+        scanned += len(recIds)
+        if stats is not None:
+            stats["scanned"] = scanned
+        for chunk in _chunks(recIds, _ROW_FETCH_CHUNK):
+            for row in _rowsByRecIds(chunk):
+                if excluded and str(row.get("faceCode") or "") in excluded:
+                    continue
+                yield row
+                if maxScan > 0 and scanned >= maxScan:
+                    break
+            if maxScan > 0 and scanned >= maxScan:
+                break
+        if maxScan > 0 and scanned >= maxScan:
+            if stats is not None:
+                stats["scanCapped"] = True
             return
-        at += len(rows)
+        if len(recIds) < step:
+            if stats is not None:
+                stats["exhausted"] = True
+            return
+        at += len(recIds)
+
+
+#: 回表取整行时每批多少条（一条整行含 2KB 向量）。取 64 而不是 2000：
+#: 上层通常只需要 20 条，按批取才不会为了 20 行把 4MB 向量全搬进内存。
+_ROW_FETCH_CHUNK: int = 64
+
+
+def _chunks(items: list, size: int):
+    for start in range(0, len(items), max(1, int(size))):
+        yield items[start:start + size]
+
+
+def _pendingRecIds(pageRows: int, offset: int = 0, orderBy: str = None,
+                   descFlag: bool = False, photoCode: str = "") -> list:
+    """待确认队列按**排序键**取一批 recID（瘦查询）。
+
+    为什么先取 recID、再单独回表（R17b）
+    -----------------------------------
+      旧的取页是 `query_pb_face(mode="full", orderBy="quality", limit=2000)` ——
+      一次把 2000 行整行（含 2KB embedding，约 4MB）读进内存，再从中取前 20 条。
+      现在排序与过滤都只碰「覆盖索引里的列」（见 sqliteCodeGenerator 里
+      idx_pb_face_isStranger_delFlag_quality 的说明），最后只对真正要用的
+      那 20 行回表（分批取，见 _ROW_FETCH_CHUNK）。
+
+      ⚠️ 实测的功劳要记清楚：**大部分提速来自那条覆盖索引**（取一页 72ms ->
+      0.1ms 级），两段式本身解决的是"为 20 行搬 4MB 向量"的内存/解析浪费
+      （每页少读 1980 行整行）。所以这两件事要一起存在，别只留一半：
+      只加索引不两段式 = 快但每页仍搬 4MB；只两段式不加索引 = 每页仍要
+      回表 2.2 万次判 isStranger/delFlag。
+
+    ⚠️ `orderBy` 只接受生成层 ORDER BY 白名单里的列：它是拼进 SQL 的标识符，
+       不能来自外部输入。传了白名单外的值一律回落 recID（与生成层同一策略）。
+    ⚠️ 缺省排序键是 `basicSettings.QUEUE_ORDER_BY`（= quality），**不是** recID：
+       分页键的选择在 pendingQueue 的文档里写死了（similarity 是算出来的、
+       不能当分页键），这里必须与它一致，否则「缺省窗口」的语义会悄悄换掉。
+    """
+    field = str(orderBy or basicSettings.QUEUE_ORDER_BY)
+    if field not in sqliteCommon.ORDER_FIELDS.get("pb_face", ()):
+        field = "recID"
+    where = WHERE_PENDING
+    values = [0, comGD.DEL_FLAG_NO]
+    if photoCode:
+        where += " AND photoCode = %s"
+        values.append(str(photoCode))
+    # ⚠️ 并列值必须有**写死的**兜底顺序（recID ASC）。
+    #    不写的话，兜底顺序就成了"优化器/扫描方向说了算"：
+    #    同一批 quality 相同的脸，走覆盖索引反向扫描是 recID DESC，
+    #    换成别的计划又变成 recID ASC —— 表现是「同一页两块内容顺序自己换」。
+    #    实测代价可忽略（只是 ORDER BY 最后一项走临时排序，0.1ms 量级），
+    #    换来的是「分页键 + 兜底键」构成**全序**，翻页永不重不漏。
+    order = field + (" DESC" if descFlag else "")
+    if field != "recID":
+        order += ", recID ASC"
+    sql = ("SELECT recID AS recID FROM pb_face WHERE " + where
+           + " ORDER BY " + order + " LIMIT %s OFFSET %s")
+    values += [int(pageRows), int(offset or 0)]
+    out = []
+    for row in query.selectList(sql, tuple(values)):
+        try:
+            out.append(int(row.get("recID")))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _rowsByRecIds(recIds) -> list:
+    """按 recID 批量取**整行**，并保持传入顺序（顺序是队列语义的一部分）。
+
+    ⚠️ 必须显式排序列名而不是 `SELECT *`：生成层的列清单是唯一真相
+       （`TABLE_COLUMNS`），`*` 一旦和迁移后的物理列序不一致，
+       拿到的字典键虽然还对，但白名单校验会被绕过 —— 这类洞不报错。
+    """
+    ids = [int(one) for one in (recIds or ())]
+    if not ids:
+        return []
+    columns = ", ".join(column["name"] for column in sqliteCommon.TABLE_COLUMNS["pb_face"])
+    marks = ", ".join(["%s"] * len(ids))
+    rows = query.selectList("SELECT " + columns + " FROM pb_face WHERE recID IN ("
+                            + marks + ")", tuple(ids))
+    pos = dict((recID, index) for index, recID in enumerate(ids))
+    rows.sort(key=lambda row: pos.get(int(row.get("recID") or 0), 0))
+    return rows
 
 
 def loadPendingRows(limit: int = 0, offset: int = 0, pageRows: int = None,
@@ -343,14 +596,11 @@ def pendingQueue(limit: int = 0, offset: int = 0, topN: int = None,
         **给 CLI 与「给我最该先确认的 N 张」这类一次性汇总用。**
     """
     if not sortFirst:
-        rows = loadPendingRows(limit=limit, offset=offset,
-                               orderBy=orderBy or basicSettings.QUEUE_ORDER_BY,
-                               descFlag=descFlag)
-        if not rows:
-            return []
-        out = _scoreRows(rows, topN, preset, matrix, index, withCandidates)
-        out.sort(key=_queueOrder)
-        return out
+        # 走 pendingWindow（同一套扫描/排序实现）：它的第一个返回值就是这里要的列表。
+        return pendingWindow(limit=limit, offset=offset, topN=topN, preset=preset,
+                             matrix=matrix, index=index,
+                             withCandidates=withCandidates,
+                             orderBy=orderBy, descFlag=descFlag)["items"]
 
     cap = int(limit or 0)
     start = int(offset or 0)
@@ -373,15 +623,60 @@ def pendingQueue(limit: int = 0, offset: int = 0, topN: int = None,
     return pool[start:start + cap]
 
 
+def pendingWindow(limit: int = 0, offset: int = 0, topN: int = None,
+                  preset: str = None, matrix=None, index=None,
+                  withCandidates: bool = True, orderBy: str = None,
+                  descFlag: bool = True, excludeCodes=None,
+                  scanRowsMax: int = None) -> dict:
+    """取一个待确认窗口，并**告诉调用方扫到哪了**：
+
+    {"items": [...], "exhausted": bool, "scanCapped": bool,
+     "scanned": int, "excludeCount": int}
+
+    为什么需要这个返回值（而不是继续用 total 比较）
+    ----------------------------------------------
+      前端原先靠 `items.length < total` 判断「服务器还有没有下一页」。
+      一旦引入 excludeCodes（本会话跳过的脸不进结果），这条判据就**失真**
+      （被排除的条目永远补不上），于是要么提前停止翻页、要么空翻。
+      所以由服务端在扫描时如实回报：exhausted = 结果流真的到底了；
+      scanCapped = 撞到 PENDING_SCAN_ROWS_MAX 先停下（下次可以再试）。
+
+    offset 的语义
+    -------------
+      作用在**排除之后**的结果流上（"第 n 条之后的窗口"）。
+      前端正常只用 page=1；保留 offset 是为了 CLI 与测试能取任意窗口。
+    """
+    exclude = set(str(code) for code in (excludeCodes or ()) if str(code))
+    cap = int(limit or 0)
+    start = int(offset or 0)
+    need = (start + cap) if cap else 0
+    stats = {"scanned": 0, "exhausted": False, "scanCapped": False}
+    rows = []
+    for row in iterPendingRows(orderBy=orderBy or basicSettings.QUEUE_ORDER_BY,
+                               descFlag=descFlag, excludeCodes=exclude,
+                               scanRowsMax=scanRowsMax, stats=stats):
+        rows.append(row)
+        if need and len(rows) >= need:
+            break
+    window = (rows[start:start + cap] if cap else rows[start:])
+    items = _scoreRows(window, topN, preset, matrix, index, withCandidates)
+    items.sort(key=_queueOrder)
+    return {"items": items,
+            "exhausted": bool(stats.get("exhausted")),
+            "scanCapped": bool(stats.get("scanCapped")),
+            "scanned": int(stats.get("scanned") or 0),
+            "excludeCount": len(exclude)}
+
+
 def _scoreRows(rows, topN, preset, matrix, index, withCandidates) -> list:
-    """一批行 -> 队列条目（含Top-N 候选）。质心只加载一次。"""
+    """一批行 -> 队列条目（含Top-N 候选）。质心只加载一次（走进程内缓存）。"""
     if not rows:
         return []
     cards = personCards() if withCandidates else {}
     if not withCandidates:
         return [_entryOf(row, None, cards) for row in rows]
     if index is None:
-        matrix, index = centroid.loadAllCentroids()
+        matrix, index = centroidIndex()
     results = matcher.matchMany(rows, matrix=matrix, index=index,
                                 preset=preset, topN=topN)
     return [_entryOf(row, one, cards) for row, one in zip(rows, results)]

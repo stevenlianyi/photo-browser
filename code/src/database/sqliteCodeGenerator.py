@@ -168,6 +168,34 @@ INDEX_SPEC = {
         ("idx_pb_face_personCode", ("personCode",), False, None),
         # 待确认队列专用部分索引（D-4：personCode 为空即待确认）
         ("idx_pb_face_personCode_isnull", ("personCode",), False, "personCode IS NULL"),
+        # 待确认队列的**覆盖索引**（R17b 补，实测数据见下方注释）
+        # ------------------------------------------------------------------
+        #   队列与角标的两条主查询是：
+        #     · 取一页：`WHERE personCode IS NULL AND isStranger=? AND delFlag=?
+        #               ORDER BY quality DESC LIMIT 20 OFFSET n`
+        #     · 算总数：`SELECT COUNT(*) FROM pb_face WHERE <同上>`（每个页请求都算）
+        #   只有 idx_pb_face_personCode_isnull 时，这两条都要「按索引找出 2.2 万个
+        #   待确认行 -> **逐行回表**判 isStranger/delFlag -> 再排序」，
+        #   实测正式库（44k 脸 / 22k 待确认）：取一页 72ms、count 61ms。
+        #   把 isStranger/delFlag/quality 都放进索引后，上面两句变成**纯索引扫描**
+        #   （不需要回表，也不需要读 2KB 向量），实测：取一页 0.4ms、count 0.9ms。
+        #
+        # ⚠️ 为什么**不能**靠「索引排序」省掉 ORDER BY 的排序：
+        #    `quality` 声明是 `DECIMAL(6,4)`（NUMERIC 亲和性）。这类列的索引
+        #    存的是"写入时的表示"，而 ORDER BY 比较按数值语义 —— SQLite 无法
+        #    保证索引顺序等于比较顺序，于是**任何** quality 索引都不会被用来
+        #    满足 ORDER BY（实测：连 `SELECT * FROM pb_face ORDER BY quality`
+        #    都是 `SCAN + USE TEMP B-TREE`）。所以这里的目标不是"消除排序"，
+        #    而是"让排序只碰索引项、不碰 22k 次随机回表"。剩余的那次排序
+        #    在覆盖索引上是纯内存比较，实测总耗时已经降到亚毫秒级。
+        #
+        # ⚠️ 部分索引的 WHERE **只能写 `personCode IS NULL`**：SQLite 要求
+        #    「索引谓词」与「查询谓词」语法等价才启用索引，而生成层把
+        #    isStranger / delFlag 写成**绑定参数**（`= %s`），参数不是常量，
+        #    永远匹配不上谓词里写死的 `0` / `'0'` —— 索引会**静默失效**。
+        #    （放进**列**里当等值约束则可以：绑参的等值查询照样能走索引。）
+        ("idx_pb_face_isStranger_delFlag_quality",
+         ("isStranger", "delFlag", "quality"), False, "personCode IS NULL"),
         # 「我不同意」列表（DR-16）：自动归属但未经人工确认 = 纠错入口
         ("idx_pb_face_personCode_isConfirmed", ("personCode", "isConfirmed"), False,
          "isConfirmed=0 AND isStranger=0"),
@@ -224,7 +252,9 @@ EXPECTED_INDEX_NAMES = {
                  "idx_pb_photo_scanState", "idx_pb_photo_movedToPhotoCode"),
     "pb_face": ("idx_pb_face_faceCode", "idx_pb_face_photoCode",
                 "idx_pb_face_personCode", "idx_pb_face_personCode_isnull",
+                "idx_pb_face_isStranger_delFlag_quality",
                 "idx_pb_face_personCode_isConfirmed"),
+    #  （idx_pb_face_isStranger_delFlag_quality 的取舍见 INDEX_SPEC 里那段说明）
     "pb_person": ("idx_pb_person_personCode", "idx_pb_person_displayName"),
     "pb_person_category": (),
     "pb_family": ("idx_pb_family_familyCode",),

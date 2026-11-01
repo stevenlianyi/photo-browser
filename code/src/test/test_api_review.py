@@ -664,3 +664,79 @@ def test_reviewLogRequiresFilter(api_env):
     got = api_env["client"].get("/api/review/log")
     assert got.status_code == 400
     assert got.json()["code"] == "PARAM_INVALID"
+
+
+# ============================================================
+# R17b：跳过集交给服务端（excludeFaceCodes）+ 队列缓存失效
+# ============================================================
+# 为什么这些断言重要：前端「跳过」改成了「把 faceCode 发给服务端排除」。
+# 一旦服务端的排除用了 limit/offset（把被排除的行算进窗口），翻页就会
+# **重/漏**——而那类 bug 在界面上表现为"有些脸永远轮不到"，很难被发现。
+
+
+def test_pendingExcludeFaceCodesSkipsWithoutDuplicates(api_env):
+    """排除集里的脸不出现；排除**不占**分页窗口（拿走 3 条，窗口仍是 5 条新的）。"""
+    client = api_env["client"]
+    codes = [one["faceCode"]
+             for one in client.get("/api/review/pending", params={"size": 100}).json()["items"]]
+    assert len(codes) == 10
+    dropped = codes[:3]
+
+    body = client.get("/api/review/pending",
+                      params={"size": 5, "excludeFaceCodes": ",".join(dropped)}).json()
+    got = [one["faceCode"] for one in body["items"]]
+
+    # ⚠️ 不能断言"取 5 条 == 取全部之后的前 5 条"：响应里的顺序是**窗口内**语义序
+    #    （簇优先、相似度降序），而"哪 5 条进窗口"是 SQL 序（quality DESC）定的，
+    #    两者不是同一个序。能验的性质是：排除精确、窗口不被挤短、无重复。
+    after = [one["faceCode"] for one in client.get(
+        "/api/review/pending",
+        params={"size": 100, "excludeFaceCodes": ",".join(dropped)}).json()["items"]]
+    assert len(after) == 7                     # 10 条里精确挖掉 3 条，没多挖也没漏
+    assert len(got) == 5                       # 被排除的行**不占**窗口，一页仍是满的
+    assert len(set(got)) == len(got)
+    assert set(got) <= set(after)
+    assert not (set(got) & set(dropped))
+    assert body["excludeCount"] == 3
+    assert body["exhausted"] is False          # 后面还有，别让前端以为到头了
+
+
+def test_pendingExcludeAllReportsExhausted(api_env):
+    """全部排除 = 一条不剩，且必须**如实回报 exhausted**（前端靠它停止补页）。"""
+    client = api_env["client"]
+    codes = [one["faceCode"]
+             for one in client.get("/api/review/pending", params={"size": 100}).json()["items"]]
+    body = client.get("/api/review/pending",
+                      params={"size": 20, "excludeFaceCodes": ",".join(codes)}).json()
+    assert body["items"] == []
+    assert body["exhausted"] is True
+
+
+def test_pendingExcludeCodesTruncatesSilently(api_env):
+    """超过上限**截断不报错**：跳过集是 UI 侧参数，报 400 会让整页不可用。"""
+    from api import review as reviewApi
+
+    client = api_env["client"]
+    filler = ",".join("FC_NOT_EXIST_%04d" % i for i in range(reviewApi._REVIEW_BATCH_MAX + 100))
+    got = client.get("/api/review/pending",
+                     params={"size": 5, "excludeFaceCodes": filler})
+    assert got.status_code == 200
+    assert got.json()["excludeCount"] == reviewApi._REVIEW_BATCH_MAX
+    assert len(got.json()["items"]) == 5
+
+
+def test_personCardsCacheInvalidatedByRename(api_env):
+    """改名后人物卡**立刻**反映新名字（缓存要成对失效，不能等 TTL）。
+
+    ⚠️ 这条用例是"缓存忘了失效"的守门员：不失效的话，用户在待确认页
+       会看到刚改过的人还叫旧名字（最长 30 秒），然后开始怀疑保存没生效。
+    """
+    from processor.review import queue as reviewQueue
+
+    client = api_env["client"]
+    before = reviewQueue.personCards()["P_alpha"]["displayName"]
+    assert before
+
+    patched = client.patch("/api/contacts/P_alpha", json={"displayName": "改过的名字"})
+    assert patched.status_code == 200
+    assert reviewQueue.personCards()["P_alpha"]["displayName"] == "改过的名字"

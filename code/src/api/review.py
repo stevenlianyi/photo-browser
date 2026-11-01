@@ -92,10 +92,18 @@ def _clampFaceCodes(codes) -> list:
 
 
 def _counts() -> dict:
-    """两个队列的当前计数（写操作后一并回给前端，省一次请求）。"""
-    states = reviewQueue.countStates()
-    return {"pendingCount": int(states.get("pending") or 0),
-            "disputedCount": int(states.get("disputed") or 0)}
+    """两个队列的当前计数（写操作后一并回给前端，省一次请求）。
+
+    ⚠️ 只算**前端真正会显示的两个数**（pending / disputed），不再调 countStates()：
+       countStates 把 confirmed / stranger 也算一遍，而这两个 count 都是全表扫
+       （实测正式库：各 ~110ms，而 pending 走覆盖索引只要 ~1ms）。
+       前端从不读那两个数（侧栏只有"待确认 / 我不同意"两个角标），
+       于是每次点一次「忽略」就白付 220ms —— 这正是本次要消掉的等待之一。
+       四态计数的权威出口仍是 `/review/pending/count`（那边保持四个数不变，
+       有测试与验收依赖它）。
+    """
+    return {"pendingCount": int(reviewQueue.countPending() or 0),
+            "disputedCount": int(reviewQueue.countDisputed() or 0)}
 
 
 # ============================================================
@@ -141,7 +149,13 @@ def getPending(page: int = Query(default=1, ge=1),
                                                   "仅供「给我最该先确认的 N 张」"),
                clusterCode: str = Query(default=None,
                                         description="只看某个簇（⚠️ 不缓存，"
-                                                    "确认掉成员后编码会变）")):
+                                                    "确认掉成员后编码会变）"),
+               excludeFaceCodes: str = Query(
+                   default=None,
+                   description="要跳过的 faceCode（逗号分隔，最多 %d 个）。"
+                               "前端把「本会话跳过」的脸放进来，服务端一次排除 —— "
+                               "取代旧做法「取回整页后前端重排、再串行补页」"
+                               % _REVIEW_BATCH_MAX)):
     """待确认队列 = `personCode IS NULL AND isStranger=0`。
 
     ⚠️ **分页键是 quality DESC**（queue.pendingQueue 里那条设计约束）：
@@ -152,10 +166,23 @@ def getPending(page: int = Query(default=1, ge=1),
       代价是**全局有序分页拿不到**：page 1 永远是「当前 quality 最高的 20 张」，
       而队列是工单列表、处理完会离队，所以这个代价是可以接受的。
       确实需要全局有序时传 `sortFirst=1`。
+
+    excludeFaceCodes / exhausted（R17b：一次点击只发一个请求）
+    ---------------------------------------------------------
+      旧链路：前端点「跳过」只记在本地 -> 取页时把跳过的重排到末尾 ->
+      末尾还是被跳过时就**串行再拉一页**，一路拉下去（实测一次点击 11 页）。
+      现在把跳过集发给服务端，由服务端在扫描时排除，一次就能取到 20 条干净的。
+
+      由此带来的**契约变化**（前端必须照做）：`hasMore` 仍按 total 算
+      （别的接口共用 dto.pageBody，语义不动），但"还有没有下一页"要看
+      **`exhausted`** —— 有排除集时 `items.length < total` 永远成立，
+      拿它判断会无限翻页。`scanCapped=true` 表示撞到扫描上限先停，
+      下次（用户又处理掉几条之后）可以再来一次。
     """
     p, s = dto.clampPage(page, size, defaultSize=20)
     at = dto.offsetOf(p, s)
     total = reviewQueue.countPending()
+    excluded = _excludeCodesOf(excludeFaceCodes)
 
     if clusterCode:
         members = reviewQueue.clusterMembers(str(clusterCode))
@@ -164,10 +191,19 @@ def getPending(page: int = Query(default=1, ge=1),
                                          preset=preset)
         items = [one for one in items if one["faceCode"] in set(codes)]
         _attachRotateDeg(items)      # DR-43：大图与人脸框一起转，见该函数注释
-        return dto.pageBody(items, p, s, min(len(codes), total))
+        body = dto.pageBody(items, p, s, min(len(codes), total))
+        body.update(exhausted=True, scanCapped=False, excludeCount=len(excluded))
+        return body
 
-    items = reviewQueue.pendingQueue(limit=s, offset=at, topN=topN,
-                                     preset=preset, sortFirst=bool(sortFirst))
+    if sortFirst:
+        items = reviewQueue.pendingQueue(limit=s, offset=at, topN=topN,
+                                         preset=preset, sortFirst=True)
+        window = {"exhausted": True, "scanCapped": False, "scanned": 0}
+    else:
+        window = reviewQueue.pendingWindow(limit=s, offset=at, topN=topN,
+                                           preset=preset,
+                                           excludeCodes=excluded)
+        items = window["items"]
     # Top-N 候选按相似度**降序**（验收第 5 条）。matcher.rankCandidates 已经排过，
     # 这里再排一次是为了让「顺序正确」不依赖下游实现细节。
     for one in items:
@@ -175,7 +211,38 @@ def getPending(page: int = Query(default=1, ge=1),
             one.get("topCandidates") or [],
             key=lambda c: (-float(c.get("similarity") or 0.0), c.get("personCode") or ""))
     _attachRotateDeg(items)          # DR-43：大图与人脸框一起转，见该函数注释
-    return dto.pageBody(items, p, s, total)
+    body = dto.pageBody(items, p, s, total)
+    body.update(exhausted=bool(window.get("exhausted")),
+                scanCapped=bool(window.get("scanCapped")),
+                excludeCount=int(window.get("excludeCount") or len(excluded)),
+                scanned=int(window.get("scanned") or 0))
+    return body
+
+
+def _excludeCodesOf(raw) -> list:
+    """`excludeFaceCodes`（逗号分隔串 / 列表）-> 去重后的 faceCode 列表。
+
+    ⚠️ 与 `_clampFaceCodes` 的取舍**刻意不同**：超限**静默截断，不报错**。
+       那不是"要写库的一批脸"，而是 UI 侧"这一轮先放一放"的会话参数 ——
+       用户跳过 800 张时返回 400 会让整个待确认页直接不可用，
+       而截断的后果只是"最早跳过的那几张可能又出现一次"，可接受。
+    """
+    if isinstance(raw, (list, tuple, set)):
+        items = [str(one) for one in raw]
+    else:
+        items = str(raw or "").split(",")
+    out, seen = [], set()
+    for one in items:
+        code = one.strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+        if len(out) >= _REVIEW_BATCH_MAX:
+            _LOG.debug("excludeFaceCodes 超过 %d 个，已截断（UI 侧参数，不报错）"
+                       % _REVIEW_BATCH_MAX)
+            break
+    return out
 
 
 @router.get("/review/disputed", summary="「我不同意」列表（机器自动认错的申诉入口）")
@@ -336,6 +403,8 @@ def assignFace(faceCode: str, body: dto.AssignBody) -> dict:
         info = assigner.confirm(code, str(body.personCode or "").strip())
     except assigner.AssignerError as e:
         raise dto.ApiError(_codeOf(str(e)), str(e))
+    # 归属变了 -> 质心与「人物卡（头像兜底）」都过期，队列缓存必须立即作废
+    reviewQueue.invalidateCaches()
     person = browse.personRow(str(body.personCode or ""))
     stats = browse.personStatsOf([str(body.personCode or "")]).get(
         str(body.personCode or ""), {})
@@ -368,6 +437,7 @@ def batchAssign(body: dto.BatchAssignBody) -> dict:
         info = assigner.confirmPerson(str(body.personCode or "").strip(), codes)
     except assigner.AssignerError as e:
         raise dto.ApiError(_codeOf(str(e)), str(e))
+    reviewQueue.invalidateCaches()
     stats = browse.personStatsOf([str(body.personCode or "")]).get(
         str(body.personCode or ""), {})
     return dto.okBody(
@@ -386,7 +456,12 @@ def batchAssign(body: dto.BatchAssignBody) -> dict:
 # ============================================================
 
 @router.post("/review/fix", summary="改判（assign 改到某人 / unknown 置未知 / stranger 标陌生人）")
-def fixFace(body: dto.FixBody) -> dict:
+def fixFace(body: dto.FixBody,
+            withCentroid: int = Query(
+                default=1,
+                description="1（缺省）= 响应里带上新旧两人的**全部质心桶**；"
+                            "0 = 不带。前端逐条处理时传 0 —— 那段明细是排障用的，"
+                            "界面从不读它，却要为两个人物各查一次质心全表")):
     """**统一改判入口**。单张走 `assigner.fix()`，多张走 `assigner.batchFix()`。
 
     三个动作与四态的对应（与 assigner.fix 的表一一对齐）
@@ -421,6 +496,10 @@ def fixFace(body: dto.FixBody) -> dict:
             info = assigner.fix(codes[0], action, target, reason=body.reason or "")
         except assigner.AssignerError as e:
             raise dto.ApiError(_codeOf(str(e)), str(e))
+        reviewQueue.invalidateCaches()      # 归属变了 -> 质心/人物卡缓存作废
+        centroidInfo = (withCentroidOf(info, target, info.get("fromPerson"))
+                        if int(withCentroid or 0) else
+                        {"centroidRebuilt": bool(info.get("centroids"))})
         return dto.okBody(action=action, single=True,
                           faceCode=info.get("faceCode"),
                           photoCode=info.get("photoCode"),
@@ -438,12 +517,13 @@ def fixFace(body: dto.FixBody) -> dict:
                           #    前端要么多打一次 /pending/count，要么像现在这样统一契约；
                           #    少一次往返、且不必让前端记得哪个端点带、哪个不带。
                           **_counts(),
-                          **withCentroidOf(info, target, info.get("fromPerson")))
+                          **centroidInfo)
 
     try:
         info = assigner.batchFix(codes, action, target, reason=body.reason or "")
     except assigner.AssignerError as e:
         raise dto.ApiError(_codeOf(str(e)), str(e))
+    reviewQueue.invalidateCaches()
     return dto.okBody(action=action, single=False, requested=len(codes),
                       fixed=int(info.get("fixed") or 0),
                       failed=info.get("failed") or [],
@@ -508,6 +588,7 @@ def batchFix(body: dto.BatchFixBody) -> dict:
         info = assigner.batchFix(codes, action, target, reason=body.reason or "")
     except assigner.AssignerError as e:
         raise dto.ApiError(_codeOf(str(e)), str(e))
+    reviewQueue.invalidateCaches()
     return dto.okBody(action=action, requested=len(codes),
                       clusterCode=body.clusterCode or None,
                       fixed=int(info.get("fixed") or 0),
@@ -537,6 +618,7 @@ def mergePersons(body: dto.MergeBody) -> dict:
                             str(body.toPersonCode or "").strip())
     except merger.MergeError as e:
         raise dto.ApiError(_codeOf(str(e)), str(e))
+    reviewQueue.invalidateCaches()          # 两个人的脸都挪过 -> 缓存必须清
     stats = browse.personStatsOf([str(info.get("toPerson") or "")]).get(
         str(info.get("toPerson") or ""), {})
     return dto.okBody(
@@ -571,6 +653,7 @@ def splitFace(body: dto.SplitBody) -> dict:
                             birthday=body.birthday)
     except (merger.MergeError, assigner.AssignerError) as e:
         raise dto.ApiError(_codeOf(str(e)), str(e))
+    reviewQueue.invalidateCaches()
     return dto.okBody(
         faceCode=info.get("faceCode"), photoCode=info.get("photoCode"),
         fromPersonCode=info.get("fromPerson") or None,
@@ -603,6 +686,7 @@ def undoOperation(body: dto.UndoBody) -> dict:
         info = merger.undo(str(body.logCode or "").strip())
     except merger.MergeError as e:
         raise dto.ApiError(_codeOf(str(e)), str(e))
+    reviewQueue.invalidateCaches()
     fromPerson = str(info.get("fromPerson") or "")
     toPerson = str(info.get("toPerson") or "")
     return dto.okBody(

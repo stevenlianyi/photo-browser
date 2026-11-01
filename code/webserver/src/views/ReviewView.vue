@@ -76,6 +76,13 @@ watch(
     }
     await review.ensurePhoto(photoCode)
     currentPhoto.value = review.photoCache[photoCode] || null
+    // 顺手预取「下一条」的照片详情：确认/忽略后卡片一换，大图与候选头像
+    // 已经在缓存里 —— 用户看到的是"瞬间翻页"，而不是换条时再等一次
+    // GET /api/photos/{code}。ensurePhoto 自带缓存与并发去重，重复调用无副作用。
+    const nextPhotoCode = review.pendingItems[review.cursor + 1]?.photoCode
+    if (nextPhotoCode && nextPhotoCode !== photoCode) {
+      review.ensurePhoto(nextPhotoCode).catch(() => {})
+    }
   },
   { immediate: true },
 )
@@ -143,7 +150,11 @@ const rotateInnerStyle = computed(() => {
   }
 })
 
-/** 进度：「剩余 N · 共 M 条」（跳过的是排到最后、不是完成，所以计入剩余） */
+/**
+ * 进度：「剩余 N · 共 M 条」。
+ * 两个数都来自服务端：`remaining` 是**最新**的待确认条数（写接口回带的
+ * pendingCount），跳过的脸仍在待确认里，所以计入剩余 —— 只是排到最后。
+ */
 const progressText = computed(() => {
   const base = `剩余 ${formatCount(review.remaining)} 条 · 共 ${formatCount(review.pendingTotal)} 条待确认`
   return review.deferredCount

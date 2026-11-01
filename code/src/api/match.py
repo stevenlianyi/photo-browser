@@ -386,6 +386,8 @@ def _runMatchTask(assign: bool, preset: str, limit: int) -> None:
         if assign:
             _patch(phase="writing")
             applied = assigner.applyAuto(results)
+            # 自动归属改了归属与质心 -> 队列缓存（人物卡 + 质心索引）立即作废
+            reviewQueue.invalidateCaches()
             _patch(written=int(applied.get("written") or 0),
                    failed=int(applied.get("failed") or 0),
                    recomputedBuckets=int(applied.get("centroids") or 0))

@@ -37,6 +37,14 @@ export const REVIEW_TABS = [
 /** 一页取多少条待确认（一次确认后要能连着看几条，别每确认一次就请求一次） */
 const PENDING_PAGE_SIZE = 20
 
+/**
+ * 本地缓冲的**低水位**：剩余待处理条数 <= 这个值时，后台静默补一页。
+ * -----------------------------------------------------------------
+ * 取 5 而不是 1：用户连点确认时，补页请求要来得及在「看完第 3 条」前回来，
+ * 于是永远不必停下来等网络。取太大（比如 10）则一次确认可能触发连补两页。
+ */
+const PENDING_LOW_WATER = 5
+
 export const useReviewStore = defineStore('review', () => {
   /** 侧栏角标（两个独立计数） */
   const pendingCount = ref(0)
@@ -47,23 +55,32 @@ export const useReviewStore = defineStore('review', () => {
   // ---- Tab1 待确认 ----
   const pendingItems = ref([])
   const pendingTotal = ref(0)
+  /**
+   * 取页用的页码。**恒为 1**（保留导出只为兼容）：新的取页方式是
+   * 「page=1 + 把手上已有的脸作为排除集发过去」，不靠 offset 往后翻，
+   * 理由见 `fetchPending()` 的注释。
+   */
   const pendingPage = ref(1)
-  /** 当前处理到第几条（0 起）。确认后自动 +1 —— 队列「自动前进」靠它 */
+  /** 当前处理到第几条（0 起）。确认/跳过会把该条从本地摘掉，游标不动 = 自动前进 */
   const cursor = ref(0)
   const pendingLoading = ref(false)
+  /** 服务端说「没有更多了」（exhausted / scanCapped）——避免空翻 */
+  const pendingExhausted = ref(false)
+  /** 后台补页是否在飞（防并发重复补页） */
+  const pendingFetching = ref(false)
   /** 正在提交哪一条（禁用重复点击） */
   const busyFaceCode = ref('')
 
   /**
    * 本会话「跳过」过的 faceCode —— **跳过 = 排到队列最后**，不是"不再看"。
    * ---------------------------------------------------------------
-   * 旧实现只把游标往前挪一格、**一个字都不写库**，于是：
-   *   队列每次重取（改判 fix / 批量确认 / 离开页面再回来都会
-   *   `fetchPending({reset:true})`）都会回到 page 1，而跳过的脸 quality
-   *   没变、仍按 quality DESC 排在最前面 ⇒ 刚跳过它马上又被问到，
-   *   表现正是「很快又要选用一次」。
-   * 这里记住跳过的 faceCode，并把它们稳定地重排到**已加载列表的最后**：
-   * 只要队列里还有没跳过的脸，跳过的就不会再被摆到眼前。
+   * 跳过**不写库**（永久排除是「陌生人」，那是另一件事），只在本次会话里
+   * 让这些脸排到所有没跳过的之后。
+   *
+   * 与旧实现的差别：旧的是"取回来之后再本地重排到数组末尾"，于是只要队首
+   * 恰好全是被跳过的脸，就得**串行再拉一页**，一路拉下去（实测一次点击
+   * 11 页 = 3 秒多）；现在这份集合直接作为 `excludeFaceCodes` 发给服务端，
+   * 由它一次扫描就排除掉，本地永远只拿"干净"的 20 条。
    * ⚠️ 会话级（不写库、不进 localStorage）：刷新页面即恢复原序 ——
    *    这是有意的，跳过是"这一轮先放一放"，不是永久决定（永久排除是陌生人）。
    */
@@ -96,7 +113,14 @@ export const useReviewStore = defineStore('review', () => {
   const hasBadge = computed(() => badgeTotal.value > 0)
 
   const current = computed(() => pendingItems.value[cursor.value] || null)
-  const remaining = computed(() => Math.max(0, pendingTotal.value - doneCount.value))
+  /**
+   * 队列里还剩多少条待确认。
+   * ⚠️ 直接等于服务端计数，**不再减 doneCount**：旧写法
+   *    `pendingTotal - doneCount` 里 pendingTotal 是"上次取页时的总数"，
+   *    而现在每次写操作响应都带回**新总数**（`_counts()`），再减一次就是
+   *    双重扣减（用户会看到剩余数一次掉 2）。doneCount 只用于「本次已处理」文案。
+   */
+  const remaining = computed(() => Math.max(0, pendingTotal.value))
 
   /** 角标取值（接口还没接上时为 0，侧栏显示「0」而不是隐藏按钮） */
   function badgeOf(tabName) {
@@ -116,70 +140,100 @@ export const useReviewStore = defineStore('review', () => {
     return data
   }
 
-  async function fetchPending({ reset = false } = {}) {
+  /**
+   * 取一页待确认（`reset` = 丢弃本地缓冲、从头取）。
+   *
+   * 与旧实现的根本差别：**排除集交给服务端**，不再"取回来再本地重排 + 串行补页"。
+   * 排除集 = 本会话跳过的脸 + 手上已加载但还没处理的脸。
+   *
+   * 为什么排除集里要带上"已加载的"
+   * ------------------------------
+   *   服务端的 offset 作用在**排除之后**的结果流上。用户处理/跳过几条后，
+   *   同一页码的内容已经变了（前面几条离队了），照旧递增 page 必然重/漏。
+   *   固定 page=1 + 排除"我手上已有的"，拿到的永远是**紧接在本地缓冲之后
+   *   的那一段** —— 不重不漏，也不依赖 offset 的语义。
+   *
+   * ⚠️ 「还有没有下一页」看响应的 `exhausted`（或 `scanCapped`），
+   *    不看 `items.length < total`：有排除集时后者永远成立，会无限翻页。
+   */
+  async function fetchPending({ reset = false, silent = false } = {}) {
     if (reset) {
       pendingPage.value = 1
       cursor.value = 0
+      pendingExhausted.value = false
+    } else if (pendingExhausted.value || pendingFetching.value) {
+      return null
     }
-    pendingLoading.value = true
+    if (!silent) pendingLoading.value = true
+    pendingFetching.value = true
     try {
-      const data = await getPending({ page: pendingPage.value, size: PENDING_PAGE_SIZE, topN: 5 })
+      const data = await getPending({
+        page: 1,
+        size: PENDING_PAGE_SIZE,
+        topN: 5,
+        // reset 时旧缓冲已作废，不能把它算进排除集（否则会把要取的都排除掉）
+        excludeFaceCodes: reset ? [...deferredCodes.value] : exclusionCodes(),
+      })
       const list = data?.items ?? []
       pendingItems.value = reset ? list : [...pendingItems.value, ...list]
-      pendingTotal.value = data?.total ?? 0
-      applyDeferOrder()
-      // 重取后 page 1 的头几条可能正是"跳过的" —— 先把后续页拉进来，
-      // 保证游标处出现的永远是"没跳过"的脸（否则改判一次就又看到它）
-      if (reset) await loadUntilFresh()
+      pendingTotal.value = Number(data?.total ?? pendingTotal.value) || 0
+      pendingExhausted.value = Boolean(data?.exhausted || data?.scanCapped)
       return data
     } finally {
       pendingLoading.value = false
+      pendingFetching.value = false
     }
   }
 
-  /**
-   * 把「已跳过」的条目稳定地挪到**已加载列表的最后**。
-   *
-   * ⚠️ 必须**稳定**（同组内相对顺序不变）：服务器页是按 quality DESC 分页的，
-   *    打乱同组顺序 = "翻页时条目在眼前挪位"，那是分页最忌讳的
-   *    （见 processor/review/queue.py 里 pendingQueue 的设计约束）。
-   * ⚠️ 只能**重排**、不能**过滤**：`pendingItems.length < pendingTotal`
-   *    是"服务器还有下一页"的判据；一旦把跳过的条目从数组里删掉，
-   *    这个判据就失真（会提前停止翻页 / 漏掉没跳过的脸）。
-   */
-  function applyDeferOrder() {
-    if (!deferredSet.value.size) return
-    const fresh = []
-    const deferred = []
+  /** 发给服务端的排除集：跳过的 + 手上已加载的（后者可能被"排除后重取"再拿一次）。 */
+  function exclusionCodes() {
+    const codes = new Set(deferredCodes.value)
     for (const item of pendingItems.value) {
-      (deferredSet.value.has(item.faceCode) ? deferred : fresh).push(item)
+      if (item?.faceCode) codes.add(item.faceCode)
     }
-    pendingItems.value = [...fresh, ...deferred]
+    return [...codes]
   }
 
   /**
-   * 保证游标处是一条「没跳过」的脸；否则把服务器后续页拉进来。
+   * 低水位补货：本地缓冲快见底时**后台静默**补一页。
    *
-   * 服务器也拉完了就收尾：若游标处剩下的确实只有"跳过的"，
-   * 把游标推到末尾（视为本轮清空）—— 否则按一次「跳过」会立刻又看到它，
-   * 那正是要修的问题。收尾后 UI 会给出「重新显示已跳过的 N 条」入口。
+   * 为什么不 await 在点击路径里：用户要的是"点完立刻看到下一条"。
+   * 补页是后台事 —— 成功就多 20 条，失败手上还有几条顶着，下次动作会再试。
    */
-  async function loadUntilFresh() {
-    for (;;) {
-      const at = pendingItems.value[cursor.value]
-      if (at && !deferredSet.value.has(at.faceCode)) return
-      if (pendingItems.value.length >= pendingTotal.value) {
-        if (at) cursor.value = pendingItems.value.length
-        return
-      }
-      const before = pendingItems.value.length
-      pendingPage.value += 1
-      await fetchPending()
-      if (pendingItems.value.length <= before) {
-        // 防御：页面没长进就别死循环（例如 total 与实际行数不一致）
-        if (at) cursor.value = pendingItems.value.length
-        return
-      }
+  async function ensureBuffer() {
+    if (pendingExhausted.value) return
+    if (pendingItems.value.length - cursor.value > PENDING_LOW_WATER) return
+    try {
+      await fetchPending({ silent: true })
+    } catch (e) {
+      // 补页失败不该打断正在逐条处理的用户
+      console.warn('[review] 静默补页失败：', e?.message || e)
+    }
+  }
+
+  /**
+   * 把已经离队（或已跳过）的几条从本地缓冲里摘掉；**游标不动 = 自动前进**。
+   *
+   * 为什么不再整队重取：这些脸在服务端已经离队（assign/stranger 都改了归属），
+   * 本地摘掉与"重新取 page 1"得到的结果等价，代价却从「1 次写 + N 次读」
+   * 降到「1 次写」。旧链路实测一次点击要**串行取 11 页**（plan 里有日志证据）。
+   */
+  function dropLocal(codes, { countAsDone = true } = {}) {
+    const gone = new Set((codes || []).filter(Boolean))
+    if (!gone.size) return
+    const before = pendingItems.value.length
+    pendingItems.value = pendingItems.value.filter((item) => !gone.has(item?.faceCode))
+    const removed = before - pendingItems.value.length
+    if (countAsDone) doneCount.value += removed
+    // 游标不动：被摘掉的正是它指向的那条，后面的自然顶上。
+    // 只有"摘到比游标还靠前/摘空了"才需要夹住，避免 current 变成 undefined 而不自知。
+    if (cursor.value > pendingItems.value.length) cursor.value = pendingItems.value.length
+  }
+
+  /** 写接口回带的 pendingCount 就是队列的最新总数，顺手同步给进度文案 */
+  function syncPendingTotal(data) {
+    if (data?.pendingCount !== undefined) {
+      pendingTotal.value = Math.max(0, Number(data.pendingCount) || 0)
     }
   }
 
@@ -284,18 +338,15 @@ export const useReviewStore = defineStore('review', () => {
 
   const currentCandidates = computed(() => decorateCandidates(current.value?.topCandidates))
 
-  /** 队列到底了就再取一页（不重置 cursor，否则会跳回队首） */
-  async function advance() {
-    cursor.value += 1
-    doneCount.value += 1
-    await loadUntilFresh()
-  }
-
   /**
    * 确认当前这张脸属于某人（Tab1 的主动作）。
    * 走 PUT /review/{faceCode}/assign —— 幂等，重复点不会写坏。
    * 响应里带回该人的 photoCount/faceCount（**照片数立即更新**，验收第 5 条）
    * 与两个角标，所以不需要再拉一次。
+   *
+   * ⚠️ 确认后**只做本地前进**，不再 `fetchPending({reset:true})`：
+   *    这张脸已经在服务端离队，重取整队得到的结果和"本地摘掉它"等价，
+   *    而重取要付一次完整取页（旧链路上还要连带串行补页）。
    */
   async function confirmCandidate(candidate) {
     const face = current.value
@@ -304,8 +355,9 @@ export const useReviewStore = defineStore('review', () => {
     try {
       const data = await assignFace(face.faceCode, { personCode: candidate.personCode })
       applyCounts(data)
-      pendingTotal.value = Math.max(0, pendingTotal.value - 1)
-      await advance()
+      syncPendingTotal(data)
+      dropLocal([face.faceCode])
+      await ensureBuffer()
       return data
     } finally {
       busyFaceCode.value = ''
@@ -316,17 +368,16 @@ export const useReviewStore = defineStore('review', () => {
    * 跳过：**把这一条排到队列最后**（不是"不看了"——它仍在待确认里，
    * 只是排到所有没跳过的脸之后）。只改前端会话状态，**不写库**。
    *
-   * 与旧实现的差别：旧的就是"游标 +1"，队列一重取（改判 / 批量确认 /
-   * 离开再回来）跳过的脸又会冒到最前面。现在每次重排后游标不动 =
-   * 自动落到下一条，被跳过的已沉到已加载列表末尾。
+   * 实现：把 faceCode 记进排除集 -> 立刻从本地缓冲摘掉（= 看到下一条）-> 低水位补货。
+   * 排除集随下一次取页发给服务端，所以刚跳过的脸不会再被摆到眼前。
    */
   async function skip() {
     const face = current.value
     if (face?.faceCode) {
       if (!deferredSet.value.has(face.faceCode)) deferredCodes.value.push(face.faceCode)
-      applyDeferOrder()
+      dropLocal([face.faceCode], { countAsDone: false })
     }
-    await loadUntilFresh()
+    await ensureBuffer()
     return null
   }
 
@@ -346,16 +397,30 @@ export const useReviewStore = defineStore('review', () => {
   /**
    * 改判（唯一纠错入口）。三种 action 共用。
    * ⚠️ stranger 永久排除该脸，调用方必须已做二次确认。
-   * 成功后：两个角标从响应里更新 + 队列重取（被改判的那几条已经离队）
+   * 成功后：两个角标与队列总数从响应里更新 + **本地前进**（不再整队重取）。
+   *
+   * `withCentroid: 0` —— 响应里那段「新旧两人的全部质心桶」是排障用的明细，
+   * 界面从不读它，却要为每个人物查一次质心全表；逐条处理时必须关掉。
    */
   async function fix(action, faceCodes, personCode) {
     const codes = Array.isArray(faceCodes) ? faceCodes : [faceCodes].filter(Boolean)
     if (!codes.length) return null
-    const data = await fixFace({ action, faceCodes: codes, personCode })
+    const data = await fixFace(
+      { action, faceCodes: codes, personCode },
+      { withCentroid: 0 },
+    )
     applyCounts(data)
+    syncPendingTotal(data)
     if (activeTab.value === 'disputed') await fetchDisputed({ reset: true })
-    // 队列里被改判的那几条已离队：重取当前页，cursor 停在原处 = 自动前进到下一条
-    await fetchPending({ reset: true })
+    if (action === 'unknown') {
+      // 退回待确认：这些脸**回到队列**了，本地缓冲里没有它们 ——
+      // 不重取整队，下次补页（或用户重新进入页面）自然会带上。
+      pendingExhausted.value = false
+    } else {
+      // assign / stranger：已离队 -> 本地摘掉，游标不动 = 自动前进到下一条
+      dropLocal(codes)
+    }
+    await ensureBuffer()
     return data
   }
 
@@ -466,13 +531,13 @@ export const useReviewStore = defineStore('review', () => {
     if (!codes.length || !personCode) return null
     const data = await batchAssign({ faceCodes: codes, personCode })
     applyCounts(data)
-    const assigned = Number(data?.assigned) || 0
-    pendingTotal.value = Math.max(0, pendingTotal.value - assigned)
-    doneCount.value += assigned
+    syncPendingTotal(data)
+    // 整簇离队：本地摘掉即可（不再整队重取）。簇里可能有尚未加载的脸，
+    // 那些本来就不在本地缓冲里，摘不到也不影响。
+    dropLocal(codes)
     clusterMembers.value = []
     clusterCode.value = ''
-    await fetchPending({ reset: true })
-    cursor.value = 0
+    await ensureBuffer()
     return data
   }
 
@@ -553,6 +618,7 @@ export const useReviewStore = defineStore('review', () => {
     pendingPage,
     cursor,
     pendingLoading,
+    pendingExhausted,
     busyFaceCode,
     deferredCodes,
     deferredCount,
@@ -582,7 +648,6 @@ export const useReviewStore = defineStore('review', () => {
     ensurePersonDirectory,
     searchPersons,
     decorateCandidates,
-    advance,
     confirmCandidate,
     skip,
     showDeferred,

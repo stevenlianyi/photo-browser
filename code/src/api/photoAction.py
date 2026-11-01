@@ -143,6 +143,8 @@ def softDelete(photoCode: str,
         raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
 
     from processor.review import queue as reviewQueue
+    # 级联软删了这张照片的人脸 -> 人物卡（头像兜底用的是已确认样本）与质心可能变
+    reviewQueue.invalidateCaches()
     after = reviewQueue.countStates()
     return dto.okBody(executed=True, **result,
                       pendingCount=int(after.get("pending") or 0),
@@ -157,6 +159,7 @@ def restore(photoCode: str) -> dict:
     except photoAct.PhotoActionError as e:
         raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
     from processor.review import queue as reviewQueue
+    reviewQueue.invalidateCaches()
     after = reviewQueue.countStates()
     return dto.okBody(executed=True, **result,
                       pendingCount=int(after.get("pending") or 0),

@@ -359,6 +359,20 @@ def listContacts(page: int = Query(default=1, ge=1),
 # 三、POST /api/contacts（界面新建手工档案）
 # ============================================================
 
+def _invalidateReviewCaches(reason: str = ""):
+    """人物档案变了 -> 让待确认队列的「人物卡 / 质心索引」缓存立即作废。
+
+    ⚠️ 成对纪律：queue.personCards() 提供候选人**姓名与头像兜底**，
+       它按进程缓存（TTL 30s 只是兜底）。新建/改名/停用/启用人之后不调这里，
+       界面会继续显示旧名字（或刚建的人**压根不出现在候选里**）最长 30 秒 ——
+       用户会得出「保存没生效」的结论，然后又点一次。
+    """
+    from processor.review import queue as reviewQueue
+    reviewQueue.invalidateCaches()
+    if reason:
+        _LOG.debug("invalidateReviewCaches(%s)", reason)
+
+
 @router.post("/contacts", summary="界面新建手工联系人（source=0、vcardUid 空）")
 def createContact(body: dto.ContactCreateBody) -> JSONResponse:
     """新建一个**手工档案**。
@@ -444,6 +458,7 @@ def createContact(body: dto.ContactCreateBody) -> JSONResponse:
 
     _LOG.info("新建联系人 %s（%s，source=%d）", personCode, displayName,
               comGD.PERSON_SOURCE_MANUAL)
+    _invalidateReviewCaches("createContact")
     return JSONResponse(status_code=201,
                         content=dto.okBody(personCode=personCode,
                                            displayName=displayName,
@@ -629,6 +644,7 @@ def patchContact(personCode: str, body: dto.ContactPatchBody) -> dict:
                                coverFaceCode=browse.personCoversOf([fresh]).get(code))
     out["vcardUid"] = fresh.get("vcardUid") or None
     out["categories"] = stats.get("categories") or browse.categoriesOf(code)
+    _invalidateReviewCaches("updateContact")
     return dto.okBody(personCode=code, changedFields=sorted(given.keys()),
                       birthdayChanged=bool(birthdayChanged),
                       # ⚠️ 只有真的重算了才是 true；纯资料改动这里是 false
@@ -701,6 +717,7 @@ def disableContact(personCode: str,
         raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
 
     from processor.review import queue as reviewQueue
+    reviewQueue.invalidateCaches()
     after = reviewQueue.countStates()
     from engine.match import centroid as centroidMod
     centroidRows = sqliteCommon.query_pb_person_centroid(
@@ -735,6 +752,7 @@ def enableContact(personCode: str) -> dict:
         raise dto.ApiError(dto.CODE_PARAM_INVALID, str(e))
 
     from processor.review import queue as reviewQueue
+    reviewQueue.invalidateCaches()
     after = reviewQueue.countStates()
     return dto.okBody(executed=True, changed=bool(result.get("changed")),
                       personCode=code,
@@ -985,6 +1003,7 @@ async def importCsv(file: UploadFile = File(..., description="CSV 文件（.csv�
     _LOG.info("CSV 导入 %s：新建 %d 更新 %d 跳过 %d 失败 %d",
               planned.get("source"), len(created), len(updated),
               len(skipped), len(failed))
+    _invalidateReviewCaches("importCsv")
     return dto.okBody(
         dryRun=False, written=True, file=planned.get("source"),
         createCount=len(created), updateCount=len(updated),
@@ -1099,6 +1118,7 @@ async def importVcard(file: UploadFile = File(...,
               planned.get("source"), len(created), len(updated),
               len(skipped), len(failed), len(families),
               len(summary.get("avatars") or []))
+    _invalidateReviewCaches("importVcard")
     return dto.okBody(
         dryRun=False, written=True, kind="vcard", file=planned.get("source"),
         fileCount=len(files),

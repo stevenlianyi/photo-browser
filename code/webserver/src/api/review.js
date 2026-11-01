@@ -12,9 +12,21 @@
  */
 import request from './request'
 
-/** 待确认队列（含 Top-5 候选，按相似度降序） */
+/**
+ * 待确认队列（含 Top-5 候选，按相似度降序）。
+ *
+ * `excludeFaceCodes` 可以传数组，这里转成逗号串（axios 会把数组序列化成
+ * `a[]=1&a[]=2`，FastAPI 那侧收不到）。
+ * 响应里的 `exhausted` 才是"还有没有下一页"的判据（见 store/review.js）。
+ */
 export function getPending(params = {}) {
-  return request.get('/review/pending', { params })
+  const query = { ...params }
+  if (Array.isArray(query.excludeFaceCodes)) {
+    query.excludeFaceCodes = query.excludeFaceCodes.filter(Boolean).join(',')
+  }
+  // 空串会被后端当作"没有排除集"，这里干脆不发，省一个参数
+  if (!query.excludeFaceCodes) delete query.excludeFaceCodes
+  return request.get('/review/pending', { params: query })
 }
 
 /** 「我不同意」列表：按照片分组，支持整张否决 */
@@ -52,8 +64,8 @@ export function batchAssign(body) {
  * action ∈ assign（改判到某人）/ unknown（置为未知）/ stranger（标记陌生人）
  * ⚠️ stranger 永久排除该脸，前端必须二次确认
  */
-export function fixFace(body) {
-  return request.post('/review/fix', body)
+export function fixFace(body, params = {}) {
+  return request.post('/review/fix', body, { params })
 }
 
 /** 同一簇批量改判（一次点击解决 N 张） */
