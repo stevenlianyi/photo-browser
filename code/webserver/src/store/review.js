@@ -56,9 +56,13 @@ const PENDING_LOW_WATER = 5
  *    与其让它被动失效，不如本地就按 FIFO 截断 —— 行为可预期、可解释。
  * ⚠️ 键名带 `.v1`：结构将来若要变（比如加过期时间），换键名等于自然作废旧数据，
  *    不会读到半新半旧的结构。
+ * ⚠️ 另一个上限约束来自 **URL 长度**：跳过集是放在 GET query 里的
+ *    （faceCode 32 字符 + 逗号 = 33 字节/条）。500 条 ≈ 16.5KB，已经踩到
+ *    h11 默认的 16KB 请求头上限（超了直接 431/断连，前端只看到"补页失败"）。
+ *    所以本地只留 **300** 条（≈10KB），留足余量。
  */
 const DEFERRED_STORAGE_KEY = 'pb.review.deferred.v1'
-const DEFERRED_MAX = 500
+const DEFERRED_MAX = 300
 
 /** localStorage 在 Node（校验脚本）/ 隐私模式下可能不存在或抛异常，全部兜住 */
 function readDeferredCodes() {
@@ -108,7 +112,13 @@ export const useReviewStore = defineStore('review', () => {
   /** 当前处理到第几条（0 起）。确认/跳过会把该条从本地摘掉，游标不动 = 自动前进 */
   const cursor = ref(0)
   const pendingLoading = ref(false)
-  /** 服务端说「没有更多了」（exhausted / scanCapped）——避免空翻 */
+  /**
+   * 续取游标 `{quality, recID}`：上一页最后一条的排序键，补页时原样发回去。
+   * 为什么不是"排除手里已有的"：排除集有 500 条上限，跳过多了就会开始重复
+   * （详见 `fetchPending()` 的注释）。
+   */
+  const pendingAfter = ref(null)
+  /** 服务端说「没有更多了」——避免空翻 */
   const pendingExhausted = ref(false)
   /** 后台补页是否在飞（防并发重复补页） */
   const pendingFetching = ref(false)
@@ -191,64 +201,75 @@ export const useReviewStore = defineStore('review', () => {
   }
 
   /**
-   * 取一页待确认（`reset` = 丢弃本地缓冲、从头取）。
+   * 取一页待确认。两条路径，**不要混用**：
    *
-   * 与旧实现的根本差别：**排除集交给服务端**，不再"取回来再本地重排 + 串行补页"。
-   * 排除集 = 本会话跳过的脸 + 手上已加载但还没处理的脸。
+   *   reset / 队首（首屏、刷新、「重新显示已跳过的」）：page=1 + 把**跳过集**发去排除；
+   *   补页（低水位）：带 `afterQuality / afterRecID` 游标，服务端只返回**严格排在它之后**的行。
    *
-   * 为什么排除集里要带上"已加载的"
-   * ------------------------------
-   *   服务端的 offset 作用在**排除之后**的结果流上。用户处理/跳过几条后，
-   *   同一页码的内容已经变了（前面几条离队了），照旧递增 page 必然重/漏。
-   *   固定 page=1 + 排除"我手上已有的"，拿到的永远是**紧接在本地缓冲之后
-   *   的那一段** —— 不重不漏，也不依赖 offset 的语义。
+   * 为什么补页必须用游标（R17b 的教训，实测复现过）
+   * --------------------------------------------
+   *   旧实现是"把手上已有的脸也一并发去排除"，靠这个保证不重复。
+   *   但排除集有 500 条上限：跳过积累到几百条后，缓冲被挤出排除集，
+   *   服务端把同一批 20 张原样返回 —— 用户就**一直在那 20 张里循环**。
+   *   游标只要一个 (quality, recID)，与跳过多少条无关，天然不重不漏。
    *
-   * ⚠️ 「还有没有下一页」看响应的 `exhausted`（或 `scanCapped`），
-   *    不看 `items.length < total`：有排除集时后者永远成立，会无限翻页。
+   * ⚠️ 「还有没有下一页」看 `exhausted`，不看 `items.length < total`
+   *    （有排除集时后者永远成立，会无限翻页）。`scanCapped` 只表示
+   *    "这次扫到上限先停、游标已推进"，**不是**到头了。
    */
   async function fetchPending({ reset = false, silent = false } = {}) {
     if (reset) {
       pendingPage.value = 1
       cursor.value = 0
       pendingExhausted.value = false
+      pendingAfter.value = null
     } else if (pendingExhausted.value || pendingFetching.value) {
       return null
     }
     if (!silent) pendingLoading.value = true
     pendingFetching.value = true
     try {
-      const data = await getPending({
+      const params = {
         page: 1,
         size: PENDING_PAGE_SIZE,
         topN: 5,
-        // reset 时旧缓冲已作废，不能把它算进排除集（否则会把要取的都排除掉）
-        excludeFaceCodes: reset ? [...deferredCodes.value] : exclusionCodes(),
-        // 只把"跳过的"报给服务端算剩余 —— "手里已有的"也是排除，
-        // 但那些脸还没处理，不能从"还要处理多少条"里扣掉
+        // 只为算「剩余」：跳过的脸不用人再处理了（手里已有的不算，见后端说明）
         skippedFaceCodes: [...deferredCodes.value],
-      })
+      }
+      if (pendingAfter.value) {
+        params.afterQuality = pendingAfter.value.quality
+        params.afterRecID = pendingAfter.value.recID
+      } else {
+        // 队首取页：把跳过集排除掉，否则刚跳过的脸立刻又冒出来
+        params.excludeFaceCodes = [...deferredCodes.value]
+      }
+      const data = await getPending(params)
       const list = data?.items ?? []
-      pendingItems.value = reset ? list : [...pendingItems.value, ...list]
+      if (reset) {
+        pendingItems.value = list
+      } else {
+        // 去重是**防御**：正常游标不会给重复，但一旦给了，本地就会出现
+        // 同一张脸的两张卡（跳过一张还有一张顶着）——那正是本次要修的体感 bug
+        const seen = new Set(pendingItems.value.map((one) => one?.faceCode))
+        const fresh = list.filter((one) => one?.faceCode && !seen.has(one.faceCode))
+        pendingItems.value = [...pendingItems.value, ...fresh]
+      }
       pendingTotal.value = Number(data?.total ?? pendingTotal.value) || 0
       // 「剩余」由服务端给（总数 - 跳过里仍待确认的）：
-      // 前端自己算的话得知道"我发过去的哪些其实已经不在队列里"，那是瞎猜。
+      // 前端自己算得知道"发过去的哪些其实已经不在队列里"，那是瞎猜。
       pendingRemaining.value = Number(data?.remaining ?? pendingTotal.value) || 0
       deferredPending.value = Number(data?.excludedPending ?? 0) || 0
-      pendingExhausted.value = Boolean(data?.exhausted || data?.scanCapped)
+      pendingAfter.value = data?.nextRecID === null || data?.nextRecID === undefined
+        ? null
+        : { quality: data.nextQuality, recID: data.nextRecID }
+      // 扫到上限但游标也没推进 => 再问也是同一段，按"到头"处理，免得空转
+      pendingExhausted.value = Boolean(data?.exhausted)
+        || (Boolean(data?.scanCapped) && !pendingAfter.value)
       return data
     } finally {
       pendingLoading.value = false
       pendingFetching.value = false
     }
-  }
-
-  /** 发给服务端的排除集：跳过的 + 手上已加载的（后者可能被"排除后重取"再拿一次）。 */
-  function exclusionCodes() {
-    const codes = new Set(deferredCodes.value)
-    for (const item of pendingItems.value) {
-      if (item?.faceCode) codes.add(item.faceCode)
-    }
-    return [...codes]
   }
 
   /**
@@ -438,9 +459,10 @@ export const useReviewStore = defineStore('review', () => {
     const face = current.value
     if (face?.faceCode) {
       if (!deferredSet.value.has(face.faceCode)) {
-        deferredCodes.value.push(face.faceCode)
-        // 超出上限时由 writeDeferredCodes 从头部截断（FIFO）：
-        // 最先跳过的先回来，与"这一轮先放一放"的语义一致
+        // ⚠️ 内存里也必须截断，不能只截存储：这份集合会被拼进 GET query，
+        //    无限增长会让 URL 撞上 h11 的 16KB 请求头上限（超了直接失败，
+        //    前端只看到"补页没反应"）。FIFO：最先跳过的先回来。
+        deferredCodes.value = [...deferredCodes.value, face.faceCode].slice(-DEFERRED_MAX)
         writeDeferredCodes(deferredCodes.value)
       }
       deferredPending.value = Math.min(deferredCodes.value.length, deferredPending.value + 1)

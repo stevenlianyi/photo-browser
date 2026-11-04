@@ -369,7 +369,8 @@ def _candidateDict(one: matcher.Candidate, cards: dict) -> dict:
 def iterPendingRows(pageRows: int = None, offset: int = 0,
                     orderBy: str = None, descFlag: bool = False,
                     photoCode: str = "", excludeCodes=None,
-                    scanRowsMax: int = None, stats: dict = None):
+                    scanRowsMax: int = None, stats: dict = None,
+                    after: tuple = None):
     """**逐页吐出**待确认队列的原始行（mode=full：要带 embedding 给 matcher 用）。
 
     orderBy 缺省 recID —— 但那只是"稳定"，不是"有��先级"（见 pendingQueue 的说明）。
@@ -413,12 +414,19 @@ def iterPendingRows(pageRows: int = None, offset: int = 0,
     maxScan = int(scanRowsMax if scanRowsMax is not None else PENDING_SCAN_ROWS_MAX)
     scanned = 0
     while True:
-        recIds = _pendingRecIds(pageRows=step, offset=at, orderBy=orderBy,
-                                descFlag=descFlag, photoCode=photoCode)
-        if not recIds:
+        batch = _pendingRecIds(pageRows=step, offset=(0 if after is not None else at),
+                               orderBy=orderBy, descFlag=descFlag,
+                               photoCode=photoCode, after=after)
+        if not batch:
             if stats is not None:
                 stats["exhausted"] = True
             return
+        recIds = [one[0] for one in batch]
+        if after is not None:
+            # 游标模式：本批扫完后从"这批的最后一条"往后接着扫（不是靠 offset）
+            after = batch[-1]
+            if stats is not None:
+                stats["after"] = after
         scanned += len(recIds)
         if stats is not None:
             stats["scanned"] = scanned
@@ -453,8 +461,9 @@ def _chunks(items: list, size: int):
 
 
 def _pendingRecIds(pageRows: int, offset: int = 0, orderBy: str = None,
-                   descFlag: bool = False, photoCode: str = "") -> list:
-    """待确认队列按**排序键**取一批 recID（瘦查询）。
+                   descFlag: bool = False, photoCode: str = "",
+                   after: tuple = None) -> list:
+    """待确认队列按**排序键**取一批 ``(recID, 排序键值)``（瘦查询）。
 
     为什么先取 recID、再单独回表（R17b）
     -----------------------------------
@@ -475,15 +484,38 @@ def _pendingRecIds(pageRows: int, offset: int = 0, orderBy: str = None,
     ⚠️ 缺省排序键是 `basicSettings.QUEUE_ORDER_BY`（= quality），**不是** recID：
        分页键的选择在 pendingQueue 的文档里写死了（similarity 是算出来的、
        不能当分页键），这里必须与它一致，否则「缺省窗口」的语义会悄悄换掉。
+
+    after（游标续取，R17b 修「跳过一会儿就循环」）
+    --------------------------------------------
+      `after=(排序键值, recID)` = "只要严格排在这条之后的行"。
+      为什么必须有它：前端补页原先靠"把我手上已有的脸都发给服务端排除"，
+      而排除集有 500 条上限 —— 跳过超过几百条之后，缓冲被挤出排除集，
+      服务端把同一批 20 张又返回一遍，用户就**一直在那 20 张里循环**（实测复现）。
+      换成游标后，请求里只需要一个 (quality, recID) 二元组：
+      不重不漏，也不受"跳过多少条"影响。
     """
     field = str(orderBy or basicSettings.QUEUE_ORDER_BY)
     if field not in sqliteCommon.ORDER_FIELDS.get("pb_face", ()):
         field = "recID"
+    if after is not None and (not descFlag or field != str(basicSettings.QUEUE_ORDER_BY)):
+        raise ValueError("游标续取只支持按 %s 降序（收到 orderBy=%r descFlag=%r）"
+                         % (basicSettings.QUEUE_ORDER_BY, orderBy, descFlag))
     where = WHERE_PENDING
     values = [0, comGD.DEL_FLAG_NO]
     if photoCode:
         where += " AND photoCode = %s"
         values.append(str(photoCode))
+    if after is not None:
+        # ⚠️ 必须 NULL 安全：`quality` 可空，而 SQLite 里 NULL 比任何数值都小，
+        #    DESC 排序时排在**最后**。只写 `quality < %s` 会把这批行整段漏掉
+        #    （不报错，表现为"队列莫名少了几条"）。
+        where += (" AND ((" + field + " IS NOT NULL AND " + field + " < %s)"
+                  " OR (" + field + " IS NULL AND %s IS NOT NULL)"
+                  " OR (" + field + " = %s AND recID > %s)"
+                  " OR (" + field + " IS NULL AND %s IS NULL AND recID > %s))")
+        cursorValue, cursorRecId = after[0], int(after[1])
+        values += [cursorValue, cursorValue, cursorValue, cursorRecId,
+                   cursorValue, cursorRecId]
     # ⚠️ 并列值必须有**写死的**兜底顺序（recID ASC）。
     #    不写的话，兜底顺序就成了"优化器/扫描方向说了算"：
     #    同一批 quality 相同的脸，走覆盖索引反向扫描是 recID DESC，
@@ -493,13 +525,13 @@ def _pendingRecIds(pageRows: int, offset: int = 0, orderBy: str = None,
     order = field + (" DESC" if descFlag else "")
     if field != "recID":
         order += ", recID ASC"
-    sql = ("SELECT recID AS recID FROM pb_face WHERE " + where
+    sql = ("SELECT recID AS recID, " + field + " AS " + field + " FROM pb_face WHERE " + where
            + " ORDER BY " + order + " LIMIT %s OFFSET %s")
     values += [int(pageRows), int(offset or 0)]
     out = []
     for row in query.selectList(sql, tuple(values)):
         try:
-            out.append(int(row.get("recID")))
+            out.append((int(row.get("recID")), row.get(field)))
         except (TypeError, ValueError):
             continue
     return out
@@ -660,11 +692,15 @@ def pendingWindow(limit: int = 0, offset: int = 0, topN: int = None,
                   preset: str = None, matrix=None, index=None,
                   withCandidates: bool = True, orderBy: str = None,
                   descFlag: bool = True, excludeCodes=None,
-                  scanRowsMax: int = None) -> dict:
+                  scanRowsMax: int = None, after: tuple = None) -> dict:
     """取一个待确认窗口，并**告诉调用方扫到哪了**：
 
     {"items": [...], "exhausted": bool, "scanCapped": bool,
-     "scanned": int, "excludeCount": int}
+     "scanned": int, "excludeCount": int, "after": (排序键值, recID) | None}
+
+    `after` 是**续取游标**：把下一批请求的 `after` 原样传回来即可接着往下取，
+    不重不漏（见 _pendingRecIds 里那段"跳过一会儿就循环"的说明）。
+    前端只认这个游标，不要再靠"排除手里已有的脸"来续页 —— 那条路有 500 条上限。
 
     为什么需要这个返回值（而不是继续用 total 比较）
     ----------------------------------------------
@@ -687,18 +723,31 @@ def pendingWindow(limit: int = 0, offset: int = 0, topN: int = None,
     rows = []
     for row in iterPendingRows(orderBy=orderBy or basicSettings.QUEUE_ORDER_BY,
                                descFlag=descFlag, excludeCodes=exclude,
-                               scanRowsMax=scanRowsMax, stats=stats):
+                               scanRowsMax=scanRowsMax, stats=stats,
+                               after=after):
         rows.append(row)
         if need and len(rows) >= need:
             break
     window = (rows[start:start + cap] if cap else rows[start:])
     items = _scoreRows(window, topN, preset, matrix, index, withCandidates)
     items.sort(key=_queueOrder)
+    # 续取游标 = **真正交给前端的最后一条**的排序键。
+    # ⚠️ 不能拿 stats["after"]（那是"本批扫到的最后一条 recID"）：一批扫 2000 行、
+    #    只交出去 20 行时，用它会把中间的 1980 行整段跳过（丢条）。
+    # ⚠️ 但 rows 为空时（这一批全被排除、撞到扫描上限）只能退回 stats["after"]，
+    #    否则前端拿着同一个游标反复问同一段，又变成死循环。
+    nextAfter = None
+    if rows:
+        tail = rows[-1]
+        nextAfter = (tail.get("quality"), int(tail.get("recID") or 0))
+    elif stats.get("after"):
+        nextAfter = stats["after"]
     return {"items": items,
             "exhausted": bool(stats.get("exhausted")),
             "scanCapped": bool(stats.get("scanCapped")),
             "scanned": int(stats.get("scanned") or 0),
-            "excludeCount": len(exclude)}
+            "excludeCount": len(exclude),
+            "after": nextAfter}
 
 
 def _scoreRows(rows, topN, preset, matrix, index, withCandidates) -> list:

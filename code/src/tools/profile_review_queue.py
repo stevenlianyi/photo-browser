@@ -87,7 +87,23 @@ def _pendingPageSQL(limit=20, offset=200):
     """
     return ("SELECT recID FROM pb_face"
             " WHERE personCode IS NULL AND isStranger = 0 AND delFlag = '0'"
-            " ORDER BY quality DESC LIMIT %d OFFSET %d" % (int(limit), int(offset)))
+            " ORDER BY quality DESC, recID ASC LIMIT %d OFFSET %d"
+            % (int(limit), int(offset)))
+
+
+def _pendingCursorSQL(limit=20, quality=0.5, recId=1):
+    """复刻「游标续取」（补页走的那条）——R17b 修「跳过一会儿就循环」用的。
+
+    条件必须与 `queue._pendingRecIds(after=...)` 逐字一致（含 NULL 安全那四个分支）。
+    """
+    return ("SELECT recID FROM pb_face"
+            " WHERE personCode IS NULL AND isStranger = 0 AND delFlag = '0'"
+            " AND ((quality IS NOT NULL AND quality < %s)"
+            " OR (quality IS NULL AND %s IS NOT NULL)"
+            " OR (quality = %s AND recID > %s)"
+            " OR (quality IS NULL AND %s IS NULL AND recID > %s))"
+            " ORDER BY quality DESC, recID ASC LIMIT %d"
+            % (quality, quality, quality, int(recId), quality, int(recId), int(limit)))
 
 
 def _pendingPageSQLFull(limit=20, offset=200):
@@ -231,6 +247,10 @@ def profile(dbFile, repeats=3):
     sqlFull = _pendingPageSQLFull()
     ms, got = _timeIt("sqlFull", lambda: query.selectList(sqlFull, ()), repeats)
     rows.append(("SQL 旧: 整行(2KB×N)", "%.1f" % ms, "%d 行" % len(got)))
+
+    sqlCursor = _pendingCursorSQL()
+    ms, got = _timeIt("sqlCursor", lambda: query.selectList(sqlCursor, ()), repeats)
+    rows.append(("SQL 游标续取(补页)", "%.1f" % ms, "%d 行" % len(got)))
 
     print("库: %s" % os.path.abspath(dbFile))
     print("%-28s %-9s %s" % ("环节", "耗时(ms)", "备注"))

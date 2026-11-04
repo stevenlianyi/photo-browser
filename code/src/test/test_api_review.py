@@ -760,6 +760,39 @@ def test_pendingSkippedAffectsRemainingNotTotal(api_env):
     assert len(body2["items"]) == 2            # 8 条被排除，只剩 2 条可返回
 
 
+def test_pendingCursorWalksWholeQueueWithoutRepeat(api_env):
+    """游标续取：一路翻到底，不重不漏（R17b 修「跳过一会儿又开始循环」）。
+
+    ⚠️ 这条守的是"补页"的正确性：前端不再把手里已有的脸发去排除（那条路有
+       500 条上限，跳过多了服务端会把同一批 20 张原样返回），改用响应里的
+       `nextQuality / nextRecID` 作游标。游标错了的典型症状是"同一张脸反复出现"，
+       而那不会抛任何异常。
+    """
+    client = api_env["client"]
+    total = client.get("/api/review/pending", params={"size": 100}).json()["total"]
+
+    seen = []
+    params = {"size": 3}
+    for _ in range(20):                     # 防死循环（用例库只有 10 张脸）
+        body = client.get("/api/review/pending", params=params).json()
+        seen.extend(one["faceCode"] for one in body["items"])
+        if body["nextRecID"] is None or body["exhausted"]:
+            break
+        params = {"size": 3,
+                  "afterQuality": body["nextQuality"],
+                  "afterRecID": body["nextRecID"]}
+
+    assert len(seen) == len(set(seen)) == total      # 不重不漏
+    assert len(seen) == 10
+
+    # 只给一半游标 = 当没给（否则会从队首重来，表现是"翻着翻着跳回最前面"）
+    again = client.get("/api/review/pending",
+                       params={"size": 3, "afterQuality": 0.5}).json()
+    assert [one["faceCode"] for one in again["items"]] == \
+           [one["faceCode"] for one in client.get("/api/review/pending",
+                                                  params={"size": 3}).json()["items"]]
+
+
 def test_personCardsCacheInvalidatedByRename(api_env):
     """改名后人物卡**立刻**反映新名字（缓存要成对失效，不能等 TTL）。
 

@@ -162,7 +162,15 @@ def getPending(page: int = Query(default=1, ge=1),
                    description="上面那批里**真正属于「跳过」**的 faceCode（逗号分隔）。"
                                "只为算 `remaining`/`excludedPending` 用："
                                "「手里已有的」也是排除，但那些脸还没被处理，"
-                               "不能从「还要处理多少条」里扣掉")):
+                               "不能从「还要处理多少条」里扣掉"),
+               afterQuality: float = Query(
+                   default=None,
+                   description="续取游标：上一页最后一条的 quality。与 afterRecID 一起给，"
+                               "表示「只要严格排在这条之后的」——补页请用这个，"
+                               "不要再用 excludeFaceCodes 排除手里已有的（那条路有 500 条上限）"),
+               afterRecID: int = Query(
+                   default=None,
+                   description="续取游标：上一页最后一条的 recID（与 afterQuality 成对）")):
     """待确认队列 = `personCode IS NULL AND isStranger=0`。
 
     ⚠️ **分页键是 quality DESC**（queue.pendingQueue 里那条设计约束）：
@@ -191,6 +199,11 @@ def getPending(page: int = Query(default=1, ge=1),
     total = reviewQueue.countPending()
     excluded = _excludeCodesOf(excludeFaceCodes)
     skipped = _excludeCodesOf(skippedFaceCodes)
+    # 续取游标：两个参数**必须成对**（只给一个说明调用方拼错了，宁可当成没给，
+    # 否则会从队首重来一遍 —— 表现是"翻着翻着又回到最前面"）
+    after = None
+    if afterQuality is not None and afterRecID is not None:
+        after = (float(afterQuality), int(afterRecID))
 
     if clusterCode:
         members = reviewQueue.clusterMembers(str(clusterCode))
@@ -201,7 +214,8 @@ def getPending(page: int = Query(default=1, ge=1),
         _attachRotateDeg(items)      # DR-43：大图与人脸框一起转，见该函数注释
         body = dto.pageBody(items, p, s, min(len(codes), total))
         body.update(exhausted=True, scanCapped=False, excludeCount=len(excluded),
-                    skippedCount=len(skipped), excludedPending=0, remaining=int(total))
+                    skippedCount=len(skipped), excludedPending=0, remaining=int(total),
+                    nextQuality=None, nextRecID=None)
         return body
 
     if sortFirst:
@@ -211,7 +225,7 @@ def getPending(page: int = Query(default=1, ge=1),
     else:
         window = reviewQueue.pendingWindow(limit=s, offset=at, topN=topN,
                                            preset=preset,
-                                           excludeCodes=excluded)
+                                           excludeCodes=excluded, after=after)
         items = window["items"]
     # Top-N 候选按相似度**降序**（验收第 5 条）。matcher.rankCandidates 已经排过，
     # 这里再排一次是为了让「顺序正确」不依赖下游实现细节。
@@ -231,13 +245,18 @@ def getPending(page: int = Query(default=1, ge=1),
     #    前端把手里的缓冲也一并发过来排除（否则会重复取到同一条脸），
     #    但那些脸还没被处理，从"还要处理多少条"里扣掉就成了提前报喜。
     excludedPending = reviewQueue.countExcludedPending(skipped)
+    # 续取游标（成对回给前端，下次原样带回）：前端只靠它翻页，
+    # 不再靠"排除手里已有的脸"——那条路会随跳过数量撞上 500 条上限而开始重复。
+    nextAfter = window.get("after")
     body.update(exhausted=bool(window.get("exhausted")),
                 scanCapped=bool(window.get("scanCapped")),
                 excludeCount=int(window.get("excludeCount") or len(excluded)),
                 skippedCount=len(skipped),
                 excludedPending=int(excludedPending),
                 remaining=max(0, int(total) - int(excludedPending)),
-                scanned=int(window.get("scanned") or 0))
+                scanned=int(window.get("scanned") or 0),
+                nextQuality=(None if not nextAfter else nextAfter[0]),
+                nextRecID=(None if not nextAfter else int(nextAfter[1])))
     return body
 
 
